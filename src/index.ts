@@ -1079,6 +1079,26 @@ const algoMemoryPlugin = {
   // 配置已在注册时处理完成
 
   // 钩子
+  // message_received: 收到用户消息时捕获
+  api.on("message_received", async (event: { message?: { role?: string; content?: string } }, ctx: { sessionKey?: string }) => {
+    try {
+      // 只处理用户消息
+      if (event.message?.role !== 'user') return;
+      // 消息捕获由 agent_end 处理，这里只需要标记有新消息
+    } catch (err) {
+      log.error('[algo-memory] message_received 钩子错误:', err);
+    }
+  });
+
+  // before_message_write: 消息写入前（可修改消息）
+  api.on("before_message_write", async (event: { message?: { role?: string; content?: string } }, ctx: { sessionKey?: string }) => {
+    try {
+      // 可以在这里注入记忆内容
+    } catch (err) {
+      log.error('[algo-memory] before_message_write 钩子错误:', err);
+    }
+  });
+
   // before_agent_start: 召回记忆（用户发送消息后、agent 响应前）
   api.on("before_agent_start", async (event: { prompt?: string; messages?: unknown[]; agentId?: string }) => {
     try {
