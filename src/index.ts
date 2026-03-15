@@ -1078,64 +1078,8 @@ const algoMemoryPlugin = {
 
   // 配置已在注册时处理完成
 
-  // 钩子
-  // message_received: 收到用户消息时捕获
-  api.on("message_received", async (event: { message?: { role?: string; content?: string } }, ctx: { sessionKey?: string }) => {
-    try {
-      // 只处理用户消息
-      if (event.message?.role !== 'user') return;
-      // 消息捕获由 agent_end 处理，这里只需要标记有新消息
-    } catch (err) {
-      log.error('[algo-memory] message_received 钩子错误:', err);
-    }
-  });
-
-  // before_message_write: 消息写入前（可修改消息）
-  api.on("before_message_write", async (event: { message?: { role?: string; content?: string } }, ctx: { sessionKey?: string }) => {
-    try {
-      // 可以在这里注入记忆内容
-    } catch (err) {
-      log.error('[algo-memory] before_message_write 钩子错误:', err);
-    }
-  });
-
-  // before_agent_start: 召回记忆（用户发送消息后、agent 响应前）
-  api.on("before_agent_start", async (event: { prompt?: string; messages?: unknown[]; agentId?: string }) => {
-    try {
-      const agentId = event.agentId || 'default';
-      const messages = event.messages || [];
-      
-      // 从 messages 中获取用户最新消息作为查询
-      const userMsgs = (messages as any[]).filter((m: any) => m.role === 'user');
-      const lastUserMsg = userMsgs[userMsgs.length - 1];
-      
-      if (config.autoRecall && lastUserMsg) {
-        const query = lastUserMsg.content || '';
-        // 使用简化的配置检查
-        if (query.length >= 2) {
-          const recallResult = await plugin.recall(agentId, query);
-          if (recallResult.hasMemory && recallResult.memories.length > 0) {
-            const recallText = recallResult.memories.map(m => m.content).join('\n');
-            plugin.addSessionMemory(agentId, `[召回] ${recallText}`);
-            log.info(`[algo-memory] 自动召回: ${recallResult.memories.length} 条记忆`);
-          }
-        }
-      }
-    } catch (err) {
-      log.error('[algo-memory] before_agent_start 钩子错误:', err);
-    }
-  });
-
-  // agent_end: 存储记忆（agent 响应结束后）
-  api.on('agent_end', async (event: { messages?: unknown[]; agentId?: string }) => {
-    try {
-      const agentId = event.agentId || 'default';
-      const messages = event.messages || [];
-      if (config.autoCapture && messages.length > 0) await plugin.store(agentId, messages);
-    } catch (err) {
-      log.error('[algo-memory] agent_end 钩子错误:', err);
-    }
-  });
+  // 只注册核心工具，不使用自动钩子（避免兼容性问题）
+  // 用户可以通过手动调用工具来使用记忆功能
 
   // 注册服务生命周期
   api.registerService({
