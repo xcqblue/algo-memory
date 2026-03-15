@@ -1137,11 +1137,19 @@ const algoMemoryPlugin = {
     }
   });
 
-  api.onDeactivate(() => {
-    try {
-      plugin.close();
-    } catch (err) {
-      console.error('[algo-memory] onDeactivate 钩子错误:', err);
+  // 注册服务生命周期
+  api.registerService({
+    id: "algo-memory",
+    start: async () => {
+      log.info('[algo-memory] 服务已启动');
+    },
+    stop: async () => {
+      try {
+        plugin.close();
+        log.info('[algo-memory] 服务已停止');
+      } catch (err) {
+        log.error('[algo-memory] 服务停止错误:', err);
+      }
     }
   });
   
