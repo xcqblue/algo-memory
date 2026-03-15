@@ -1097,25 +1097,20 @@ const algoMemoryPlugin = {
   }
 
   // 钩子
-  // store 内部有精确查重（content_hash），不会重复存储
-  api.on('agent_end', async (_e: any, ctx: any) => {
+  // before_agent_start: 召回记忆（用户发送消息后、agent 响应前）
+  api.on("before_agent_start", async (event: { prompt?: string; messages?: unknown[]; agentId?: string }) => {
     try {
-      const sessionKey = ctx.sessionKey || 'default';
-      const messages = ctx.messages || [];
-      if (cfg.autoCapture && messages.length > 0) await plugin.store(sessionKey, messages);
-    } catch (err) {
-      log.error('[algo-memory] agent_end 钩子错误:', err);
-    }
-  });
-
-  api.onConversationTurn(async (messages: any[], sessionKey: string, _owner: string) => {
-    try {
-      const agentId = sessionKey || 'default';
-      if (cfg.autoCapture) await plugin.store(agentId, messages);
-      if (cfg.autoRecall) {
-        const userMsg = messages.find((m: any) => m.role === 'user');
-        if (userMsg && shouldRetrieve(userMsg.content || '', cfg.adaptiveRetrieval || DEFAULT_CONFIG.adaptiveRetrieval)) {
-          const recallResult = await plugin.recall(agentId, userMsg.content || '');
+      const agentId = event.agentId || 'default';
+      const messages = event.messages || [];
+      
+      // 从 messages 中获取用户最新消息作为查询
+      const userMsgs = (messages as any[]).filter((m: any) => m.role === 'user');
+      const lastUserMsg = userMsgs[userMsgs.length - 1];
+      
+      if (cfg.autoRecall && lastUserMsg) {
+        const query = lastUserMsg.content || '';
+        if (shouldRetrieve(query, cfg.adaptiveRetrieval || DEFAULT_CONFIG.adaptiveRetrieval)) {
+          const recallResult = await plugin.recall(agentId, query);
           if (recallResult.hasMemory && recallResult.memories.length > 0) {
             const recallText = recallResult.memories.map(m => m.content).join('\n');
             plugin.addSessionMemory(agentId, `[召回] ${recallText}`);
@@ -1124,7 +1119,18 @@ const algoMemoryPlugin = {
         }
       }
     } catch (err) {
-      log.error('[algo-memory] onConversationTurn 钩子错误:', err);
+      log.error('[algo-memory] before_agent_start 钩子错误:', err);
+    }
+  });
+
+  // agent_end: 存储记忆（agent 响应结束后）
+  api.on('agent_end', async (event: { messages?: unknown[]; agentId?: string }) => {
+    try {
+      const agentId = event.agentId || 'default';
+      const messages = event.messages || [];
+      if (cfg.autoCapture && messages.length > 0) await plugin.store(agentId, messages);
+    } catch (err) {
+      log.error('[algo-memory] agent_end 钩子错误:', err);
     }
   });
 
