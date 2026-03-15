@@ -908,37 +908,31 @@ const algoMemoryPlugin = {
   name: "Algo Memory",
   description: "纯算法长期记忆插件 - 支持多模型/智能去重/时间衰减",
   kind: "memory" as const,
+  // 简化配置 Schema，只保留核心配置
   configSchema: {
     type: "object",
     additionalProperties: true,
     properties: {
-      autoCapture: { type: "boolean", default: true },
-      autoRecall: { type: "boolean", default: true },
-      maxResults: { type: "number", default: 5 },
-      cleanupDays: { type: "number", default: 180 },
-      recencyDecay: { type: "boolean", default: true },
-      recencyHalfLife: { type: "number", default: 180 },
-      smartDedup: { type: "boolean", default: true },
-      dedupThreshold: { type: "number", default: 0.85 },
-      capturePerTurn: { type: "number", default: 3 },
-      llm: { 
-        type: "object",
-        properties: {
-          enabled: { type: "boolean", default: true },
-          provider: { type: "string", default: "auto" },
-          apiKey: { type: "string" },
-          model: { type: "string" },
-          baseURL: { type: "string" }
-        }
-      }
+      autoCapture: { type: "boolean", default: true, description: "自动捕获对话记忆" },
+      autoRecall: { type: "boolean", default: true, description: "自动召回相关记忆" },
+      maxResults: { type: "number", default: 5, description: "召回结果数量" }
     }
   },
 
   register(api: any) {
     const log = api.logger || console;
-    const plugin = new MemoryPlugin(api.pluginConfig || {}, log);
+    // 使用配置或默认配置，确保插件能正常工作
+    const userConfig = api.pluginConfig || {};
+    const config = {
+      autoCapture: userConfig.autoCapture !== false,
+      autoRecall: userConfig.autoRecall !== false,
+      maxResults: userConfig.maxResults || 5
+    };
+    const plugin = new MemoryPlugin(config, log);
     const stateDir = api.getStateDir?.() || path.join(process.env.HOME || '/home/x', '.openclaw', 'workspace', 'algo-memory');
     plugin.init(stateDir);
+    
+    log.info('[algo-memory] 插件已加载，自动捕获: ' + config.autoCapture + ', 自动召回: ' + config.autoRecall);
 
   // 工具定义（使用 Typebox 符合官方规范）
   const toolDefinitions = [
@@ -1082,19 +1076,7 @@ const algoMemoryPlugin = {
     });
   });
 
-  // 获取用户配置（合并默认配置，这样即使不修改 openclaw.json 也能工作）
-  const userConfig = api.pluginConfig || {};
-  let cfg = { ...DEFAULT_CONFIG, ...userConfig };
-  
-  // 自动解析 LLM 配置（支持多模型）
-  cfg.llm = resolveLLMConfig(cfg.llm);
-  
-  // 兼容旧配置格式（如果没有 enabled 字段，根据是否有用户配置决定）
-  if (userConfig.enabled === undefined && Object.keys(userConfig).length === 0) {
-    // 没有任何配置时，默认启用所有功能
-    cfg.autoCapture = true;
-    cfg.autoRecall = true;
-  }
+  // 配置已在注册时处理完成
 
   // 钩子
   // before_agent_start: 召回记忆（用户发送消息后、agent 响应前）
@@ -1107,9 +1089,10 @@ const algoMemoryPlugin = {
       const userMsgs = (messages as any[]).filter((m: any) => m.role === 'user');
       const lastUserMsg = userMsgs[userMsgs.length - 1];
       
-      if (cfg.autoRecall && lastUserMsg) {
+      if (config.autoRecall && lastUserMsg) {
         const query = lastUserMsg.content || '';
-        if (shouldRetrieve(query, cfg.adaptiveRetrieval || DEFAULT_CONFIG.adaptiveRetrieval)) {
+        // 使用简化的配置检查
+        if (query.length >= 2) {
           const recallResult = await plugin.recall(agentId, query);
           if (recallResult.hasMemory && recallResult.memories.length > 0) {
             const recallText = recallResult.memories.map(m => m.content).join('\n');
@@ -1128,7 +1111,7 @@ const algoMemoryPlugin = {
     try {
       const agentId = event.agentId || 'default';
       const messages = event.messages || [];
-      if (cfg.autoCapture && messages.length > 0) await plugin.store(agentId, messages);
+      if (config.autoCapture && messages.length > 0) await plugin.store(agentId, messages);
     } catch (err) {
       log.error('[algo-memory] agent_end 钩子错误:', err);
     }
@@ -1141,8 +1124,8 @@ const algoMemoryPlugin = {
       console.error('[algo-memory] onDeactivate 钩子错误:', err);
     }
   });
-  const isAutoEnabled = !userConfig.enabled && Object.keys(userConfig).length === 0;
-  log.info(`[algo-memory] 插件注册完成, 工具数: ${toolDefinitions.length}, 自动启用: ${isAutoEnabled}, 捕获: ${cfg.autoCapture}, 召回: ${cfg.autoRecall}, 每轮写入: ${cfg.capturePerTurn}条`);
+  
+  log.info(`[algo-memory] 插件已就绪, 工具数: ${toolDefinitions.length}, 自动捕获: ${config.autoCapture}, 自动召回: ${config.autoRecall}`);
   }
 };
 
