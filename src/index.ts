@@ -1078,8 +1078,21 @@ const algoMemoryPlugin = {
 
   // 配置已在注册时处理完成
 
-  // 只注册核心工具，不使用自动钩子（避免兼容性问题）
-  // 用户可以通过手动调用工具来使用记忆功能
+  // 基础钩子 - 使用最安全的方式
+  // agent_end: 存储记忆（agent 响应结束后）
+  if (typeof api.on === 'function') {
+    api.on('agent_end', async (event: any) => {
+      try {
+        const agentId = event?.agentId || 'default';
+        const messages = event?.messages || [];
+        if (config.autoCapture && messages.length > 0) {
+          await plugin.store(agentId, messages);
+        }
+      } catch (err) {
+        log.error('[algo-memory] agent_end 钩子错误:', err);
+      }
+    });
+  }
 
   // 注册服务生命周期
   api.registerService({
