@@ -1,8 +1,8 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "纯算法长期记忆插件 - 默认启用LLM / 支持多模型",
-  "version": "2.2.0",
+  "description": "纯算法长期记忆插件 - 无需 LLM 也能工作",
+  "version": "2.2.2",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "installDependencies": true,
@@ -12,39 +12,7 @@
     "properties": {
       "autoCapture": { "type": "boolean", "default": true, "description": "自动捕获对话记忆" },
       "autoRecall": { "type": "boolean", "default": true, "description": "自动召回相关记忆" },
-      "maxResults": { "type": "number", "default": 5, "description": "召回结果数量" },
-      "cleanupDays": { "type": "number", "default": 180, "description": "普通记忆保留天数" },
-      "recencyDecay": { "type": "boolean", "default": true, "description": "启用时间衰减" },
-      "recencyHalfLife": { "type": "number", "default": 180, "description": "时间衰减半衰期(天)" },
-      "smartDedup": { "type": "boolean", "default": true, "description": "启用智能去重" },
-      "dedupThreshold": { "type": "number", "default": 0.85, "description": "去重相似度阈值" },
-      "coreKeywords": { "type": "array", "items": { "type": "string" }, "description": "核心记忆关键词" },
-      "noiseFilter": { "type": "object", "description": "噪声过滤", "properties": { "enabled": { "type": "boolean" }, "skipGreetings": { "type": "boolean" }, "skipCommands": { "type": "boolean" } } },
-      "adaptiveRetrieval": { "type": "object", "description": "自适应检索", "properties": { "enabled": { "type": "boolean" }, "minQueryLength": { "type": "number" }, "forceKeywords": { "type": "array", "items": { "type": "string" } } } },
-      "sessionMemory": { "type": "object", "description": "Session记忆", "properties": { "enabled": { "type": "boolean" }, "maxSessionItems": { "type": "number" } } },
-      "weibullDecay": { "type": "object", "description": "Weibull衰减", "properties": { "enabled": { "type": "boolean" }, "shape": { "type": "number" }, "scale": { "type": "number" } } },
-      "reinforcement": { "type": "object", "description": "访问强化", "properties": { "enabled": { "type": "boolean" }, "factor": { "type": "number" }, "maxMultiplier": { "type": "number" } } },
-      "mmr": { "type": "object", "description": "MMR多样性去重", "properties": { "enabled": { "type": "boolean" }, "threshold": { "type": "number" } } },
-      "lengthNorm": { "type": "object", "description": "长度归一化", "properties": { "enabled": { "type": "boolean" }, "anchor": { "type": "number" } } },
-      "hardMinScore": { "type": "object", "description": "硬最低分过滤", "properties": { "enabled": { "type": "boolean" }, "threshold": { "type": "number" } } },
-      "capturePerTurn": { "type": "number", "default": 3, "description": "每轮最多写入记忆数" },
-      "tier": { "type": "object", "description": "三层晋升系统", "properties": { "enabled": { "type": "boolean" }, "coreThreshold": { "type": "number" }, "peripheralThreshold": { "type": "number" }, "ageDays": { "type": "number" } } },
-      "scopes": { "type": "object", "description": "多Scope隔离", "properties": { "enabled": { "type": "boolean" }, "defaultScope": { "type": "string" } } },
-      "llm": { "type": "object", "description": "LLM配置(默认启用,支持minimax2.5/deepseek/kimi/百炼/智谱/混元/文心)", "properties": { "enabled": { "type": "boolean", "default": true }, "provider": { "type": "string", "default": "auto" }, "apiKey": { "type": "string" }, "model": { "type": "string" }, "baseURL": { "type": "string" } } },
-      "threshold": { 
-        "type": "object", 
-        "description": "LLM阈值配置", 
-        "properties": { 
-          "useLlmForCore": { "type": "boolean", "description": "启用LLM判断核心记忆" }, 
-          "useLlmForExtract": { "type": "boolean", "description": "启用LLM提取关键词" }, 
-          "useLlmForDedup": { "type": "boolean", "description": "启用LLM判断重复" }, 
-          "minConfidence": { "type": "number", "description": "最小置信度" },
-          "lengthForCore": { "type": "number", "default": 100, "description": "触发LLM核心判断的长度阈值" },
-          "lengthForExtract": { "type": "number", "default": 200, "description": "触发LLM关键词提取的长度阈值" },
-          "dedupUncertaintyMin": { "type": "number", "default": 0.5, "description": "去重LLM判断的相似度下限" },
-          "dedupUncertaintyMax": { "type": "number", "default": 0.98, "description": "去重LLM判断的相似度上限" }
-        } 
-      }
+      "maxResults": { "type": "number", "default": 5, "description": "召回结果数量" }
     }
   },
   "requirements": { "node": ">=20.0.0", "openclaw": ">=2026.3.0" }
