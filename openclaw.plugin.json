@@ -1,8 +1,8 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "纯算法长期记忆插件 - 无需 LLM 也能工作",
-  "version": "2.2.2",
+  "description": "纯算法长期记忆插件 - 智能自动召回 / 无需 LLM 也能工作",
+  "version": "2.2.3",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "installDependencies": true,
@@ -126,7 +126,7 @@
   "uiHints": {
     "category": "memory",
     "tags": ["记忆", "长期记忆", "向量", "无LLM"],
-    "preview": "纯算法实现，无需 LLM 也能工作的长期记忆系统"
+    "preview": "纯算法实现，智能自动召回，无需 LLM 也能工作的长期记忆系统"
   },
   "requirements": { "node": ">=20.0.0", "openclaw": ">=2026.3.0" }
 }

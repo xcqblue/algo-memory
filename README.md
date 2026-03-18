@@ -2,7 +2,7 @@
 
 **纯算法长期记忆插件 - 无需 LLM 也能工作**
 
-[![Version](https://img.shields.io/badge/Version-2.2.2-blue)](https://github.com/xcqblue/algo-memory)
+[![Version](https://img.shields.io/badge/Version-2.2.3-blue)](https://github.com/xcqblue/algo-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -13,6 +13,7 @@
 |------|------|
 | **零配置** | 开箱即用，无需配置自动启用 |
 | **纯算法** | 无需 LLM 也能正常工作 |
+| **智能召回** | 自动召回相关记忆，上下文感知 |
 | **LLM 支持** | 可选启用，支持 11+ 模型 |
 | **存储** | 本地 SQLite（sql.js）/ FTS5 全文搜索 |
 | **智能** | 核心记忆 / 智能去重 / 时间衰减 |
@@ -56,7 +57,10 @@ openclaw plugins install https://github.com/xcqblue/algo-memory
 {
   "autoCapture": true,
   "autoRecall": true,
-  "maxResults": 5
+  "maxResults": 5,
+  "cleanupDays": 180,
+  "recencyDecay": true,
+  "smartDedup": true
 }
 ```
 
