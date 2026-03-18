@@ -23,7 +23,7 @@ const RETRY_DELAY_MS = 1000;  // 重试延迟
 const MIN_CJK_QUERY_LENGTH = 6;  // CJK 语言最小查询长度
 const MIN_EN_QUERY_LENGTH = 15;  // 英语最小查询长度
 import LRUCache from 'lru-cache';
-import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
+import initSqlJs from 'sql.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
