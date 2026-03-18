@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.2.2
+ * algo-memory v2.2.3
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
@@ -8,6 +8,21 @@
  */
 
 import { Type } from '@sinclair/typebox';
+
+// ============= 常量定义 =============
+const PLUGIN_VERSION = '2.2.3';
+const MAX_MESSAGE_LENGTH = 10000;  // 消息最大长度限制
+const CACHE_MAX_SIZE = 100;  // LRU 缓存最大条目数
+const CACHE_TTL_MS = 5 * 60 * 1000;  // 缓存 TTL: 5分钟
+const SESSION_CACHE_MAX_SIZE = 50;  // 会话缓存最大条目数
+const SESSION_CACHE_TTL_MS = 30 * 60 * 1000;  // 会话缓存 TTL: 30分钟
+const DEFAULT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;  // 清理周期: 24小时
+const MAX_KEYWORDS = 10;  // 最大关键词数量
+const MAX_SIMILAR_CHECK = 10;  // 相似度检查的最大条目数
+const RETRY_MAX_ATTEMPTS = 2;  // LLM 重试次数
+const RETRY_DELAY_MS = 1000;  // 重试延迟
+const MIN_CJK_QUERY_LENGTH = 6;  // CJK 语言最小查询长度
+const MIN_EN_QUERY_LENGTH = 15;  // 英语最小查询长度
 import LRUCache from 'lru-cache';
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
 import * as fs from 'fs';
@@ -75,7 +90,7 @@ function generateId(): string { return 'mem_' + crypto.randomBytes(8).toString('
 function hashContent(content: string): string { return crypto.createHash('sha256').update(content).digest('hex'); }
 function extractKeywords(content: string): string {
   const words = content.toLowerCase().match(/[\u4e00-\u9fa5a-zA-Z0-9]{2,}/g) || [];
-  return [...new Set(words)].slice(0, 10).join(',');
+  return [...new Set(words)].slice(0, MAX_KEYWORDS).join(',');
 }
 function isCoreKeyword(content: string, keywords: string[]): boolean { return keywords.some(k => content.includes(k)); }
 
@@ -159,7 +174,7 @@ function shouldRetrieve(query: string, config: Config['adaptiveRetrieval']): boo
   const lowerQuery = query.toLowerCase();
   if (config.forceKeywords?.some(k => lowerQuery.includes(k))) return true;
   const isCJK = /[\u4e00-\u9fa5]/.test(query);
-  const minLen = isCJK ? 6 : 15;
+  const minLen = isCJK ? MIN_CJK_QUERY_LENGTH : MIN_EN_QUERY_LENGTH;
   if (query.trim().length < minLen) return false;
   return true;
 }
@@ -337,7 +352,7 @@ function resolveLLMConfig(config: Config['llm']): Config['llm'] {
 }
 
 // LLM 调用重试辅助函数
-async function llmCallWithRetry<T>(fn: () => Promise<T>, maxRetries: number = 2, delayMs: number = 1000): Promise<T> {
+async function llmCallWithRetry<T>(fn: () => Promise<T>, maxRetries: number = RETRY_MAX_ATTEMPTS, delayMs: number = RETRY_DELAY_MS): Promise<T> {
   let lastError: any;
   for (let i = 0; i <= maxRetries; i++) {
     try { return await fn(); } 
@@ -424,8 +439,8 @@ class MemoryPlugin {
   constructor(config: Partial<Config>, log: any = console) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.log = log;
-    this.cache = new LRUCache({ max: 100, ttl: 5 * 60 * 1000 });
-    this.sessionCache = new LRUCache({ max: 50, ttl: 30 * 60 * 1000 });
+    this.cache = new LRUCache({ max: CACHE_MAX_SIZE, ttl: CACHE_TTL_MS });
+    this.sessionCache = new LRUCache({ max: SESSION_CACHE_MAX_SIZE, ttl: SESSION_CACHE_TTL_MS });
     // 缓存配置哈希，避免每次 recall 时重复计算
     this.configHash = hashContent(`${this.config.maxResults}:${this.config.recencyDecay}:${this.config.recencyHalfLife}`);
     if (this.config.llm.enabled && this.config.llm.apiKey) this.llmClient = new LLMClient(this.config, log);
@@ -487,7 +502,7 @@ class MemoryPlugin {
     this.saveDatabase();
     this.log.info('[algo-memory] 数据库初始化:', this.dbPath);
     this.log.info(`[algo-memory] 每轮最多写入: ${this.config.capturePerTurn} 条`);
-    this.cleanupInterval = setInterval(() => this.cleanup(), 24 * 60 * 60 * 1000);
+    this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
   }
 
   // 保存数据库到文件
@@ -568,11 +583,10 @@ class MemoryPlugin {
     }
     
     // 边界情况处理：消息过长时截断
-    const maxMessageLength = 10000;
     messages = messages.map(msg => ({
       ...msg,
-      content: msg.content?.length > maxMessageLength 
-        ? msg.content.substring(0, maxMessageLength) + '...[截断]' 
+      content: msg.content?.length > MAX_MESSAGE_LENGTH 
+        ? msg.content.substring(0, MAX_MESSAGE_LENGTH) + '...[截断]' 
         : msg.content
     }));
     
@@ -603,7 +617,7 @@ class MemoryPlugin {
 
       // 智能去重
       if (this.config.smartDedup) {
-        const similar = this.queryAll("SELECT id, content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10", [AgentId]);
+        const similar = this.queryAll("SELECT id, content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?", [AgentId, MAX_SIMILAR_CHECK]);
         let isDuplicate = false;
         for (const s of similar) {
           let score = jaccardSimilarity(safeContent, s.content);
