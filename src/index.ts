@@ -896,10 +896,28 @@ class MemoryPlugin {
         imported++;
       } catch (e) { /* ignore */ }
     }
+    // 导入后清理缓存，防止缓存和数据库不一致
+    if (imported > 0) {
+      this.cache.delete(`recall:${AgentId}`);
+    }
     return imported;
   }
 
-  close(): void { if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; } if (this.db) { this.saveDatabase(); this.db.close(); this.db = null; } this.log.info('[algo-memory] 插件关闭'); }
+  close(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+    // 清理缓存防止内存泄漏
+    this.cache.clear();
+    this.sessionCache.clear();
+    if (this.db) {
+      this.saveDatabase();
+      this.db.close();
+      this.db = null;
+    }
+    this.log.info('[algo-memory] 插件已关闭');
+  }
 }
 
 // OpenClaw 插件导出（符合官方规范）
@@ -908,29 +926,73 @@ const algoMemoryPlugin = {
   name: "Algo Memory",
   description: "纯算法长期记忆插件 - 支持多模型/智能去重/时间衰减",
   kind: "memory" as const,
-  // 简化配置 Schema，只保留核心配置
   configSchema: {
     type: "object",
-    additionalProperties: true,
+    additionalProperties: false,
     properties: {
       autoCapture: { type: "boolean", default: true, description: "自动捕获对话记忆" },
       autoRecall: { type: "boolean", default: true, description: "自动召回相关记忆" },
-      maxResults: { type: "number", default: 5, description: "召回结果数量" }
+      maxResults: { type: "number", default: 5, description: "召回结果数量" },
+      language: { type: "string", default: "auto", description: "语言: auto, zh, en, ja, ko, es, fr, de" },
+      coreKeywords: { type: "array", default: [], items: { type: "string" }, description: "核心关键词" },
+      cleanupDays: { type: "number", default: 180, description: "清理天数" },
+      capturePerTurn: { type: "number", default: 3, description: "每轮最多写入数" },
+      scopes: { 
+        type: "object", 
+        properties: {
+          enabled: { type: "boolean", default: true },
+          defaultScope: { type: "string", default: "agent" },
+          visibleAgents: { type: "array", items: { type: "string" }, default: [] }
+        }
+      },
+      llm: {
+        type: "object",
+        properties: {
+          enabled: { type: "boolean", default: true },
+          provider: { type: "string", default: "auto" },
+          apiKey: { type: "string", default: "" },
+          model: { type: "string", default: "" },
+          baseURL: { type: "string", default: "" }
+        }
+      }
     }
   },
 
-  register(api: any) {
+  async register(api: any) {
     const log = api.logger || console;
     // 使用配置或默认配置，确保插件能正常工作
-    const userConfig = api.pluginConfig || {};
+    const userConfig = api.pluginConfig || api.config || {};
+    // 合并完整配置（包含高级配置项）
     const config = {
       autoCapture: userConfig.autoCapture !== false,
       autoRecall: userConfig.autoRecall !== false,
-      maxResults: userConfig.maxResults || 5
+      maxResults: userConfig.maxResults || 5,
+      cleanupDays: userConfig.cleanupDays || 180,
+      language: userConfig.language || 'auto',
+      coreKeywords: userConfig.coreKeywords || DEFAULT_CONFIG.coreKeywords,
+      recencyDecay: userConfig.recencyDecay !== undefined ? userConfig.recencyDecay : DEFAULT_CONFIG.recencyDecay,
+      recencyHalfLife: userConfig.recencyHalfLife || DEFAULT_CONFIG.recencyHalfLife,
+      smartDedup: userConfig.smartDedup !== undefined ? userConfig.smartDedup : DEFAULT_CONFIG.smartDedup,
+      dedupThreshold: userConfig.dedupThreshold || DEFAULT_CONFIG.dedupThreshold,
+      capturePerTurn: userConfig.capturePerTurn || DEFAULT_CONFIG.capturePerTurn,
+      noiseFilter: userConfig.noiseFilter || DEFAULT_CONFIG.noiseFilter,
+      adaptiveRetrieval: userConfig.adaptiveRetrieval || DEFAULT_CONFIG.adaptiveRetrieval,
+      sessionMemory: userConfig.sessionMemory || DEFAULT_CONFIG.sessionMemory,
+      weibullDecay: userConfig.weibullDecay || DEFAULT_CONFIG.weibullDecay,
+      reinforcement: userConfig.reinforcement || DEFAULT_CONFIG.reinforcement,
+      mmr: userConfig.mmr || DEFAULT_CONFIG.mmr,
+      lengthNorm: userConfig.lengthNorm || DEFAULT_CONFIG.lengthNorm,
+      hardMinScore: userConfig.hardMinScore || DEFAULT_CONFIG.hardMinScore,
+      tier: userConfig.tier || DEFAULT_CONFIG.tier,
+      scopes: userConfig.scopes || DEFAULT_CONFIG.scopes,
+      llm: userConfig.llm || DEFAULT_CONFIG.llm,
+      threshold: userConfig.threshold || DEFAULT_CONFIG.threshold
     };
     const plugin = new MemoryPlugin(config, log);
-    const stateDir = api.getStateDir?.() || path.join(process.env.HOME || '/home/x', '.openclaw', 'workspace', 'algo-memory');
-    plugin.init(stateDir);
+    // 兼容不同版本的 OpenClaw API
+    const stateDir = api.getStateDir?.() || api.stateDir || path.join(process.env.HOME || process.env.USERPROFILE || '/home/x', '.openclaw', 'state', 'algo-memory');
+    // 使用 await 确保异步初始化完成
+    await plugin.init(stateDir);
     
     log.info('[algo-memory] 插件已加载，自动捕获: ' + config.autoCapture + ', 自动召回: ' + config.autoRecall);
 
@@ -1092,6 +1154,46 @@ const algoMemoryPlugin = {
         log.error('[algo-memory] agent_end 钩子错误:', err);
       }
     });
+
+    // before_model: 自动召回记忆（在模型响应前注入上下文）
+    if (config.autoRecall) {
+      api.on('before_model', async (event: any) => {
+        try {
+          const agentId = event?.agentId || 'default';
+          const messages = event?.messages || [];
+          // 获取最后一条用户消息作为查询
+          const userMessage = messages.filter((m: any) => m.role === 'user').pop();
+          const query = userMessage?.content || '';
+          
+          if (query && shouldRetrieve(query, config.adaptiveRetrieval)) {
+            const { hasMemory, memories } = await plugin.recall(agentId, query);
+            if (hasMemory && memories.length > 0) {
+              // 将记忆注入到系统消息或特殊字段
+              // 兼容不同版本的 OpenClaw API
+              const memoryContext = memories.map((m: any) => `[记忆] ${m.content}`).join('\n\n');
+              
+              if (event.context) {
+                event.context.memories = memories;
+                event.context.memoryContext = memoryContext;
+              }
+              
+              // 如果有 system 消息，追加记忆上下文
+              if (Array.isArray(event.messages)) {
+                const systemMsgIndex = event.messages.findIndex((m: any) => m.role === 'system');
+                if (systemMsgIndex >= 0) {
+                  const existingContent = event.messages[systemMsgIndex].content || '';
+                  event.messages[systemMsgIndex].content = existingContent + '\n\n---\n以下是相关记忆：\n' + memoryContext;
+                }
+              }
+              
+              log.info(`[algo-memory] 已注入 ${memories.length} 条记忆到上下文`);
+            }
+          }
+        } catch (err) {
+          log.error('[algo-memory] before_model 钩子错误:', err);
+        }
+      });
+    }
   }
 
   // 注册服务生命周期
