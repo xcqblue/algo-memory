@@ -921,42 +921,12 @@ class MemoryPlugin {
 }
 
 // OpenClaw 插件导出（符合官方规范）
+// 注意：configSchema 应只在 openclaw.plugin.json 中定义，此处不再重复
 const algoMemoryPlugin = {
   id: "algo-memory",
   name: "Algo Memory",
   description: "纯算法长期记忆插件 - 支持多模型/智能去重/时间衰减",
   kind: "memory" as const,
-  configSchema: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      autoCapture: { type: "boolean", default: true, description: "自动捕获对话记忆" },
-      autoRecall: { type: "boolean", default: true, description: "自动召回相关记忆" },
-      maxResults: { type: "number", default: 5, description: "召回结果数量" },
-      language: { type: "string", default: "auto", description: "语言: auto, zh, en, ja, ko, es, fr, de" },
-      coreKeywords: { type: "array", default: [], items: { type: "string" }, description: "核心关键词" },
-      cleanupDays: { type: "number", default: 180, description: "清理天数" },
-      capturePerTurn: { type: "number", default: 3, description: "每轮最多写入数" },
-      scopes: { 
-        type: "object", 
-        properties: {
-          enabled: { type: "boolean", default: true },
-          defaultScope: { type: "string", default: "agent" },
-          visibleAgents: { type: "array", items: { type: "string" }, default: [] }
-        }
-      },
-      llm: {
-        type: "object",
-        properties: {
-          enabled: { type: "boolean", default: true },
-          provider: { type: "string", default: "auto" },
-          apiKey: { type: "string", default: "" },
-          model: { type: "string", default: "" },
-          baseURL: { type: "string", default: "" }
-        }
-      }
-    }
-  },
 
   async register(api: any) {
     const log = api.logger || console;
