@@ -671,7 +671,8 @@ class MemoryPlugin {
                              this.llmClient && 
                              (!isCore || safeContent.length >= this.config.threshold.lengthForCore);
       if (needLLMForCore) {
-        const r = await this.llmClient.isCoreMemory(safeContent);
+        const llmClient = this.llmClient;
+        const r = await llmClient.isCoreMemory(safeContent);
         isCore = r.isCore; importance = r.confidence;
       }
       
@@ -679,7 +680,10 @@ class MemoryPlugin {
       const needLLMForExtract = this.config.threshold.useLlmForExtract && 
                                  this.llmClient && 
                                  safeContent.length >= this.config.threshold.lengthForExtract;
-      if (needLLMForExtract) keywords = await this.llmClient.extractKeywords(safeContent);
+      if (needLLMForExtract) {
+        const llmClient = this.llmClient;
+        keywords = await llmClient.extractKeywords(safeContent);
+      }
 
       const scope = this.config.scopes.enabled ? `${this.config.scopes.defaultScope}:${AgentId}` : 'global';
       const tier = getTier(importance, 1, 0, this.config.tier);
