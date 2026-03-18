@@ -30,11 +30,7 @@
 # 1. 复制插件目录到 extensions
 cp -r algo-memory ~/.openclaw/extensions/
 
-# 2. 安装依赖
-cd ~/.openclaw/extensions/algo-memory
-npm install
-
-# 3. 重启 OpenClaw Gateway
+# 2. 重启 OpenClaw（依赖会自动安装）
 openclaw gateway restart
 ```
 

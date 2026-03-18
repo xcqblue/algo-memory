@@ -3,7 +3,7 @@
   "version": "2.2.3",
   "description": "纯算法长期记忆插件 - 默认启用LLM / 支持多模型",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "files": [
     "src",
     "dist",
@@ -12,8 +12,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
-    "postinstall": "node -e \"const fs=require('fs');try{const s=fs.readFileSync('node_modules/sql.js/dist/sql-wasm.wasm');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/sql-wasm.wasm',s);}catch(e){}\""
+    "dev": "tsc --watch"
   },
   "keywords": [
     "openclaw",
