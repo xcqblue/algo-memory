@@ -1,8 +1,8 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "纯算法长期记忆插件 - 无需 LLM 也能工作",
-  "version": "2.2.2",
+  "description": "纯算法长期记忆插件 - 智能自动召回 / 无需 LLM 也能工作",
+  "version": "2.2.3",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "installDependencies": true,
@@ -10,112 +10,185 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "autoCapture": {
-        "type": "boolean",
-        "default": true,
-        "description": "自动捕获对话记忆"
-      },
-      "autoRecall": {
-        "type": "boolean",
-        "default": true,
-        "description": "自动召回相关记忆"
-      },
-      "maxResults": {
-        "type": "number",
-        "default": 5,
-        "description": "召回结果数量"
-      },
-      "language": {
-        "type": "string",
-        "default": "auto",
-        "description": "语言设置: auto, zh, en, ja, ko, es, fr, de"
-      },
-      "coreKeywords": {
-        "type": "array",
-        "items": { "type": "string" },
-        "default": [],
-        "description": "核心关键词列表"
-      },
-      "cleanupDays": {
-        "type": "number",
-        "default": 180,
-        "description": "记忆清理天数"
-      },
-      "capturePerTurn": {
-        "type": "number",
-        "default": 3,
-        "description": "每轮最多写入记忆数"
-      },
+      "autoCapture": { "type": "boolean", "default": true, "description": "自动捕获对话记忆" },
+      "autoRecall": { "type": "boolean", "default": true, "description": "自动召回相关记忆" },
+      "maxResults": { "type": "number", "default": 5, "description": "召回结果数量" },
+      "cleanupDays": { "type": "number", "default": 180, "description": "记忆保留天数" },
+      "language": { "type": "string", "default": "auto", "description": "语言: auto, zh, en, ja, ko, es, fr, de" },
+      "coreKeywords": { "type": "array", "items": { "type": "string" }, "default": [], "description": "核心关键词列表" },
+      "recencyDecay": { "type": "boolean", "default": true, "description": "启用时间衰减" },
+      "recencyHalfLife": { "type": "number", "default": 180, "description": "半衰期(天)" },
+      "smartDedup": { "type": "boolean", "default": true, "description": "启用智能去重" },
+      "dedupThreshold": { "type": "number", "default": 0.85, "description": "去重阈值" },
+      "capturePerTurn": { "type": "number", "default": 3, "description": "每轮最多写入数" },
       "scopes": {
         "type": "object",
-        "description": "多 Scope 隔离配置",
         "properties": {
-          "enabled": {
-            "type": "boolean",
-            "default": true,
-            "description": "启用作用域隔离"
-          },
-          "defaultScope": {
-            "type": "string",
-            "default": "agent",
-            "description": "默认作用域"
-          },
-          "visibleAgents": {
-            "type": "array",
-            "items": { "type": "string" },
-            "default": [],
-            "description": "可见的 Agent 列表"
-          }
+          "enabled": { "type": "boolean", "default": true, "description": "启用隔离模式" },
+          "defaultScope": { "type": "string", "default": "agent", "description": "默认作用域" },
+          "visibleAgents": { "type": "array", "items": { "type": "string" }, "default": [], "description": "允许查看的Agent列表" }
         }
       },
       "llm": {
-        "type": "object",
-        "description": "LLM 增强配置",
         "properties": {
-          "enabled": {
-            "type": "boolean",
-            "default": true,
-            "description": "启用 LLM 增强"
-          },
-          "provider": {
-            "type": "string",
-            "default": "auto",
-            "description": "LLM 提供商"
-          },
-          "apiKey": {
-            "type": "string",
-            "default": "",
-            "description": "API Key",
-            "sensitive": true
-          },
-          "model": {
-            "type": "string",
-            "default": "",
-            "description": "模型名称"
-          },
-          "baseURL": {
-            "type": "string",
-            "default": "",
-            "description": "自定义 API 地址"
-          }
+          "enabled": { "type": "boolean", "default": true, "description": "启用LLM" },
+          "provider": { "type": "string", "default": "auto", "description": "模型提供商" },
+          "apiKey": { "type": "string", "default": "", "description": "API密钥" },
+          "model": { "type": "string", "default": "", "description": "模型名称" },
+          "baseURL": { "type": "string", "default": "", "description": "API地址" }
+        }
+      },
+      "threshold": {
+        "type": "object",
+        "properties": {
+          "useLlmForCore": { "type": "boolean", "default": false, "description": "LLM判断核心记忆" },
+          "useLlmForExtract": { "type": "boolean", "default": false, "description": "LLM提取关键词" },
+          "useLlmForDedup": { "type": "boolean", "default": false, "description": "LLM去重判断" },
+          "minConfidence": { "type": "number", "default": 0.8, "description": "最小置信度" },
+          "lengthForCore": { "type": "number", "default": 100, "description": "触发LLM核心判断的长度阈值" },
+          "lengthForExtract": { "type": "number", "default": 200, "description": "触发LLM关键词提取的长度阈值" },
+          "dedupUncertaintyMin": { "type": "number", "default": 0.5, "description": "去重不确定区间最小值" },
+          "dedupUncertaintyMax": { "type": "number", "default": 0.98, "description": "去重不确定区间最大值" }
+        }
+      },
+      "noiseFilter": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "skipGreetings": { "type": "boolean", "default": true },
+          "skipCommands": { "type": "boolean", "default": true }
+        }
+      },
+      "adaptiveRetrieval": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "minQueryLength": { "type": "number", "default": 2 },
+          "forceKeywords": { "type": "array", "items": { "type": "string" }, "default": ["记住", "之前", "上次", "记得", "remember", "before", "last", "前", "上次"] }
+        }
+      },
+      "sessionMemory": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "maxSessionItems": { "type": "number", "default": 10 }
+        }
+      },
+      "weibullDecay": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "shape": { "type": "number", "default": 1.5 },
+          "scale": { "type": "number", "default": 90 }
+        }
+      },
+      "reinforcement": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "factor": { "type": "number", "default": 0.5 },
+          "maxMultiplier": { "type": "number", "default": 3 }
+        }
+      },
+      "mmr": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "threshold": { "type": "number", "default": 0.85 }
+        }
+      },
+      "lengthNorm": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "anchor": { "type": "number", "default": 500 }
+        }
+      },
+      "hardMinScore": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "threshold": { "type": "number", "default": 0.35 }
+        }
+      },
+      "tier": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "coreThreshold": { "type": "number", "default": 10 },
+          "peripheralThreshold": { "type": "number", "default": 0.15 },
+          "ageDays": { "type": "number", "default": 60 }
         }
       }
     }
   },
   "uiHints": {
-    "autoCapture": { "label": "自动捕获", "description": "自动将对话内容保存为记忆" },
-    "autoRecall": { "label": "自动召回", "description": "自动召回相关记忆" },
+    "category": "memory",
+    "tags": ["记忆", "长期记忆", "向量", "无LLM"],
+    "preview": "纯算法实现，智能自动召回，无需 LLM 也能工作的长期记忆系统",
+    "autoCapture": { "label": "自动捕获", "description": "自动捕获对话中的重要信息" },
+    "autoRecall": { "label": "自动召回", "description": "在对话时自动召回相关记忆" },
     "maxResults": { "label": "召回数量", "description": "每次召回的记忆条数" },
-    "language": { "label": "语言", "description": "选择记忆处理语言" },
-    "coreKeywords": { "label": "核心关键词", "description": "优先保留的关键词" },
-    "cleanupDays": { "label": "清理天数", "description": "超过此天数的记忆将被清理" },
-    "capturePerTurn": { "label": "每轮写入数", "description": "单轮对话最多写入的记忆数" },
-    "scopes.enabled": { "label": "启用隔离", "description": "启用 Agent 隔离模式" },
-    "llm.enabled": { "label": "LLM 增强", "description": "使用 LLM 提升记忆质量" },
-    "llm.apiKey": { "label": "API Key", "sensitive": true }
+    "cleanupDays": { "label": "保留天数", "description": "记忆保留的天数" },
+    "language": { "label": "语言", "placeholder": "auto", "description": "支持: auto, zh, en, ja, ko, es, fr, de" },
+    "coreKeywords": { "label": "核心关键词", "description": "触发核心记忆的关键词列表" },
+    "recencyDecay": { "label": "时间衰减", "description": "启用时间衰减算法" },
+    "recencyHalfLife": { "label": "半衰期", "description": "记忆重要性衰减半衰期（天）" },
+    "smartDedup": { "label": "智能去重", "description": "启用智能去重功能" },
+    "dedupThreshold": { "label": "去重阈值", "description": "判断内容重复的相似度阈值" },
+    "capturePerTurn": { "label": "每轮写入数", "description": "每轮对话最多写入的记忆条数" },
+    "scopes": { "label": "隔离配置", "description": "Agent 记忆隔离配置" },
+    "scopes.enabled": { "label": "启用隔离", "description": "启用 Agent 记忆隔离模式" },
+    "scopes.defaultScope": { "label": "默认作用域", "placeholder": "agent" },
+    "scopes.visibleAgents": { "label": "可见Agent", "description": "允许查看的 Agent 列表" },
+    "llm": { "label": "LLM 配置", "description": "大语言模型相关配置" },
+    "llm.enabled": { "label": "启用LLM", "description": "启用 LLM 增强功能" },
+    "llm.provider": { "label": "模型提供商", "placeholder": "auto", "description": "如: minimax, deepseek, kimi 等" },
+    "llm.apiKey": { "label": "API密钥", "sensitive": true, "description": "LLM 服务商 API Key" },
+    "llm.model": { "label": "模型名称", "placeholder": "abab6.5s-chat" },
+    "llm.baseURL": { "label": "API地址", "placeholder": "https://api.minimax.chat/v1" },
+    "threshold": { "label": "阈值配置", "description": "触发 LLM 处理的阈值配置" },
+    "threshold.useLlmForCore": { "label": "LLM判断核心", "description": "使用 LLM 判断是否为核心记忆" },
+    "threshold.useLlmForExtract": { "label": "LLM提取关键词", "description": "使用 LLM 提取关键词" },
+    "threshold.useLlmForDedup": { "label": "LLM去重", "description": "使用 LLM 判断是否重复" },
+    "threshold.minConfidence": { "label": "最小置信度", "description": "LLM 判断的最小置信度" },
+    "threshold.lengthForCore": { "label": "核心判断长度阈值", "description": "触发 LLM 核心判断的内容长度" },
+    "threshold.lengthForExtract": { "label": "关键词提取长度阈值", "description": "触发 LLM 关键词提取的内容长度" },
+    "threshold.dedupUncertaintyMin": { "label": "去重不确定区间最小值", "description": "Jaccard 相似度低于此值不使用 LLM" },
+    "threshold.dedupUncertaintyMax": { "label": "去重不确定区间最大值", "description": "Jaccard 相似度高于此值直接判定重复" },
+    "noiseFilter": { "label": "噪声过滤", "description": "过滤无意义的对话内容" },
+    "noiseFilter.enabled": { "label": "启用噪声过滤" },
+    "noiseFilter.skipGreetings": { "label": "跳过问候语" },
+    "noiseFilter.skipCommands": { "label": "跳过命令" },
+    "adaptiveRetrieval": { "label": "自适应检索", "description": "根据查询内容自适应决定是否召回" },
+    "adaptiveRetrieval.enabled": { "label": "启用自适应检索" },
+    "adaptiveRetrieval.minQueryLength": { "label": "最小查询长度" },
+    "adaptiveRetrieval.forceKeywords": { "label": "强制召回关键词", "description": "包含这些关键词时强制召回" },
+    "sessionMemory": { "label": "会话记忆", "description": "当前会话的临时记忆" },
+    "sessionMemory.enabled": { "label": "启用会话记忆" },
+    "sessionMemory.maxSessionItems": { "label": "最大条数" },
+    "weibullDecay": { "label": "Weibull衰减", "description": "使用 Weibull 分布的时间衰减" },
+    "weibullDecay.enabled": { "label": "启用Weibull衰减" },
+    "weibullDecay.shape": { "label": "形状参数" },
+    "weibullDecay.scale": { "label": "尺度参数" },
+    "reinforcement": { "label": "访问强化", "description": "访问次数越多，重要性越高" },
+    "reinforcement.enabled": { "label": "启用访问强化" },
+    "reinforcement.factor": { "label": "强化因子" },
+    "reinforcement.maxMultiplier": { "label": "最大倍数" },
+    "mmr": { "label": "MMR去重", "description": "最大边际相关性去重" },
+    "mmr.enabled": { "label": "启用MMR" },
+    "mmr.threshold": { "label": "MMR阈值" },
+    "lengthNorm": { "label": "长度归一化", "description": "对长内容进行重要性归一化" },
+    "lengthNorm.enabled": { "label": "启用长度归一化" },
+    "lengthNorm.anchor": { "label": "锚点长度" },
+    "hardMinScore": { "label": "最低分过滤", "description": "过滤低于阈值的记忆" },
+    "hardMinScore.enabled": { "label": "启用最低分过滤" },
+    "hardMinScore.threshold": { "label": "最低分阈值" },
+    "tier": { "label": "分层管理", "description": "核心/工作/外围记忆分层" },
+    "tier.enabled": { "label": "启用分层管理" },
+    "tier.coreThreshold": { "label": "核心阈值" },
+    "tier.peripheralThreshold": { "label": "外围阈值" },
+    "tier.ageDays": { "label": "老化天数" }
   },
-  "requirements": {
-    "node": ">=20.0.0",
-    "openclaw": ">=2026.3.0"
-  }
+  "requirements": { "node": ">=20.0.0", "openclaw": ">=2026.3.0" }
 }

@@ -10,19 +10,26 @@ declare module 'lru-cache' {
   }
 }
 
-declare module 'better-sqlite3' {
-  interface Database {
-    prepare(sql: string): Statement;
+declare module 'sql.js' {
+  export interface Database {
+    run(sql: string, params?: any[]): void;
     exec(sql: string): void;
-    pragma(pragma: string): any;
+    prepare(sql: string): Statement;
+    export(): Uint8Array;
     close(): void;
+    getRowsModified(): number;
   }
-  interface Statement {
-    run(...params: any[]): { changes: number };
-    get(...params: any[]): any;
-    all(...params: any[]): any[];
+
+  export interface Statement {
+    bind(params?: any[]): boolean;
+    step(): boolean;
+    getAsObject(params?: any): any;
+    free(): boolean;
   }
-  export default class Database {
-    constructor(filename: string);
+
+  export interface SqlJsStatic {
+    Database: new (data?: ArrayLike<number> | Buffer | null) => Database;
   }
+
+  export default function initSqlJs(): Promise<SqlJsStatic>;
 }
