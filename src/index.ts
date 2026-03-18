@@ -379,9 +379,15 @@ class LLMClient {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
           body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '判断是否重要需要长期记住。回复JSON: {"isCore": true/false, "confidence": 0-1}' }, { role: 'user', content }], max_tokens: 100, temperature: 0.1 })
         });
+        if (!response.ok) {
+          throw new Error(`LLM API 错误: ${response.status} ${response.statusText}`);
+        }
         const jsonResponse = await response.json() as any;
+        if (!jsonResponse?.choices?.[0]?.message?.content) {
+          throw new Error('LLM 响应格式错误');
+        }
         return JSON.parse(jsonResponse.choices[0].message.content);
-      }, 2, 1000);
+      }, RETRY_MAX_ATTEMPTS, RETRY_DELAY_MS);
       return result;
     } catch (err) { this.log.error('[algo-memory] LLM isCoreMemory 失败:', err); return { isCore: false, confidence: 0.5 }; }
   }
@@ -396,9 +402,19 @@ class LLMClient {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
           body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '提取关键词，最多10个。回复JSON: {"keywords": ["k1", "k2"]}' }, { role: 'user', content }], max_tokens: 200, temperature: 0.2 })
         });
+        if (!response.ok) {
+          throw new Error(`LLM API 错误: ${response.status} ${response.statusText}`);
+        }
         const jsonResponse2 = await response.json() as any;
-        return JSON.parse(jsonResponse2.choices[0].message.content).keywords.join(',');
-      }, 2, 1000);
+        if (!jsonResponse2?.choices?.[0]?.message?.content) {
+          throw new Error('LLM 响应格式错误');
+        }
+        const parsed = JSON.parse(jsonResponse2.choices[0].message.content);
+        if (!parsed?.keywords) {
+          throw new Error('LLM 响应缺少 keywords 字段');
+        }
+        return parsed.keywords.join(',');
+      }, RETRY_MAX_ATTEMPTS, RETRY_DELAY_MS);
       return result;
     } catch (err) { this.log.error('[algo-memory] LLM extractKeywords 失败:', err); return local; }
   }
@@ -414,9 +430,15 @@ class LLMClient {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
           body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '判断是否重复。回复JSON: {"isDuplicate": true/false, "similarity": 0-1}' }, { role: 'user', content: `内容1: ${c1}\n内容2: ${c2}` }], max_tokens: 100, temperature: 0.1 })
         });
+        if (!response.ok) {
+          throw new Error(`LLM API 错误: ${response.status} ${response.statusText}`);
+        }
         const jsonResponse3 = await response.json() as any;
+        if (!jsonResponse3?.choices?.[0]?.message?.content) {
+          throw new Error('LLM 响应格式错误');
+        }
         return JSON.parse(jsonResponse3.choices[0].message.content);
-      }, 2, 1000);
+      }, RETRY_MAX_ATTEMPTS, RETRY_DELAY_MS);
       return result;
     } catch (err) { this.log.error('[algo-memory] LLM isDuplicate 失败:', err); return { isDuplicate: sim >= this.config.dedupThreshold, similarity: sim }; }
   }
