@@ -14,103 +14,60 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
-// ============= 类型定义 =============
+// ============= 最小默认配置 =============
+// 注意：完整配置定义在 openclaw.plugin.json 的 configSchema 中
+// 此处仅保留代码运行所需的最小默认配置
 interface Config {
   autoCapture: boolean;
   autoRecall: boolean;
   maxResults: number;
   cleanupDays: number;
-  language: string;  // auto, zh, en, ja, ko, es, fr, de
+  language: string;
   coreKeywords: string[];
   recencyDecay: boolean;
   recencyHalfLife: number;
   smartDedup: boolean;
   dedupThreshold: number;
-  // 基础功能
   noiseFilter: { enabled: boolean; skipGreetings: boolean; skipCommands: boolean };
   adaptiveRetrieval: { enabled: boolean; minQueryLength: number; forceKeywords: string[] };
   sessionMemory: { enabled: boolean; maxSessionItems: number };
-  // 进阶功能
   weibullDecay: { enabled: boolean; shape: number; scale: number };
   reinforcement: { enabled: boolean; factor: number; maxMultiplier: number };
   mmr: { enabled: boolean; threshold: number };
   lengthNorm: { enabled: boolean; anchor: number };
   hardMinScore: { enabled: boolean; threshold: number };
-  // 三层晋升
   tier: { enabled: boolean; coreThreshold: number; peripheralThreshold: number; ageDays: number };
-  // 多 Scope 隔离
-  scopes: { 
-    enabled: boolean;           // 是否启用隔离模式
-    defaultScope: string;       // 默认作用域
-    visibleAgents: string[];    // 允许查看的Agent列表，空数组表示只能看自己
-  };
-  // 架构优化
-  capturePerTurn: number; // 每轮最多写入数
-  // LLM
-  llm: { 
-    enabled: boolean; 
-    provider: string;  // openai, minimax, anthropic, google, cohere, local
-    apiKey: string; 
-    model: string; 
-    baseURL: string;
-  };
-  threshold: { 
-    useLlmForCore: boolean; 
-    useLlmForExtract: boolean; 
-    useLlmForDedup: boolean; 
-    minConfidence: number;
-    // 阈值触发配置
-    lengthForCore: number;      // 内容长度超过此值时触发LLM判断核心
-    lengthForExtract: number;   // 内容长度超过此值时触发LLM提取关键词
-    dedupUncertaintyMin: number; // 相似度在此区间时触发LLM去重判断
-    dedupUncertaintyMax: number;
-  };
+  scopes: { enabled: boolean; defaultScope: string; visibleAgents: string[] };
+  capturePerTurn: number;
+  llm: { enabled: boolean; provider: string; apiKey: string; model: string; baseURL: string };
+  threshold: { useLlmForCore: boolean; useLlmForExtract: boolean; useLlmForDedup: boolean; minConfidence: number; lengthForCore: number; lengthForExtract: number; dedupUncertaintyMin: number; dedupUncertaintyMax: number };
 }
 
+// 最小默认配置（完整配置由 openclaw.plugin.json 提供）
 const DEFAULT_CONFIG: Config = {
   autoCapture: true,
   autoRecall: true,
   maxResults: 5,
   cleanupDays: 180,
-  language: 'auto',  // auto, zh, en, ja, ko, es, fr, de
+  language: 'auto',
   coreKeywords: ['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget'],
   recencyDecay: true,
   recencyHalfLife: 180,
   smartDedup: true,
   dedupThreshold: 0.85,
-  // 基础
   noiseFilter: { enabled: true, skipGreetings: true, skipCommands: true },
   adaptiveRetrieval: { enabled: true, minQueryLength: 2, forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次'] },
   sessionMemory: { enabled: false, maxSessionItems: 10 },
-  // 进阶
   weibullDecay: { enabled: false, shape: 1.5, scale: 90 },
   reinforcement: { enabled: false, factor: 0.5, maxMultiplier: 3 },
   mmr: { enabled: false, threshold: 0.85 },
   lengthNorm: { enabled: false, anchor: 500 },
   hardMinScore: { enabled: false, threshold: 0.35 },
-  // 三层晋升
   tier: { enabled: false, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60 },
-  // Scope
-  scopes: { 
-    enabled: true, 
-    defaultScope: 'agent',
-    visibleAgents: []  // 允许查看的Agent列表，空数组=只能看自己，["*"]=看全部
-  },
-  // 架构优化
-  capturePerTurn: 3, // 每轮最多写入3条
-  // LLM - 默认启用，支持多种模型
+  scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
+  capturePerTurn: 3,
   llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
-  threshold: { 
-    useLlmForCore: false, 
-    useLlmForExtract: false, 
-    useLlmForDedup: false, 
-    minConfidence: 0.8,
-    // 阈值触发配置
-    lengthForCore: 100,      // 内容超过100字符时触发LLM判断核心
-    lengthForExtract: 200,    // 内容超过200字符时触发LLM提取关键词
-    dedupUncertaintyMin: 0.5, // 相似度在0.5-0.98区间时触发LLM去重判断
-    dedupUncertaintyMax: 0.98
-  }
+  threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 }
 };
 
 // ============= 工具函数 =============
@@ -462,12 +419,15 @@ class MemoryPlugin {
   private config: Config;
   private llmClient: LLMClient | null = null;
   private log: any;
+  private configHash: string = '';  // 缓存的配置哈希
 
   constructor(config: Partial<Config>, log: any = console) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.log = log;
     this.cache = new LRUCache({ max: 100, ttl: 5 * 60 * 1000 });
     this.sessionCache = new LRUCache({ max: 50, ttl: 30 * 60 * 1000 });
+    // 缓存配置哈希，避免每次 recall 时重复计算
+    this.configHash = hashContent(`${this.config.maxResults}:${this.config.recencyDecay}:${this.config.recencyHalfLife}`);
     if (this.config.llm.enabled && this.config.llm.apiKey) this.llmClient = new LLMClient(this.config, log);
   }
 
@@ -730,9 +690,8 @@ class MemoryPlugin {
     
     const recallStartTime = Date.now();
     if (!shouldRetrieve(query, this.config.adaptiveRetrieval)) return { hasMemory: false, memories: [] };
-    // 缓存 key 加入关键配置哈希，确保配置变化时缓存失效
-    const configHash = hashContent(`${this.config.maxResults}:${this.config.recencyDecay}:${this.config.recencyHalfLife}`);
-    const cacheKey = `recall:${AgentId}:${configHash}:${query}`;
+    // 使用缓存的配置哈希
+    const cacheKey = `recall:${AgentId}:${this.configHash}:${query}`;
     if (this.cache.has(cacheKey)) {
       this.log.info(`[algo-memory] 召回完成(缓存命中), agentId: ${AgentId}, 耗时: ${Date.now() - recallStartTime}ms`);
       return this.cache.get(cacheKey)!;
@@ -887,17 +846,29 @@ class MemoryPlugin {
   importMemories(AgentId: string, memories: any[]): number {
     if (!this.db) return 0;
     let imported = 0;
-    for (const m of memories) {
-      try {
-        const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
-        this.run('INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, created_at, last_accessed, content_hash, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
-          [m.id || generateId(), AgentId, m.scope || 'global', m.content, m.type || 'other', tier, m.layer || 'general', m.keywords || '', m.importance || 0.5, m.access_count || 1, m.created_at || Date.now(), m.last_accessed || Date.now(), m.content_hash || hashContent(m.content), m.metadata || null]
-        );
-        imported++;
-      } catch (e) { /* ignore */ }
+    // 使用事务批量提交，提升性能
+    try {
+      this.db.run('BEGIN TRANSACTION');
+      for (const m of memories) {
+        try {
+          const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
+          this.db.run('INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, created_at, last_accessed, content_hash, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+            [m.id || generateId(), AgentId, m.scope || 'global', m.content, m.type || 'other', tier, m.layer || 'general', m.keywords || '', m.importance || 0.5, m.access_count || 1, m.created_at || Date.now(), m.last_accessed || Date.now(), m.content_hash || hashContent(m.content), m.metadata || null]
+          );
+          imported++;
+        } catch (e) {
+          this.log.warn('[algo-memory] 导入单条记忆失败:', e);
+        }
+      }
+      this.db.run('COMMIT');
+    } catch (e) {
+      this.db.run('ROLLBACK');
+      this.log.error('[algo-memory] 导入记忆事务失败:', e);
+      return 0;
     }
     // 导入后清理缓存，防止缓存和数据库不一致
     if (imported > 0) {
+      this.saveDatabase();
       this.cache.delete(`recall:${AgentId}`);
     }
     return imported;
@@ -1110,9 +1081,9 @@ const algoMemoryPlugin = {
 
   // 配置已在注册时处理完成
 
-  // 基础钩子 - 使用最安全的方式
-  // agent_end: 存储记忆（agent 响应结束后）
+  // 基础钩子 - 使用正确的 API
   if (typeof api.on === 'function') {
+    // agent_end: 存储记忆（agent 响应结束后）
     api.on('agent_end', async (event: any) => {
       try {
         const agentId = event?.agentId || 'default';
@@ -1125,9 +1096,10 @@ const algoMemoryPlugin = {
       }
     });
 
-    // before_model: 自动召回记忆（在模型响应前注入上下文）
+    // before_prompt_build: 自动召回记忆（在构建 prompt 前注入上下文）
+    // 这是正确的 API，用 prependSystemContext 注入记忆
     if (config.autoRecall) {
-      api.on('before_model', async (event: any) => {
+      api.on('before_prompt_build', async (event: any, ctx: any) => {
         try {
           const agentId = event?.agentId || 'default';
           const messages = event?.messages || [];
@@ -1138,31 +1110,19 @@ const algoMemoryPlugin = {
           if (query && shouldRetrieve(query, config.adaptiveRetrieval)) {
             const { hasMemory, memories } = await plugin.recall(agentId, query);
             if (hasMemory && memories.length > 0) {
-              // 将记忆注入到系统消息或特殊字段
-              // 兼容不同版本的 OpenClaw API
               const memoryContext = memories.map((m: any) => `[记忆] ${m.content}`).join('\n\n');
+              log.info(`[algo-memory] 已召回 ${memories.length} 条相关记忆`);
               
-              if (event.context) {
-                event.context.memories = memories;
-                event.context.memoryContext = memoryContext;
-              }
-              
-              // 如果有 system 消息，追加记忆上下文
-              if (Array.isArray(event.messages)) {
-                const systemMsgIndex = event.messages.findIndex((m: any) => m.role === 'system');
-                if (systemMsgIndex >= 0) {
-                  const existingContent = event.messages[systemMsgIndex].content || '';
-                  event.messages[systemMsgIndex].content = existingContent + '\n\n---\n以下是相关记忆：\n' + memoryContext;
-                }
-              }
-              
-              log.info(`[algo-memory] 已注入 ${memories.length} 条记忆到上下文`);
+              // 使用 prependSystemContext 正确注入记忆到系统提示之前
+              return {
+                prependSystemContext: `\n\n以下是相关记忆：\n${memoryContext}\n`
+              };
             }
           }
         } catch (err) {
-          log.error('[algo-memory] before_model 钩子错误:', err);
+          log.error('[algo-memory] before_prompt_build 钩子错误:', err);
         }
-      });
+      }, { priority: 10 });
     }
   }
 
