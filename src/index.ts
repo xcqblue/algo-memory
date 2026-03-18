@@ -10,7 +10,6 @@
 import { Type } from '@sinclair/typebox';
 
 // ============= 常量定义 =============
-const PLUGIN_VERSION = '2.2.3';
 const MAX_MESSAGE_LENGTH = 10000;  // 消息最大长度限制
 const CACHE_MAX_SIZE = 100;  // LRU 缓存最大条目数
 const CACHE_TTL_MS = 5 * 60 * 1000;  // 缓存 TTL: 5分钟
