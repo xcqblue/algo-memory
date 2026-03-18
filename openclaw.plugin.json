@@ -8,12 +8,114 @@
   "installDependencies": true,
   "configSchema": {
     "type": "object",
-    "additionalProperties": true,
+    "additionalProperties": false,
     "properties": {
-      "autoCapture": { "type": "boolean", "default": true, "description": "自动捕获对话记忆" },
-      "autoRecall": { "type": "boolean", "default": true, "description": "自动召回相关记忆" },
-      "maxResults": { "type": "number", "default": 5, "description": "召回结果数量" }
+      "autoCapture": {
+        "type": "boolean",
+        "default": true,
+        "description": "自动捕获对话记忆"
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true,
+        "description": "自动召回相关记忆"
+      },
+      "maxResults": {
+        "type": "number",
+        "default": 5,
+        "description": "召回结果数量"
+      },
+      "language": {
+        "type": "string",
+        "default": "auto",
+        "description": "语言设置: auto, zh, en, ja, ko, es, fr, de"
+      },
+      "coreKeywords": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "核心关键词列表"
+      },
+      "cleanupDays": {
+        "type": "number",
+        "default": 180,
+        "description": "记忆清理天数"
+      },
+      "capturePerTurn": {
+        "type": "number",
+        "default": 3,
+        "description": "每轮最多写入记忆数"
+      },
+      "scopes": {
+        "type": "object",
+        "description": "多 Scope 隔离配置",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "启用作用域隔离"
+          },
+          "defaultScope": {
+            "type": "string",
+            "default": "agent",
+            "description": "默认作用域"
+          },
+          "visibleAgents": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "description": "可见的 Agent 列表"
+          }
+        }
+      },
+      "llm": {
+        "type": "object",
+        "description": "LLM 增强配置",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "启用 LLM 增强"
+          },
+          "provider": {
+            "type": "string",
+            "default": "auto",
+            "description": "LLM 提供商"
+          },
+          "apiKey": {
+            "type": "string",
+            "default": "",
+            "description": "API Key",
+            "sensitive": true
+          },
+          "model": {
+            "type": "string",
+            "default": "",
+            "description": "模型名称"
+          },
+          "baseURL": {
+            "type": "string",
+            "default": "",
+            "description": "自定义 API 地址"
+          }
+        }
+      }
     }
   },
-  "requirements": { "node": ">=20.0.0", "openclaw": ">=2026.3.0" }
+  "uiHints": {
+    "autoCapture": { "label": "自动捕获", "description": "自动将对话内容保存为记忆" },
+    "autoRecall": { "label": "自动召回", "description": "自动召回相关记忆" },
+    "maxResults": { "label": "召回数量", "description": "每次召回的记忆条数" },
+    "language": { "label": "语言", "description": "选择记忆处理语言" },
+    "coreKeywords": { "label": "核心关键词", "description": "优先保留的关键词" },
+    "cleanupDays": { "label": "清理天数", "description": "超过此天数的记忆将被清理" },
+    "capturePerTurn": { "label": "每轮写入数", "description": "单轮对话最多写入的记忆数" },
+    "scopes.enabled": { "label": "启用隔离", "description": "启用 Agent 隔离模式" },
+    "llm.enabled": { "label": "LLM 增强", "description": "使用 LLM 提升记忆质量" },
+    "llm.apiKey": { "label": "API Key", "sensitive": true }
+  },
+  "requirements": {
+    "node": ">=20.0.0",
+    "openclaw": ">=2026.3.0"
+  }
 }

@@ -14,6 +14,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
+// ============= 常量定义 =============
+const MAX_MESSAGE_LENGTH = 10000;
+const MAX_CACHED_CONFIG_HASH_LENGTH = 100;
+const DB_SAVE_DEBOUNCE_MS = 2000;
+const LLM_CONCURRENT_LIMIT = 3;
+
 // ============= 类型定义 =============
 interface Config {
   autoCapture: boolean;
@@ -389,11 +395,30 @@ async function llmCallWithRetry<T>(fn: () => Promise<T>, maxRetries: number = 2,
   throw lastError;
 }
 
+// LLM 并发限制辅助函数
+async function withLLMSemaphore<T>(semaphore: { value: number }, fn: () => Promise<T>): Promise<T> {
+  while (semaphore.value >= LLM_CONCURRENT_LIMIT) {
+    await sleep(100);
+  }
+  semaphore.value++;
+  try {
+    return await fn();
+  } finally {
+    semaphore.value--;
+  }
+}
+
 // LLM 客户端
 class LLMClient {
   private config: Config;
   private log: any;
-  constructor(config: Config, log: any) { this.config = config; this.log = log; }
+  private semaphore: { value: number };
+  
+  constructor(config: Config, log: any, semaphore: { value: number }) { 
+    this.config = config; 
+    this.log = log;
+    this.semaphore = semaphore;
+  }
   
   async isCoreMemory(content: string): Promise<{ isCore: boolean; confidence: number }> {
     const localResult = isCoreKeyword(content, this.config.coreKeywords);
@@ -401,15 +426,17 @@ class LLMClient {
     if (!this.config.llm.enabled || !this.config.llm.apiKey) return { isCore: false, confidence: 0.5 };
     
     try {
-      const result = await llmCallWithRetry(async () => {
-        const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
-          body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '判断是否重要需要长期记住。回复JSON: {"isCore": true/false, "confidence": 0-1}' }, { role: 'user', content }], max_tokens: 100, temperature: 0.1 })
-        });
-        const jsonResponse = await response.json() as any;
-        return JSON.parse(jsonResponse.choices[0].message.content);
-      }, 2, 1000);
+      const result = await withLLMSemaphore(this.semaphore, async () => {
+        return llmCallWithRetry(async () => {
+          const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
+            body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '判断是否重要需要长期记住。回复JSON: {"isCore": true/false, "confidence": 0-1}' }, { role: 'user', content }], max_tokens: 100, temperature: 0.1 })
+          });
+          const jsonResponse = await response.json() as any;
+          return JSON.parse(jsonResponse.choices[0].message.content);
+        }, 2, 1000);
+      });
       return result;
     } catch (err) { this.log.error('[algo-memory] LLM isCoreMemory 失败:', err); return { isCore: false, confidence: 0.5 }; }
   }
@@ -418,15 +445,17 @@ class LLMClient {
     const local = extractKeywords(content);
     if (!this.config.llm.enabled || !this.config.llm.apiKey) return local;
     try {
-      const result = await llmCallWithRetry(async () => {
-        const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
-          body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '提取关键词，最多10个。回复JSON: {"keywords": ["k1", "k2"]}' }, { role: 'user', content }], max_tokens: 200, temperature: 0.2 })
-        });
-        const jsonResponse2 = await response.json() as any;
-        return JSON.parse(jsonResponse2.choices[0].message.content).keywords.join(',');
-      }, 2, 1000);
+      const result = await withLLMSemaphore(this.semaphore, async () => {
+        return llmCallWithRetry(async () => {
+          const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
+            body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '提取关键词，最多10个。回复JSON: {"keywords": ["k1", "k2"]}' }, { role: 'user', content }], max_tokens: 200, temperature: 0.2 })
+          });
+          const jsonResponse2 = await response.json() as any;
+          return JSON.parse(jsonResponse2.choices[0].message.content).keywords.join(',');
+        }, 2, 1000);
+      });
       return result;
     } catch (err) { this.log.error('[algo-memory] LLM extractKeywords 失败:', err); return local; }
   }
@@ -436,15 +465,17 @@ class LLMClient {
     if (sim >= 0.98 || sim < 0.5) return { isDuplicate: sim >= 0.98, similarity: sim };
     if (!this.config.llm.enabled || !this.config.llm.apiKey) return { isDuplicate: false, similarity: sim };
     try {
-      const result = await llmCallWithRetry(async () => {
-        const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
-          body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '判断是否重复。回复JSON: {"isDuplicate": true/false, "similarity": 0-1}' }, { role: 'user', content: `内容1: ${c1}\n内容2: ${c2}` }], max_tokens: 100, temperature: 0.1 })
-        });
-        const jsonResponse3 = await response.json() as any;
-        return JSON.parse(jsonResponse3.choices[0].message.content);
-      }, 2, 1000);
+      const result = await withLLMSemaphore(this.semaphore, async () => {
+        return llmCallWithRetry(async () => {
+          const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.config.llm.apiKey}` },
+            body: JSON.stringify({ model: this.config.llm.model, messages: [{ role: 'system', content: '判断是否重复。回复JSON: {"isDuplicate": true/false, "similarity": 0-1}' }, { role: 'user', content: `内容1: ${c1}\n内容2: ${c2}` }], max_tokens: 100, temperature: 0.1 })
+          });
+          const jsonResponse3 = await response.json() as any;
+          return JSON.parse(jsonResponse3.choices[0].message.content);
+        }, 2, 1000);
+      });
       return result;
     } catch (err) { this.log.error('[algo-memory] LLM isDuplicate 失败:', err); return { isDuplicate: sim >= this.config.dedupThreshold, similarity: sim }; }
   }
@@ -452,23 +483,29 @@ class LLMClient {
 
 // ============= 核心类 =============
 class MemoryPlugin {
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private db: any = null;
+  private db: SqlJsDatabase | null = null;
   private dbPath: string = '';  // 数据库路径，用于保存
-  private SQL: any = null;  // sql.js 初始化结果
+  private SQL: initSqlJs.SqlJsStatic | null = null;  // sql.js 初始化结果
   private cache: LRUCache<string, any>;
   private sessionCache: LRUCache<string, any>;
   private cleanupInterval: NodeJS.Timeout | null = null;
   private config: Config;
   private llmClient: LLMClient | null = null;
   private log: any;
+  // 性能优化：批量保存和 LLM 并发控制
+  private pendingSaves: number = 0;
+  private saveTimeout: NodeJS.Timeout | null = null;
+  private llmSemaphore: number = 0;
+  private cachedConfigHash: string = '';
 
   constructor(config: Partial<Config>, log: any = console) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.log = log;
     this.cache = new LRUCache({ max: 100, ttl: 5 * 60 * 1000 });
     this.sessionCache = new LRUCache({ max: 50, ttl: 30 * 60 * 1000 });
-    if (this.config.llm.enabled && this.config.llm.apiKey) this.llmClient = new LLMClient(this.config, log);
+    // LLM 并发控制信号量
+    const semaphore = { value: 0 };
+    if (this.config.llm.enabled && this.config.llm.apiKey) this.llmClient = new LLMClient(this.config, log, semaphore);
   }
 
   async init(stateDir: string): Promise<void> {
@@ -530,15 +567,28 @@ class MemoryPlugin {
     this.cleanupInterval = setInterval(() => this.cleanup(), 24 * 60 * 60 * 1000);
   }
 
-  // 保存数据库到文件
+  // 保存数据库到文件（批量优化：防抖）
   private saveDatabase(): void {
-    if (!this.db || !this.dbPath) return;
+    this.pendingSaves++;
+    if (this.saveTimeout) return;
+    
+    this.saveTimeout = setTimeout(() => {
+      this.flushDatabase();
+    }, DB_SAVE_DEBOUNCE_MS);
+  }
+  
+  // 强制刷新保存（立即保存）
+  private flushDatabase(): void {
+    if (!this.db || !this.dbPath || this.pendingSaves <= 0) return;
     try {
       const data = this.db.export();
       const buffer = Buffer.from(data);
       fs.writeFileSync(this.dbPath, buffer);
+      this.pendingSaves = 0;
     } catch (err) {
       this.log.error('[algo-memory] 保存数据库失败:', err);
+    } finally {
+      this.saveTimeout = null;
     }
   }
 
@@ -608,11 +658,10 @@ class MemoryPlugin {
     }
     
     // 边界情况处理：消息过长时截断
-    const maxMessageLength = 10000;
     messages = messages.map(msg => ({
       ...msg,
-      content: msg.content?.length > maxMessageLength 
-        ? msg.content.substring(0, maxMessageLength) + '...[截断]' 
+      content: msg.content?.length > MAX_MESSAGE_LENGTH 
+        ? msg.content.substring(0, MAX_MESSAGE_LENGTH) + '...[截断]' 
         : msg.content
     }));
     
@@ -730,9 +779,12 @@ class MemoryPlugin {
     
     const recallStartTime = Date.now();
     if (!shouldRetrieve(query, this.config.adaptiveRetrieval)) return { hasMemory: false, memories: [] };
-    // 缓存 key 加入关键配置哈希，确保配置变化时缓存失效
-    const configHash = hashContent(`${this.config.maxResults}:${this.config.recencyDecay}:${this.config.recencyHalfLife}`);
-    const cacheKey = `recall:${AgentId}:${configHash}:${query}`;
+    
+    // 缓存配置哈希，避免每次都计算
+    if (!this.cachedConfigHash) {
+      this.cachedConfigHash = hashContent(`${this.config.maxResults}:${this.config.recencyDecay}:${this.config.recencyHalfLife}`).substring(0, MAX_CACHED_CONFIG_HASH_LENGTH);
+    }
+    const cacheKey = `recall:${AgentId}:${this.cachedConfigHash}:${query}`;
     if (this.cache.has(cacheKey)) {
       this.log.info(`[algo-memory] 召回完成(缓存命中), agentId: ${AgentId}, 耗时: ${Date.now() - recallStartTime}ms`);
       return this.cache.get(cacheKey)!;
@@ -899,38 +951,61 @@ class MemoryPlugin {
     return imported;
   }
 
-  close(): void { if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; } if (this.db) { this.saveDatabase(); this.db.close(); this.db = null; } this.log.info('[algo-memory] 插件关闭'); }
+  close(): void { 
+    if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; } 
+    if (this.saveTimeout) { clearTimeout(this.saveTimeout); this.saveTimeout = null; }
+    if (this.db) { 
+      this.flushDatabase();  // 关闭前强制刷新保存
+      this.db.close(); 
+      this.db = null; 
+    } 
+    this.log.info('[algo-memory] 插件关闭'); 
+  }
 }
 
 // OpenClaw 插件导出（符合官方规范）
+// 注意: configSchema 仅在 openclaw.plugin.json 中定义，避免重复
 const algoMemoryPlugin = {
   id: "algo-memory",
   name: "Algo Memory",
   description: "纯算法长期记忆插件 - 支持多模型/智能去重/时间衰减",
   kind: "memory" as const,
-  // 简化配置 Schema，只保留核心配置
-  configSchema: {
-    type: "object",
-    additionalProperties: true,
-    properties: {
-      autoCapture: { type: "boolean", default: true, description: "自动捕获对话记忆" },
-      autoRecall: { type: "boolean", default: true, description: "自动召回相关记忆" },
-      maxResults: { type: "number", default: 5, description: "召回结果数量" }
-    }
-  },
 
-  register(api: any) {
+  async register(api: any) {
     const log = api.logger || console;
     // 使用配置或默认配置，确保插件能正常工作
-    const userConfig = api.pluginConfig || {};
+    const userConfig = api.pluginConfig || api.config || {};
+    // 合并完整配置（包含高级配置项）
     const config = {
       autoCapture: userConfig.autoCapture !== false,
       autoRecall: userConfig.autoRecall !== false,
-      maxResults: userConfig.maxResults || 5
+      maxResults: userConfig.maxResults || 5,
+      cleanupDays: userConfig.cleanupDays || 180,
+      language: userConfig.language || 'auto',
+      coreKeywords: userConfig.coreKeywords || DEFAULT_CONFIG.coreKeywords,
+      recencyDecay: userConfig.recencyDecay !== undefined ? userConfig.recencyDecay : DEFAULT_CONFIG.recencyDecay,
+      recencyHalfLife: userConfig.recencyHalfLife || DEFAULT_CONFIG.recencyHalfLife,
+      smartDedup: userConfig.smartDedup !== undefined ? userConfig.smartDedup : DEFAULT_CONFIG.smartDedup,
+      dedupThreshold: userConfig.dedupThreshold || DEFAULT_CONFIG.dedupThreshold,
+      capturePerTurn: userConfig.capturePerTurn || DEFAULT_CONFIG.capturePerTurn,
+      noiseFilter: userConfig.noiseFilter || DEFAULT_CONFIG.noiseFilter,
+      adaptiveRetrieval: userConfig.adaptiveRetrieval || DEFAULT_CONFIG.adaptiveRetrieval,
+      sessionMemory: userConfig.sessionMemory || DEFAULT_CONFIG.sessionMemory,
+      weibullDecay: userConfig.weibullDecay || DEFAULT_CONFIG.weibullDecay,
+      reinforcement: userConfig.reinforcement || DEFAULT_CONFIG.reinforcement,
+      mmr: userConfig.mmr || DEFAULT_CONFIG.mmr,
+      lengthNorm: userConfig.lengthNorm || DEFAULT_CONFIG.lengthNorm,
+      hardMinScore: userConfig.hardMinScore || DEFAULT_CONFIG.hardMinScore,
+      tier: userConfig.tier || DEFAULT_CONFIG.tier,
+      scopes: userConfig.scopes || DEFAULT_CONFIG.scopes,
+      llm: userConfig.llm || DEFAULT_CONFIG.llm,
+      threshold: userConfig.threshold || DEFAULT_CONFIG.threshold
     };
     const plugin = new MemoryPlugin(config, log);
-    const stateDir = api.getStateDir?.() || path.join(process.env.HOME || '/home/x', '.openclaw', 'workspace', 'algo-memory');
-    plugin.init(stateDir);
+    // 兼容不同版本的 OpenClaw API
+    const stateDir = api.getStateDir?.() || api.stateDir || path.join(process.env.HOME || process.env.USERPROFILE || '/home/x', '.openclaw', 'state', 'algo-memory');
+    // 使用 await 确保异步初始化完成
+    await plugin.init(stateDir);
     
     log.info('[algo-memory] 插件已加载，自动捕获: ' + config.autoCapture + ', 自动召回: ' + config.autoRecall);
 
@@ -1081,6 +1156,7 @@ const algoMemoryPlugin = {
   // 基础钩子 - 使用最安全的方式
   // agent_end: 存储记忆（agent 响应结束后）
   if (typeof api.on === 'function') {
+    // 自动捕获 - agent_end 钩子
     api.on('agent_end', async (event: any) => {
       try {
         const agentId = event?.agentId || 'default';
@@ -1092,6 +1168,27 @@ const algoMemoryPlugin = {
         log.error('[algo-memory] agent_end 钩子错误:', err);
       }
     });
+
+    // 自动召回 - agent_start 钩子
+    if (config.autoRecall) {
+      api.on('agent_start', async (event: any) => {
+        try {
+          const agentId = event?.agentId || 'default';
+          const query = event?.input || event?.query || event?.message || '';
+          if (query && typeof query === 'string' && query.trim().length > 0) {
+            const result = await plugin.recall(agentId, query);
+            if (result.hasMemory && result.memories.length > 0) {
+              // 将召回的记忆注入到上下文
+              event.context = event.context || {};
+              event.context.recalledMemories = result.memories;
+              log.info(`[algo-memory] 自动召回 ${result.memories.length} 条记忆`);
+            }
+          }
+        } catch (err) {
+          log.error('[algo-memory] agent_start 钩子错误:', err);
+        }
+      });
+    }
   }
 
   // 注册服务生命周期
