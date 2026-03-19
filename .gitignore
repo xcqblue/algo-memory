@@ -1,0 +1,11 @@
+# algo-memory plugin (独立管理)
+
+# sessions (太大)
+sessions/
+
+# openclaw runtime
+.openclaw/
+
+# OS
+.DS_Store
+Thumbs.db

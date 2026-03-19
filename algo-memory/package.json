@@ -1,0 +1,45 @@
+{
+  "name": "algo-memory",
+  "version": "2.2.3",
+  "description": "纯算法长期记忆插件 - 默认启用LLM / 支持多模型",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "dist",
+    "openclaw.plugin.json",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "long-term-memory",
+    "algo"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0",
+    "lru-cache": "^7.18.3",
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "openclaw": {
+    "id": "algo-memory",
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "installDependencies": true
+  }
+}

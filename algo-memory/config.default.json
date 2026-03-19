@@ -1,0 +1,79 @@
+{
+  "autoCapture": true,
+  "autoRecall": true,
+  "maxResults": 5,
+  "cleanupDays": 180,
+  "recencyDecay": true,
+  "recencyHalfLife": 180,
+  "smartDedup": true,
+  "dedupThreshold": 0.85,
+  "coreKeywords": [
+    "记住", "牢记", "重要", "不要忘记", "记住它",
+    "这是关键", "永久保留", "一直记住", "别忘了",
+    "remember", "important", "never forget", "always remember"
+  ],
+  "noiseFilter": {
+    "enabled": true,
+    "skipGreetings": true,
+    "skipCommands": true
+  },
+  "adaptiveRetrieval": {
+    "enabled": true,
+    "minQueryLength": 2,
+    "forceKeywords": ["记住", "之前", "上次", "记得", "remember", "before", "last"]
+  },
+  "sessionMemory": {
+    "enabled": false,
+    "maxSessionItems": 10
+  },
+  "weibullDecay": {
+    "enabled": false,
+    "shape": 1.5,
+    "scale": 90
+  },
+  "reinforcement": {
+    "enabled": false,
+    "factor": 0.5,
+    "maxMultiplier": 3
+  },
+  "mmr": {
+    "enabled": false,
+    "threshold": 0.85
+  },
+  "lengthNorm": {
+    "enabled": false,
+    "anchor": 500
+  },
+  "hardMinScore": {
+    "enabled": false,
+    "threshold": 0.35
+  },
+  "capturePerTurn": 3,
+  "tier": {
+    "enabled": false,
+    "coreThreshold": 10,
+    "peripheralThreshold": 0.15,
+    "ageDays": 60
+  },
+  "scopes": {
+    "enabled": false,
+    "defaultScope": "agent"
+  },
+  "llm": {
+    "enabled": true,
+    "provider": "auto",
+    "apiKey": "",
+    "model": "",
+    "baseURL": ""
+  },
+  "threshold": {
+    "useLlmForCore": false,
+    "useLlmForExtract": false,
+    "useLlmForDedup": false,
+    "minConfidence": 0.8,
+    "lengthForCore": 100,
+    "lengthForExtract": 200,
+    "dedupUncertaintyMin": 0.5,
+    "dedupUncertaintyMax": 0.98
+  }
+}
