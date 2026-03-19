@@ -738,13 +738,14 @@ class MemoryPlugin {
 
     let visibleAgentIds = this.getVisibleAgentIds(AgentId);
     let memories;
+    const safeLimit = Math.min(this.config.maxResults * 3, 100);  // 限制查询数量，防止过大
     if (visibleAgentIds.includes('%')) {
       // 可以看全部
-      memories = this.queryAll("SELECT * FROM memories ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, access_count DESC LIMIT ?", [this.config.maxResults * 3]);
+      memories = this.queryAll("SELECT * FROM memories ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, access_count DESC LIMIT ?", [safeLimit]);
     } else {
       // 只能看指定的几个
       const placeholders = visibleAgentIds.map(() => '?').join(',');
-      memories = this.queryAll(`SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, access_count DESC LIMIT ?`, [...visibleAgentIds, this.config.maxResults * 3]);
+      memories = this.queryAll(`SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, access_count DESC LIMIT ?`, [...visibleAgentIds, safeLimit]);
     }
 
     if (this.config.recencyDecay) {
@@ -1138,7 +1139,7 @@ const algoMemoryPlugin = {
     // before_prompt_build: 自动召回记忆（在构建 prompt 前注入上下文）
     // 这是正确的 API，用 prependSystemContext 注入记忆
     if (config.autoRecall) {
-      api.on('before_prompt_build', async (event: any, ctx: any) => {
+      api.on('before_prompt_build', async (event: any) => {
         try {
           const agentId = event?.agentId || 'default';
           const messages = event?.messages || [];
