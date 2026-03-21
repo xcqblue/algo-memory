@@ -28,6 +28,9 @@ export interface Config {
   capturePerTurn: number;
   llm: LLMConfig;
   threshold: ThresholdConfig;
+  lexicalOverlap: LexicalOverlapConfig;
+  sessionSummary: SessionSummaryConfig;
+  citedBoost: CitedBoostConfig;
 }
 
 export interface NoiseFilterConfig {
@@ -84,6 +87,28 @@ export interface HardMinScoreConfig {
   threshold: number;
 }
 
+export interface LexicalOverlapConfig {
+  enabled: boolean;
+  /** 超过此词重叠率（0-1）则降权 */
+  threshold: number;
+  /** 降权倍数 */
+  penalty: number;
+}
+
+export interface SessionSummaryConfig {
+  enabled: boolean;
+  /** Markdown 摘要写入目录，默认为 <stateDir>/memory */
+  dir: string;
+  /** 摘要文件最大条数（超出截断旧条目） */
+  maxItems: number;
+}
+
+export interface CitedBoostConfig {
+  enabled: boolean;
+  /** cited_count 乘数（乘以引用次数加一） */
+  factor: number;
+}
+
 export interface UrgencyDecayConfig {
   enabled: boolean;      // 开启 urgency 快速衰减
   halfLifeHours: number; // urgency 衰减半衰期（小时），默认 168（7天）
@@ -138,6 +163,7 @@ export interface Memory {
   keywords: string;
   importance: number;
   access_count: number;
+  cited_count: number;
   created_at: number;
   last_accessed: number;
   content_hash: string;
@@ -176,5 +202,8 @@ export const DEFAULT_CONFIG: Config = {
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
   llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
-  threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 }
+  threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
+  lexicalOverlap: { enabled: true, threshold: 0.5, penalty: 0.3 },
+  sessionSummary: { enabled: false, dir: 'memory', maxItems: 50 },
+  citedBoost: { enabled: true, factor: 0.05 },
 };

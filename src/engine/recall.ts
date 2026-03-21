@@ -9,6 +9,7 @@ import {
   weibullDecay,
   reinforcementFactor,
   mmrDeduplicate,
+  lexicalOverlapSuppress,
   lengthNorm
 } from '../utils.js';
 import { queryAll } from '../db/queries.js';
@@ -103,6 +104,11 @@ export async function recall(
 
       score *= reinforcementFactor(m.access_count, config.reinforcement);
 
+      // cited_count boost: more cited memories rank higher
+      if (config.citedBoost?.enabled && m.cited_count > 0) {
+        score *= (1 + config.citedBoost.factor * m.cited_count);
+      }
+
       if (config.lengthNorm.enabled) {
         score *= lengthNorm(m.content, config.lengthNorm.anchor);
       }
@@ -113,6 +119,11 @@ export async function recall(
 
   if (config.mmr.enabled) {
     memories = mmrDeduplicate(memories, config.mmr);
+  }
+
+  // Lexical overlap suppression — post-MMR secondary pass
+  if (config.lexicalOverlap?.enabled) {
+    memories = lexicalOverlapSuppress(memories, config.lexicalOverlap);
   }
 
   if (config.hardMinScore.enabled) {

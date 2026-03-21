@@ -3,7 +3,7 @@
  */
 
 import * as crypto from 'crypto';
-import type { Config, NoiseFilterConfig, TierConfig, ReinforcementConfig, Memory, SessionDedupConfig } from './types.js';
+import type { Config, NoiseFilterConfig, TierConfig, ReinforcementConfig, Memory, SessionDedupConfig, LexicalOverlapConfig } from './types.js';
 
 // ============= Constants =============
 export const MAX_MESSAGE_LENGTH = 10000;
@@ -236,6 +236,52 @@ export function mmrDeduplicate(items: Memory[], config: Config['mmr']): Memory[]
   }
 
   return selected;
+}
+
+/**
+ * Lexical Overlap Suppression — post-MMR secondary pass.
+ * For each pair of selected items above the threshold, penalize the lower-score one.
+ * Unlike MMR which greedily builds the set, this scans already-selected items
+ * and applies a multiplicative penalty to the runner-up if word overlap is too high.
+ * This catches overlap that MMR's sequential selection may have missed.
+ */
+export function lexicalOverlapSuppress(items: Memory[], config: LexicalOverlapConfig): Memory[] {
+  if (!config.enabled || items.length <= 1) return items;
+  const { threshold, penalty } = config;
+
+  const getWords = (content: string): Set<string> =>
+    new Set(content.toLowerCase().match(/[\u4e00-\u9fa5]|[a-z0-9]+/gi) || []);
+
+  const wordCache = new Map<string, Set<string>>();
+  const getCachedWords = (content: string): Set<string> => {
+    if (!wordCache.has(content)) wordCache.set(content, getWords(content));
+    return wordCache.get(content)!;
+  };
+
+  const result = items.map(m => ({ ...m }));
+  for (let i = 0; i < result.length; i++) {
+    const a = result[i];
+    if ((a._score ?? a.importance) <= 0) continue;
+    for (let j = i + 1; j < result.length; j++) {
+      const b = result[j];
+      if ((b._score ?? b.importance) <= 0) continue;
+      const wordsA = getCachedWords(a.content);
+      const wordsB = getCachedWords(b.content);
+      if (wordsA.size === 0 || wordsB.size === 0) continue;
+      const intersection = new Set([...wordsA].filter(x => wordsB.has(x)));
+      const union = new Set([...wordsA, ...wordsB]);
+      const overlap = intersection.size / union.size;
+      if (overlap > threshold) {
+        // Penalize the lower-scoring item
+        if ((a._score ?? a.importance) >= (b._score ?? b.importance)) {
+          b._score = (b._score ?? b.importance) * penalty;
+        } else {
+          a._score = (a._score ?? a.importance) * penalty;
+        }
+      }
+    }
+  }
+  return result.sort((a, b) => (b._score ?? b.importance) - (a._score ?? a.importance));
 }
 
 export function getTier(importance: number, accessCount: number, daysOld: number, config: TierConfig): 'core' | 'working' | 'peripheral' {

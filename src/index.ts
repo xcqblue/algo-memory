@@ -514,7 +514,58 @@ class MemoryPlugin {
     return { success: true, message: '会话去重状态已清除，同一查询可再次召回' };
   }
 
+  /** 将会话期间新增的记忆写入 Markdown 摘要文件（跨 session 延续） */
+  writeSessionSummary(): void {
+    if (!this.config.sessionSummary.enabled) return;
+    try {
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const stateDir = this.dbPath.replace(/[/\\][^/\\]+$/, '');
+      const summaryDir = path.join(stateDir, this.config.sessionSummary.dir);
+      if (!fs.existsSync(summaryDir)) fs.mkdirSync(summaryDir, { recursive: true });
+      const filePath = path.join(summaryDir, `${today}.md`);
+
+      // 读取现有内容（避免重复写入）
+      let existing = '';
+      if (fs.existsSync(filePath)) existing = fs.readFileSync(filePath, 'utf-8');
+
+      const header = existing.includes('# Algo-Memory 日记')
+        ? ''
+        : `# Algo-Memory 日记\n\n`;
+
+      // 收集最近一次 session 写入的记忆（从 DB 最新记录）
+      const sessionMemories = queryAll(this._db(),
+        `SELECT content, tier, importance, created_at FROM memories
+         ORDER BY created_at DESC LIMIT ?`,
+        [this.config.sessionSummary.maxItems]
+      ) as unknown as Array<{ content: string; tier: string; importance: number; created_at: number }>;
+
+      if (sessionMemories.length === 0) return;
+
+      const lines: string[] = [];
+      const dateStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+      lines.push(`\n## ${dateStr}  Session 摘要\n`);
+      for (const m of sessionMemories) {
+        const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        lines.push(`- [${m.tier.toUpperCase()}] ${m.content.slice(0, 200)}${m.content.length > 200 ? '…' : ''} *(重要性: ${m.importance.toFixed(2)}, ${time})*`);
+      }
+
+      let output = header;
+      if (!existing) output += header;
+      // 避免重复追加：检查末尾是否已有相同内容
+      const newBlock = lines.join('\n');
+      if (!existing.endsWith(newBlock) && !existing.includes(newBlock.slice(0, 50))) {
+        output = existing + newBlock + '\n';
+        fs.writeFileSync(filePath, output, 'utf-8');
+        this.log.info(`[algo-memory] Session 摘要已写入: ${filePath}`);
+      }
+    } catch (err) {
+      this.log.error('[algo-memory] Session 摘要写入失败:', err);
+    }
+  }
+
   close(): void {
+    // 写入 session 摘要（双重保险：session_end 钩子 + close 时写入）
+    this.writeSessionSummary();
     if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
     this.cache.clear();
     this.sessionCache.clear();
@@ -601,6 +652,15 @@ export default {
         }
       }, { priority: 10 });
     }
+
+    // === Session Summary ===
+    api.on('session_end', async () => {
+      try {
+        plugin.writeSessionSummary();
+      } catch (err) {
+        log.error('[algo-memory] session_end 钩子错误:', err);
+      }
+    });
 
     // === Tools ===
     const tools = [

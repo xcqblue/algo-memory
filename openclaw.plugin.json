@@ -81,6 +81,32 @@
           "threshold": { "type": "number", "default": 0.35 }
         }
       },
+      "lexicalOverlap": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "threshold": { "type": "number", "default": 0.5 },
+          "penalty": { "type": "number", "default": 0.3 }
+        }
+      },
+      "sessionSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "dir": { "type": "string", "default": "memory" },
+          "maxItems": { "type": "number", "default": 50 }
+        }
+      },
+      "citedBoost": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "factor": { "type": "number", "default": 0.05 }
+        }
+      },
       "tier": {
         "type": "object",
         "additionalProperties": false,
@@ -269,6 +295,17 @@
     "hardMinScore": { "label": "最低分过滤", "description": "过滤低于阈值的记忆" },
     "hardMinScore.enabled": { "label": "启用最低分过滤" },
     "hardMinScore.threshold": { "label": "最低分阈值" },
+    "lexicalOverlap": { "label": "词重叠抑制", "description": "MMR 之后二次降权重叠记忆" },
+    "lexicalOverlap.enabled": { "label": "启用词重叠抑制" },
+    "lexicalOverlap.threshold": { "label": "重叠阈值" },
+    "lexicalOverlap.penalty": { "label": "降权倍数" },
+    "sessionSummary": { "label": "Session摘要", "description": "session 结束时写 Markdown 摘要" },
+    "sessionSummary.enabled": { "label": "启用摘要写入" },
+    "sessionSummary.dir": { "label": "摘要目录" },
+    "sessionSummary.maxItems": { "label": "最大条数" },
+    "citedBoost": { "label": "引用强化", "description": "被引用次数多的记忆排名更高" },
+    "citedBoost.enabled": { "label": "启用引用强化" },
+    "citedBoost.factor": { "label": "引用乘数" },
     "tier": { "label": "分层管理", "description": "核心/工作/外围记忆分层" },
     "tier.enabled": { "label": "启用分层管理" },
     "tier.coreThreshold": { "label": "核心阈值" },
