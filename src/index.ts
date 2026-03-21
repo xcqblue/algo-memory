@@ -254,15 +254,6 @@ class MemoryPlugin {
     await doStore(deps, AgentId, messages);
   }
 
-  private updateTier(memoryId: string): void {
-    if (!this.config.tier.enabled || !this.db) return;
-    const mem = queryOne(this.db, 'SELECT importance, access_count, created_at FROM memories WHERE id = ?', [memoryId]) as any;
-    if (!mem) return;
-    const daysOld = (Date.now() - mem.created_at) / (1000 * 60 * 60 * 24);
-    const newTier = getTier(mem.importance, mem.access_count, daysOld, this.config.tier);
-    run(this.db, 'UPDATE memories SET tier = ? WHERE id = ?', [newTier, memoryId]);
-  }
-
   async recall(AgentId: string, query: string): Promise<{ hasMemory: boolean; memories: any[] }> {
     const deps: RecallDeps = {
       db: this.db,
@@ -293,12 +284,13 @@ class MemoryPlugin {
   cleanup(): void {
     if (!this.db) return;
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
+    const CLEANUP_BATCH = 500;  // delete in batches to avoid long write locks
     const changes = run(this.db,
-      'DELETE FROM memories WHERE last_accessed < ? AND layer = "general" AND tier = "peripheral"',
-      [cutoff]
+      `DELETE FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
+      [cutoff, CLEANUP_BATCH]
     );
     if (changes > 0) this.scheduleSave();
-    this.log.info('[algo-memory] 清理了', changes, '条过期记忆');
+    this.log.info('[algo-memory] 清理了', changes, '条过期记忆（上限' + CLEANUP_BATCH + '条/次）');
   }
 
   // ===== Tool Methods =====
@@ -330,16 +322,17 @@ class MemoryPlugin {
       const ftsQuery = terms.map((w: string) => `"${w}"*`).join(' OR ') || '';
       if (ftsQuery) {
         let results;
+        const ftsLimit = Math.min(this.config.maxResults, 20);
         if (visibleAgentIds === null) {
           results = queryAll(this.db,
-            `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT 20`,
-            [ftsQuery]
+            `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
+            [ftsQuery, ftsLimit]
           );
         } else {
           const placeholders = visibleAgentIds.map(() => '?').join(',');
           results = queryAll(this.db,
-            `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE m.agent_id IN (${placeholders}) AND memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT 20`,
-            [...visibleAgentIds, ftsQuery]
+            `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE m.agent_id IN (${placeholders}) AND memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
+            [...visibleAgentIds, ftsQuery, ftsLimit]
           );
         }
         if (results.length > 0) return results;
@@ -350,13 +343,14 @@ class MemoryPlugin {
 
     // Fallback: LIKE query
     const q = `%${query}%`;
+    const likeLimit = Math.min(this.config.maxResults, 20);
     if (visibleAgentIds === null) {
-      return queryAll(this.db, 'SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC LIMIT 20', [q, q]);
+      return queryAll(this.db, 'SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC LIMIT ?', [q, q, likeLimit]);
     }
     const placeholders = visibleAgentIds.map(() => '?').join(',');
     return queryAll(this.db,
-      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC LIMIT 20`,
-      [...visibleAgentIds, q, q]
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC LIMIT ?`,
+      [...visibleAgentIds, q, q, likeLimit]
     );
   }
 
@@ -532,12 +526,12 @@ class MemoryPlugin {
       this.db = null;
     }
     // Remove PID file so a fresh start is clean next time
+    // Derive from dbPath so it always matches what init() wrote
     try {
-      const pidPath = path.join(
-        process.env.HOME || '/home/x',
-        '.openclaw', 'state', 'algo-memory', 'algo-memory.pid'
-      );
-      fs.unlinkSync(pidPath);
+      if (this.dbPath) {
+        const pidPath = this.dbPath.replace(/[/\\][^/\\]+$/, '') + '/algo-memory.pid';
+        fs.unlinkSync(pidPath);
+      }
     } catch (_) { /* ignore */ }
     this.log.info('[algo-memory] 插件已关闭');
   }
