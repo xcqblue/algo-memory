@@ -180,7 +180,7 @@ class MemoryPlugin {
     await doStore(deps, AgentId, messages);
   }
 
-  async recall(AgentId: string, query: string): Promise<{ hasMemory: boolean; memories: any[] }> {
+  async recall(AgentId: string, query: string, maxInjectTokens?: number): Promise<{ hasMemory: boolean; memories: any[] }> {
     const deps = {
       db: this._db(),
       config: this.config,

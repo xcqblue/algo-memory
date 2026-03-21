@@ -23,15 +23,20 @@ export function initSchema(db: AnyDatabase, log: any): void {
       access_count INTEGER DEFAULT 0, cited_count INTEGER DEFAULT 0,
       urgency REAL DEFAULT 1.0,
       created_at INTEGER, last_accessed INTEGER, content_hash TEXT,
-      metadata TEXT
+      metadata TEXT, deleted_at INTEGER DEFAULT NULL
     )
   `, 'memories 表');
 
-  // urgency column was added later — add it if missing (for existing DBs)
-  try {
-    db.prepare("SELECT urgency FROM memories LIMIT 0").run();
-  } catch (_) {
-    try { db.prepare("ALTER TABLE memories ADD COLUMN urgency REAL DEFAULT 1.0").run(); } catch (_2) { /* ignore */ }
+  // Add missing columns for existing DBs (migration-safe)
+  for (const [col, type, defaultVal] of [
+    ['urgency', 'REAL', '1.0'],
+    ['deleted_at', 'INTEGER', 'NULL'],
+  ] as [string, string, string][]) {
+    try {
+      db.prepare(`SELECT ${col} FROM memories LIMIT 0`).run();
+    } catch (_) {
+      try { db.prepare(`ALTER TABLE memories ADD COLUMN ${col} ${type} DEFAULT ${defaultVal}`).run(); } catch (_2) { /* ignore */ }
+    }
   }
 
   // Indexes (non-fatal if they fail)

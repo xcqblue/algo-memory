@@ -94,14 +94,18 @@ export async function store(
   const maxCapture = config.capturePerTurn || 3;
   const storeStartTime = Date.now();
 
+  // Score and sort messages by priority before processing
+  const scoredMessages = messages
+    .map((msg, i) => ({ msg, score: messagePriority(msg.content, config.coreKeywords), index: i }))
+    .filter(({ msg, score }) => msg.role === 'user' && score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index) // highest score first, stable tie-break
+    .slice(0, maxCapture); // already limited here, no need to count in loop
+
   try {
     // Collect tier-update candidates to batch them (avoids N+1 queries)
     const tierCandidates: string[] = [];
 
-    for (const msg of messages) {
-      if (captured >= maxCapture) break;
-      if (msg.role !== 'user') continue;
-
+    for (const { msg } of scoredMessages) {
       const content = normalizeText(msg.content);
       if (!content || isNoise(content, config.noiseFilter)) continue;
 
