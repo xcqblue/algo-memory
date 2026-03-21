@@ -19,9 +19,10 @@ import { queryAll, queryOne, run, runOrThrow } from '../db/queries.js';
 import { LLMClient } from './llm.js';
 import type { DbLike } from '../db/queries.js';
 
-// Type cast for raw db rows from queryAll
+// Raw row types returned by queryAll
 type IdRow = { id: string };
 type IdContentRow = { id: string; content: string };
+type TierRow = { id: string; importance: number; access_count: number; created_at: number };
 
 // Helper to compute content_hash for storage
 function safeContent(content: string): string {
@@ -33,7 +34,6 @@ export interface StoreDeps {
   config: Config;
   llmClient: LLMClient | null;
   log: any;
-  updateTier: (memoryId: string) => void;
   saveDatabase: () => void;
   clearRecallCache: (agentId: string) => void;
   metrics: {
@@ -52,7 +52,7 @@ export async function store(
   AgentId: string,
   messages: any[]
 ): Promise<number> {
-  const { db, config, llmClient, log, updateTier, saveDatabase, clearRecallCache, metrics } = deps;
+  const { db, config, llmClient, log, saveDatabase, clearRecallCache, metrics } = deps;
 
   // Boundary checks
   if (!AgentId) {
@@ -77,8 +77,8 @@ export async function store(
   const storeStartTime = Date.now();
 
   try {
-    // Collect all DB mutations so we can persist once at the end of the loop
-    const dirty: string[] = [];
+    // Collect tier-update candidates to batch them (avoids N+1 queries)
+    const tierCandidates: string[] = [];
 
     for (const msg of messages) {
       if (captured >= maxCapture) break;
@@ -100,8 +100,7 @@ export async function store(
           'UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?',
           [Date.now(), existing.id]
         );
-        dirty.push(existing.id);
-        updateTier(existing.id);
+        tierCandidates.push(existing.id);
         continue;
       }
 
@@ -130,8 +129,7 @@ export async function store(
               'UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?',
               [Date.now(), s.id]
             );
-            dirty.push(s.id as string);
-            updateTier(s.id as string);
+            tierCandidates.push(s.id as string);
             break;
           }
         }
@@ -198,10 +196,21 @@ export async function store(
       captured++;
     }
 
-    // Flush all pending updates once after the loop
-    if (dirty.length > 0) {
-      clearRecallCache(AgentId);
+    // Batch tier promotion — one SELECT + one UPDATE for all candidates
+    if (tierCandidates.length > 0 && config.tier.enabled) {
+      const uniqueIds = [...new Set(tierCandidates)];
+      const rows = queryAll(db,
+        `SELECT id, importance, access_count, created_at FROM memories WHERE id IN (${uniqueIds.map(() => '?').join(',')})`,
+        uniqueIds
+      ) as TierRow[];
+      for (const row of rows) {
+        const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
+        const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
+        run(db, 'UPDATE memories SET tier = ? WHERE id = ?', [newTier, row.id]);
+      }
     }
+
+    if (tierCandidates.length > 0) clearRecallCache(AgentId);
     const storeDuration = Date.now() - storeStartTime;
     if (captured > 0) {
       saveDatabase();

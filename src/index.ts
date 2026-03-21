@@ -177,6 +177,7 @@ class MemoryPlugin {
     // Kick off first cleanup immediately so the timer doesn't drift for days
     this.cleanup();
     this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
+    this.startFlushTimer();
   }
 
   private saveDatabase(): void {
@@ -190,6 +191,32 @@ class MemoryPlugin {
       this.metrics.dbErrors++;
       this.metrics.lastErrorAt = Date.now();
     }
+  }
+
+  // Debounced save — avoids hammering disk on rapid store() calls
+  private pendingSave: NodeJS.Timeout | null = null;
+  private flushTimer: NodeJS.Timeout | null = null;   // periodic forced flush
+  private lastPersistTime: number = Date.now();       // track last save for periodic check
+
+  private scheduleSave(): void {
+    if (this.pendingSave) return;  // already scheduled
+    this.pendingSave = setTimeout(() => {
+      this.pendingSave = null;
+      this.saveDatabase();
+      this.lastPersistTime = Date.now();
+    }, 500);  // flush within 500ms
+  }
+
+  private startFlushTimer(): void {
+    // Every 30s force a flush — guarantees data at risk < 30s even on crash
+    this.flushTimer = setInterval(() => {
+      if (this.pendingSave) {
+        clearTimeout(this.pendingSave);
+        this.pendingSave = null;
+        this.saveDatabase();
+        this.lastPersistTime = Date.now();
+      }
+    }, 30_000);
   }
 
   private clearRecallCache(AgentId: string): void {
@@ -220,7 +247,6 @@ class MemoryPlugin {
       config: this.config,
       llmClient: this.llmClient,
       log: this.log,
-      updateTier: (id) => this.updateTier(id),
       saveDatabase: () => this.saveDatabase(),
       clearRecallCache: (aid) => this.clearRecallCache(aid),
       metrics: this.metrics
@@ -271,7 +297,7 @@ class MemoryPlugin {
       'DELETE FROM memories WHERE last_accessed < ? AND layer = "general" AND tier = "peripheral"',
       [cutoff]
     );
-    if (changes > 0) this.saveDatabase();
+    if (changes > 0) this.scheduleSave();
     this.log.info('[algo-memory] 清理了', changes, '条过期记忆');
   }
 
@@ -337,20 +363,34 @@ class MemoryPlugin {
   getStats(AgentId: string): { total: number; core: number; working: number; peripheral: number; general: number; metrics: typeof MemoryPlugin.prototype.metrics } {
     if (!this.db) return { total: 0, core: 0, working: 0, peripheral: 0, general: 0, metrics: this.metrics };
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
-    let total = 0, core = 0, peripheral = 0, general = 0;
 
+    let row: Record<string, unknown> | null;
     if (visibleAgentIds === null) {
-      total = (queryOne(this.db, 'SELECT COUNT(*) as c FROM memories')?.c as number) || 0;
-      core = (queryOne(this.db, 'SELECT COUNT(*) as c FROM memories WHERE tier = ?', ['core'])?.c as number) || 0;
-      peripheral = (queryOne(this.db, 'SELECT COUNT(*) as c FROM memories WHERE tier = ?', ['peripheral'])?.c as number) || 0;
-      general = (queryOne(this.db, 'SELECT COUNT(*) as c FROM memories WHERE layer = ?', ['general'])?.c as number) || 0;
+      row = queryOne(this.db,
+        `SELECT
+          COUNT(*) as total,
+          SUM(tier = 'core') as core,
+          SUM(tier = 'peripheral') as peripheral,
+          SUM(layer = 'general') as general
+         FROM memories`
+      );
     } else {
       const placeholders = visibleAgentIds.map(() => '?').join(',');
-      total = (queryOne(this.db, `SELECT COUNT(*) as c FROM memories WHERE agent_id IN (${placeholders})`, visibleAgentIds)?.c as number) || 0;
-      core = (queryOne(this.db, `SELECT COUNT(*) as c FROM memories WHERE agent_id IN (${placeholders}) AND tier = ?`, [...visibleAgentIds, 'core'])?.c as number) || 0;
-      peripheral = (queryOne(this.db, `SELECT COUNT(*) as c FROM memories WHERE agent_id IN (${placeholders}) AND tier = ?`, [...visibleAgentIds, 'peripheral'])?.c as number) || 0;
-      general = (queryOne(this.db, `SELECT COUNT(*) as c FROM memories WHERE agent_id IN (${placeholders}) AND layer = ?`, [...visibleAgentIds, 'general'])?.c as number) || 0;
+      row = queryOne(this.db,
+        `SELECT
+          COUNT(*) as total,
+          SUM(tier = 'core') as core,
+          SUM(tier = 'peripheral') as peripheral,
+          SUM(layer = 'general') as general
+         FROM memories WHERE agent_id IN (${placeholders})`,
+        visibleAgentIds
+      );
     }
+
+    const total = (row?.total as number) || 0;
+    const core = (row?.core as number) || 0;
+    const peripheral = (row?.peripheral as number) || 0;
+    const general = (row?.general as number) || 0;
 
     return {
       total,
@@ -371,7 +411,7 @@ class MemoryPlugin {
     if (!this.db) return false;
     const changes = run(this.db, 'DELETE FROM memories WHERE id = ? AND agent_id = ?', [memoryId, AgentId]);
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
+    if (changes > 0) this.scheduleSave();
     return changes > 0;
   }
 
@@ -380,7 +420,7 @@ class MemoryPlugin {
     const placeholders = memoryIds.map(() => '?').join(',');
     const changes = run(this.db, `DELETE FROM memories WHERE id IN (${placeholders}) AND agent_id = ?`, [...memoryIds, AgentId]);
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
+    if (changes > 0) this.scheduleSave();
     return changes;
   }
 
@@ -390,7 +430,7 @@ class MemoryPlugin {
       ? run(this.db, 'DELETE FROM memories WHERE agent_id = ? AND tier != ?', [AgentId, 'core'])
       : run(this.db, 'DELETE FROM memories WHERE agent_id = ?', [AgentId]);
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
+    if (changes > 0) this.scheduleSave();
     return changes;
   }
 
@@ -403,7 +443,7 @@ class MemoryPlugin {
       [safe, tier, isCore ? 'core' : 'general', extractKeywords(safe), isCore ? 1.0 : 0.5, Date.now(), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
+    if (changes > 0) this.scheduleSave();
     return changes > 0;
   }
 
@@ -459,7 +499,7 @@ class MemoryPlugin {
       return 0;
     }
     if (imported > 0) {
-      this.saveDatabase();
+      this.scheduleSave();
       this.clearRecallCache(AgentId);
     }
     return imported;
@@ -475,9 +515,18 @@ class MemoryPlugin {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
     this.cache.clear();
     this.sessionCache.clear();
+    if (this.pendingSave) {
+      clearTimeout(this.pendingSave);
+      this.pendingSave = null;
+    }
     if (this.db) {
+      // Force immediate flush before closing — no more async scheduling
       this.saveDatabase();
       this.db.close();
       this.db = null;
