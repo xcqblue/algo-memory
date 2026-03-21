@@ -214,6 +214,7 @@ export async function store(
         importance,
         access_count: 1,
         cited_count: 0,
+        urgency: 1.0,
         created_at: Date.now(),
         last_accessed: Date.now(),
         content_hash: contentHash,
@@ -222,9 +223,9 @@ export async function store(
       };
 
       runOrThrow(db,
-        `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
+        `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.urgency, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
       );
 
       sessionRecentHashes.push(memory.id);

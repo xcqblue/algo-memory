@@ -27,6 +27,13 @@ export function initSchema(db: AnyDatabase, log: any): void {
     )
   `, 'memories 表');
 
+  // urgency column was added later — add it if missing (for existing DBs)
+  try {
+    db.prepare("SELECT urgency FROM memories LIMIT 0").run();
+  } catch (_) {
+    try { db.prepare("ALTER TABLE memories ADD COLUMN urgency REAL DEFAULT 1.0").run(); } catch (_2) { /* ignore */ }
+  }
+
   // Indexes (non-fatal if they fail)
   for (const idx of [
     'CREATE INDEX IF NOT EXISTS idx_agent ON memories(agent_id)',

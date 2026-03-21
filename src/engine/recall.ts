@@ -54,9 +54,12 @@ export async function recall(
     return { hasMemory: false, memories: [] };
   }
 
-  // Check cache
+  // Session dedup is active — do NOT use cache, because same query at different times
+  // should produce different results (one eligible, one skipped). Cache would bypass dedup.
+  const useCache = !config.adaptiveRetrieval.sessionDedup?.enabled;
+
   const cacheKey = `recall:${AgentId}:${configHash}:${query}`;
-  if (cache.has(cacheKey)) {
+  if (useCache && cache.has(cacheKey)) {
     log.info(`[algo-memory] 召回完成(缓存命中), agentId: ${AgentId}, 耗时: ${Date.now() - recallStartTime}ms`);
     const cached = cache.get(cacheKey)!;
     return cached;
@@ -91,7 +94,7 @@ export async function recall(
 
       // Urgency decay: urgency starts at 1.0, decays rapidly (default half-life 7 days)
       if (config.urgencyDecay.enabled) {
-        const urgency = (m as any).urgency ?? 1.0;
+        const urgency = m.urgency ?? 1.0;
         const urgencyDecay = Math.pow(0.5, hoursOld / config.urgencyDecay.halfLifeHours);
         score *= urgency * urgencyDecay;
       }
@@ -145,7 +148,7 @@ export async function recall(
 
   const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
 
-  cache.set(cacheKey, result);
+  if (useCache) cache.set(cacheKey, result);
 
   const recallDuration = Date.now() - recallStartTime;
   log.info(`[algo-memory] 召回完成, agentId: ${AgentId}, 命中: ${limited.length}, 耗时: ${recallDuration}ms`);
