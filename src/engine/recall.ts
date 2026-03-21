@@ -12,7 +12,7 @@ import {
   lexicalOverlapSuppress,
   lengthNorm
 } from '../utils.js';
-import { queryAll } from '../db/queries.js';
+import { queryAll, run } from '../db/queries.js';
 import type { DbLike } from '../db/queries.js';
 
 export interface RecallDeps {
@@ -99,7 +99,8 @@ export async function recall(
       if (config.weibullDecay.enabled) {
         score *= weibullDecay(daysOld, config.weibullDecay.shape, config.weibullDecay.scale);
       } else {
-        score *= (0.3 + 0.7 * Math.pow(0.5, daysOld / halfLife));
+        // Floor at 0.5 — old memories stay relevant, never collapse to zero
+        score *= (0.5 + 0.5 * Math.pow(0.5, daysOld / halfLife));
       }
 
       score *= reinforcementFactor(m.access_count, config.reinforcement);
@@ -131,6 +132,17 @@ export async function recall(
   }
 
   const limited = memories.slice(0, config.maxResults);
+
+  // Auto-increment cited_count for each recalled memory
+  if (limited.length > 0) {
+    const ids = limited.map(m => m.id);
+    const placeholders = ids.map(() => '?').join(',');
+    run(db,
+      `UPDATE memories SET cited_count = cited_count + 1, last_accessed = ? WHERE id IN (${placeholders})`,
+      [Date.now(), ...ids]
+    );
+  }
+
   const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
 
   cache.set(cacheKey, result);

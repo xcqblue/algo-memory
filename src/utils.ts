@@ -129,6 +129,21 @@ export function getRetrieveKeywords(language: string): string[] {
 }
 
 // ============= Retrieval Decision =============
+const META_PATTERNS = [
+  // English meta-questions
+  /^(do you|can you|could you|would you)\s+(remember|know|recall)/i,
+  /^(what|how)\s+do\s+(i|you)/i,
+  // Chinese meta-questions
+  /^你还记得|^你知道吗|^你能记住|^记得.*吗/i,
+  /^什么是|^什么叫|^如何/i,
+  // "what is X" short queries
+  /^(what|who|which)\s+\w+\??$/i,
+  /^(什么|谁|哪个|怎样)\??$/i,
+];
+
+const EMOJI_ONLY = /^[\s😊👍❤️😂😎😢😡🎉🔥✨💡⭐✅❌🤔🙏🎵🎮🎬📸💻📱🌟😴🚀💼😁🥰😇🤝]+$/;
+const SKIP_COMMANDS = /^(hey|hi|hello|嗨|你好|您好)$/i;
+
 export function shouldRetrieve(
   query: string,
   config: Config['adaptiveRetrieval'],
@@ -137,14 +152,29 @@ export function shouldRetrieve(
   if (!config.enabled) return true;
   if (!query || query.trim().length < 1) return false;
 
-  const lowerQuery = query.toLowerCase();
+  const trimmed = query.trim();
+  const lowerQuery = trimmed.toLowerCase();
+
+  // Skip pure emoji messages
+  if (EMOJI_ONLY.test(trimmed)) return false;
+
+  // Skip bare greetings / commands
+  if (SKIP_COMMANDS.test(trimmed)) return false;
+
+  // Skip short "what/who/which X" without detail (likely just asking for definition)
+  if (/^(what|who|which)\s+\w{1,8}\??$/i.test(trimmed) && trimmed.length < 15) return false;
+  if (/^(什么|谁|哪个)\??$/.test(trimmed)) return false;
+
+  // Skip meta-questions (反问句 / interrogative about memory itself)
+  if (META_PATTERNS.some(p => p.test(trimmed))) return false;
+
   // Force keywords always trigger retrieval (even after recent recall)
   if (config.forceKeywords?.some((k: string) => lowerQuery.includes(k))) return true;
 
   // Length gate
-  const isCJK = /[\u4e00-\u9fa5]/.test(query);
+  const isCJK = /[\u4e00-\u9fa5]/.test(trimmed);
   const minLen = isCJK ? MIN_CJK_QUERY_LENGTH : MIN_EN_QUERY_LENGTH;
-  if (query.trim().length < minLen) return false;
+  if (trimmed.length < minLen) return false;
 
   // Session deduplication: skip if query is too similar to recent recall within window
   if (sessionDedup && config.sessionDedup?.enabled) {

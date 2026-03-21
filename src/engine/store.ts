@@ -24,9 +24,28 @@ type IdRow = { id: string };
 type IdContentRow = { id: string; content: string };
 type TierRow = { id: string; importance: number; access_count: number; created_at: number };
 
+// Normalize content before storing: strip @mentions, compress whitespace, remove markdown noise
+function normalizeForStorage(content: string): string {
+  let text = content
+    // Strip @mentions
+    .replace(/@\w+/g, '')
+    // Compress multiple whitespace to single space
+    .replace(/\s+/g, ' ')
+    // Remove common markdown noise (keep the text, not the markup)
+    .replace(/```[\s\S]*?```/g, m => m.replace(/```/g, '')) // strip code blocks, keep inner text
+    .replace(/`([^`]+)`/g, '$1')  // strip inline code markers, keep text
+    .replace(/\*\*([^*]+)\*\*/g, '$1') // strip bold
+    .replace(/\*([^*]+)\*/g, '$1')   // strip italic
+    .replace(/^#+\s*/gm, '')        // strip heading markers
+    .replace(/^[-*+]\s+/gm, '')     // strip list bullets
+    .replace(/^\d+\.\s*/gm, '')     // strip numbered list
+    .trim();
+  return text;
+}
+
 // Helper to compute content_hash for storage
 function safeContent(content: string): string {
-  return content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return normalizeForStorage(content).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 export interface StoreDeps {
@@ -75,6 +94,8 @@ export async function store(
   let captured = 0;
   const maxCapture = config.capturePerTurn || 3;
   const storeStartTime = Date.now();
+  // Session-level cap: skip content similar to what we just stored this batch
+  const sessionRecentHashes: string[] = [];
 
   try {
     // Collect tier-update candidates to batch them (avoids N+1 queries)
@@ -89,6 +110,18 @@ export async function store(
 
       const safe = safeContent(content);
       const contentHash = hashContent(safe);
+
+      // === Recent同类 capping: skip if very similar to what we just stored this batch ===
+      if (sessionRecentHashes.length > 0) {
+        const recentContents = queryAll(db,
+          `SELECT content FROM memories WHERE id IN (${sessionRecentHashes.map(() => '?').join(',')})`,
+          sessionRecentHashes
+        ) as Array<{ content: string }>;
+        const isDupInSession = recentContents.some(rc =>
+          jaccardSimilarity(safe, rc.content) >= 0.8
+        );
+        if (isDupInSession) continue; // skip without counting toward maxCapture
+      }
 
       // Exact dedup check
       const existing = queryOne(db,
@@ -194,6 +227,7 @@ export async function store(
         [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
       );
 
+      sessionRecentHashes.push(memory.id);
       captured++;
     }
 
