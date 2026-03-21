@@ -60,12 +60,17 @@
             "enabled": false,
             "maxSessionItems": 10
           },
-          
+
           "tier": {
             "enabled": false,
-            "coreThreshold": 3,
-            "peripheralThreshold": 0.3,
-            "ageDays": 90
+            "coreThreshold": 10,
+            "peripheralThreshold": 0.15,
+            "ageDays": 60,
+            "weights": {
+              "core": 1.5,
+              "working": 1.0,
+              "peripheral": 0.5
+            }
           },
           
           "weibullDecay": {
@@ -163,9 +168,14 @@
 | 配置 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `tier.enabled` | boolean | false | 启用三层晋升 |
-| `tier.coreThreshold` | number | 10 | 晋升核心阈值 |
-| `tier.peripheralThreshold` | number | 0.15 | 边缘阈值 |
-| `tier.ageDays` | number | 60 | 天数阈值 |
+| `tier.coreThreshold` | number | 10 | 晋升核心阈值（访问次数） |
+| `tier.peripheralThreshold` | number | 0.15 | 边缘阈值（compositeScore） |
+| `tier.ageDays` | number | 60 | 天数阈值（超期不升 core） |
+| `tier.weights.core` | number | 1.5 | 核心记忆召回权重倍数 |
+| `tier.weights.working` | number | 1.0 | 工作记忆召回权重倍数 |
+| `tier.weights.peripheral` | number | 0.5 | 外围记忆召回权重倍数 |
+
+> **权重说明**：`score = tier权重 × importance × 时间衰减`。调整权重可以改变不同层级记忆在召回时的相对优先级。
 
 ### 多 Scope 隔离
 
