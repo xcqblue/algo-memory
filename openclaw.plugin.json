@@ -61,7 +61,8 @@
         "additionalProperties": false,
         "properties": {
           "enabled": { "type": "boolean", "default": false },
-          "threshold": { "type": "number", "default": 0.85 }
+          "threshold": { "type": "number", "default": 0.85 },
+          "lambda": { "type": "number", "default": 0.7, "description": "MMR 相关性权重（0-1），1=只求相关，0=只求多样" }
         }
       },
       "lengthNorm": {
@@ -134,7 +135,15 @@
         "properties": {
           "enabled": { "type": "boolean", "default": true },
           "minQueryLength": { "type": "number", "default": 2 },
-          "forceKeywords": { "type": "array", "items": { "type": "string" }, "default": ["记住", "之前", "上次", "记得", "remember", "before", "last", "前", "上次"] }
+          "forceKeywords": { "type": "array", "items": { "type": "string" }, "default": ["记住", "之前", "上次", "记得", "remember", "before", "last", "前", "上次", "what", "why", "how", "什么", "为什么", "怎么"] },
+          "sessionDedup": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "windowMs": { "type": "number", "default": 30000 },
+              "similarityThreshold": { "type": "number", "default": 0.6 }
+            }
+          }
         }
       },
       "sessionMemory": {
@@ -164,7 +173,8 @@
         "type": "object",
         "properties": {
           "enabled": { "type": "boolean", "default": false },
-          "threshold": { "type": "number", "default": 0.85 }
+          "threshold": { "type": "number", "default": 0.85 },
+          "lambda": { "type": "number", "default": 0.7 }
         }
       },
       "lengthNorm": {
@@ -248,6 +258,11 @@
     "mmr": { "label": "MMR去重", "description": "最大边际相关性去重" },
     "mmr.enabled": { "label": "启用MMR" },
     "mmr.threshold": { "label": "MMR阈值" },
+    "mmr.lambda": { "label": "MMR相关性权重", "description": "1=只求相关，0=只求多样，推荐0.7" },
+    "adaptiveRetrieval.sessionDedup": { "label": "会话去重", "description": "短时间相同查询不重复召回" },
+    "adaptiveRetrieval.sessionDedup.enabled": { "label": "启用会话去重" },
+    "adaptiveRetrieval.sessionDedup.windowMs": { "label": "去重窗口", "description": "毫秒内相同查询不重复召回" },
+    "adaptiveRetrieval.sessionDedup.similarityThreshold": { "label": "去重相似度阈值" },
     "lengthNorm": { "label": "长度归一化", "description": "对长内容进行重要性归一化" },
     "lengthNorm.enabled": { "label": "启用长度归一化" },
     "lengthNorm.anchor": { "label": "锚点长度" },

@@ -40,6 +40,15 @@ export interface AdaptiveRetrievalConfig {
   enabled: boolean;
   minQueryLength: number;
   forceKeywords: string[];
+  sessionDedup: SessionDedupConfig;
+}
+
+export interface SessionDedupConfig {
+  enabled: boolean;
+  /** 毫秒内相同/相似查询不再重复召回 */
+  windowMs: number;
+  /** Jaccard 相似度超过此值视为"同一查询" */
+  similarityThreshold: number;
 }
 
 export interface SessionMemoryConfig {
@@ -61,7 +70,8 @@ export interface ReinforcementConfig {
 
 export interface MMRConfig {
   enabled: boolean;
-  threshold: number;
+  threshold: number;   // 相似度阈值，超过则排除（0-1）
+  lambda: number;       // MMR公式中相关性权重（0-1），1=只看相关，0=只看多样
 }
 
 export interface LengthNormConfig {
@@ -149,11 +159,16 @@ export const DEFAULT_CONFIG: Config = {
   smartDedup: true,
   dedupThreshold: 0.85,
   noiseFilter: { enabled: true, skipGreetings: true, skipCommands: true },
-  adaptiveRetrieval: { enabled: true, minQueryLength: 2, forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次'] },
+  adaptiveRetrieval: {
+    enabled: true,
+    minQueryLength: 2,
+    forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次', 'what', 'why', 'how', '什么', '为什么', '怎么'],
+    sessionDedup: { enabled: true, windowMs: 30_000, similarityThreshold: 0.6 }
+  },
   sessionMemory: { enabled: false, maxSessionItems: 10 },
   weibullDecay: { enabled: false, shape: 1.5, scale: 90 },
   reinforcement: { enabled: false, factor: 0.5, maxMultiplier: 3 },
-  mmr: { enabled: false, threshold: 0.85 },
+  mmr: { enabled: false, threshold: 0.85, lambda: 0.7 },
   lengthNorm: { enabled: false, anchor: 500 },
   hardMinScore: { enabled: false, threshold: 0.35 },
   tier: { enabled: false, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },

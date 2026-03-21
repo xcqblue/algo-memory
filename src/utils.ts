@@ -3,7 +3,7 @@
  */
 
 import * as crypto from 'crypto';
-import type { Config, NoiseFilterConfig, TierConfig, ReinforcementConfig, Memory } from './types.js';
+import type { Config, NoiseFilterConfig, TierConfig, ReinforcementConfig, Memory, SessionDedupConfig } from './types.js';
 
 // ============= Constants =============
 export const MAX_MESSAGE_LENGTH = 10000;
@@ -129,14 +129,33 @@ export function getRetrieveKeywords(language: string): string[] {
 }
 
 // ============= Retrieval Decision =============
-export function shouldRetrieve(query: string, config: Config['adaptiveRetrieval']): boolean {
+export function shouldRetrieve(
+  query: string,
+  config: Config['adaptiveRetrieval'],
+  sessionDedup?: { lastQuery: string; lastRecallTime: number }
+): boolean {
   if (!config.enabled) return true;
   if (!query || query.trim().length < 1) return false;
+
   const lowerQuery = query.toLowerCase();
-  if (config.forceKeywords?.some(k => lowerQuery.includes(k))) return true;
+  // Force keywords always trigger retrieval (even after recent recall)
+  if (config.forceKeywords?.some((k: string) => lowerQuery.includes(k))) return true;
+
+  // Length gate
   const isCJK = /[\u4e00-\u9fa5]/.test(query);
   const minLen = isCJK ? MIN_CJK_QUERY_LENGTH : MIN_EN_QUERY_LENGTH;
   if (query.trim().length < minLen) return false;
+
+  // Session deduplication: skip if query is too similar to recent recall within window
+  if (sessionDedup && config.sessionDedup?.enabled) {
+    const { lastQuery, lastRecallTime } = sessionDedup;
+    const { windowMs, similarityThreshold } = config.sessionDedup;
+    if (lastQuery && Date.now() - lastRecallTime < windowMs) {
+      const sim = jaccardSimilarity(query, lastQuery);
+      if (sim >= similarityThreshold) return false;
+    }
+  }
+
   return true;
 }
 
@@ -169,21 +188,54 @@ export function reinforcementFactor(accessCount: number, config: ReinforcementCo
 
 export function mmrDeduplicate(items: Memory[], config: Config['mmr']): Memory[] {
   if (!config.enabled || items.length <= 1) return items;
-  const result: Memory[] = [];
-  const scores: Memory[] = items.map(m => ({ ...m, _score: m._score || m.importance }));
-  while (scores.length > 0) {
-    scores.sort((a, b) => b._score - a._score);
-    const top = scores.shift()!;
-    result.push(top);
-    const remaining: Memory[] = [];
-    for (const item of scores) {
-      const sim = jaccardSimilarity(top.content, item.content);
-      if (sim < config.threshold) remaining.push(item);
+  const { threshold, lambda = 0.7 } = config;
+
+  // Pre-compute word sets for all items (avoid repeated tokenization in the loop)
+  const wordSets: Map<string, Set<string>> = new Map();
+  const getWords = (content: string): Set<string> => {
+    if (!wordSets.has(content)) {
+      wordSets.set(content, new Set(content.toLowerCase().match(/[\u4e00-\u9fa5]|[a-z0-9]+/gi) || []));
     }
-    scores.length = 0;
-    scores.push(...remaining);
+    return wordSets.get(content)!;
+  };
+
+  const selected: Memory[] = [];
+  const candidates: Memory[] = items.map(m => ({ ...m }));
+
+  while (candidates.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const item = candidates[i];
+      const relevance = item._score ?? item.importance;
+
+      // Diversity: max similarity to any already-selected item
+      let maxSim = 0;
+      for (const sel of selected) {
+        const sim = jaccardSimilarity(item.content, sel.content);
+        if (sim > maxSim) maxSim = sim;
+      }
+
+      // MMR formula: λ * relevance - (1 - λ) * diversity
+      const mmrScore = lambda * relevance - (1 - lambda) * maxSim;
+
+      if (mmrScore > bestScore) {
+        bestScore = mmrScore;
+        bestIdx = i;
+      }
+    }
+
+    const picked = candidates.splice(bestIdx, 1)[0];
+    selected.push(picked);
+
+    // Early exit: if the best possible MMR score (relevance alone, no diversity cost)
+    // is already below threshold, stop selecting more items
+    const bestPossibleScore = lambda * (picked._score ?? picked.importance);
+    if (bestPossibleScore < threshold) break;
   }
-  return result;
+
+  return selected;
 }
 
 export function getTier(importance: number, accessCount: number, daysOld: number, config: TierConfig): 'core' | 'working' | 'peripheral' {

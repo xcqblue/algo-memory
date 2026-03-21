@@ -88,6 +88,9 @@ class MemoryPlugin {
   private log: any;
   configHash: string = '';
   private ftsAvailable: boolean = false;
+  /** 会话去重追踪（公开给 hook 访问） */
+  lastRecallQuery: string = '';
+  lastRecallTime: number = 0;
 
   // Error metrics
   public metrics = {
@@ -192,8 +195,14 @@ class MemoryPlugin {
       getVisibleAgentIds: (aid: string) => this.getVisibleAgentIds(aid),
       cache: this.cache as any,
       configHash: this.configHash,
+      lastRecallQuery: this.lastRecallQuery,
+      lastRecallTime: this.lastRecallTime,
     };
-    return doRecall(deps, AgentId, query);
+    const result = await doRecall(deps, AgentId, query);
+    // 召回执行后更新会话去重状态（skip 的情况不更新，让下次同类查询仍能触发）
+    this.lastRecallQuery = query;
+    this.lastRecallTime = Date.now();
+    return result;
   }
 
   listMemories(AgentId: string, limit: number = 20, offset: number = 0): any[] {
@@ -471,6 +480,40 @@ class MemoryPlugin {
     this.log.info('[algo-memory] 清理了', total, '条过期记忆');
   }
 
+  // ===== CLI 增强工具 =====
+
+  /** 详细召回统计（CLI 用） */
+  getRecallStats(AgentId: string): any {
+    const stats = this.getStats(AgentId);
+    const dbPath = this.dbPath;
+    const ftsAvailable = this.ftsAvailable;
+    const sessionDedup = this.config.adaptiveRetrieval.sessionDedup;
+    const lastQuery = this.lastRecallQuery;
+    const lastRecallTs = this.lastRecallTime ? new Date(this.lastRecallTime).toISOString() : null;
+    const mmrEnabled = this.config.mmr.enabled;
+    const mmrLambda = this.config.mmr.lambda;
+    return { ...stats, dbPath, ftsAvailable, sessionDedup, lastQuery, lastRecallTs, mmrEnabled, mmrLambda };
+  }
+
+  /** 查看最近召回记录（会话去重状态） */
+  getLastRecallInfo(AgentId: string): any {
+    return {
+      agentId: AgentId,
+      lastQuery: this.lastRecallQuery || '(空)',
+      lastRecallTime: this.lastRecallTime ? new Date(this.lastRecallTime).toISOString() : null,
+      sessionDedupEnabled: this.config.adaptiveRetrieval.sessionDedup?.enabled ?? false,
+      sessionDedupWindowMs: this.config.adaptiveRetrieval.sessionDedup?.windowMs ?? 0,
+      sessionDedupSimilarity: this.config.adaptiveRetrieval.sessionDedup?.similarityThreshold ?? 0,
+    };
+  }
+
+  /** 清除会话去重状态，允许相同查询再次召回 */
+  clearRecallDedup(_AgentId: string): { success: boolean; message: string } {
+    this.lastRecallQuery = '';
+    this.lastRecallTime = 0;
+    return { success: true, message: '会话去重状态已清除，同一查询可再次召回' };
+  }
+
   close(): void {
     if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
     this.cache.clear();
@@ -528,7 +571,7 @@ export default {
             .map((m: any) => m.content.trim()).filter(Boolean);
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
-          if (!shouldRetrieve(query, config.adaptiveRetrieval)) return;
+          if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: plugin.lastRecallQuery, lastRecallTime: plugin.lastRecallTime })) return;
 
           const lastKey = lastRecallKey.get(agentId) || '';
           if (query === lastKey) return;
@@ -574,6 +617,9 @@ export default {
       { name: 'algo_memory_session', description: '获取 Session 临时记忆', parameters: Type.Object({ agentId: Type.Optional(Type.String()) }) },
       { name: 'algo_memory_session_add', description: '写入 Session 临时记忆', parameters: Type.Object({ agentId: Type.Optional(Type.String()), content: Type.String() }) },
       { name: 'algo_memory_metrics', description: '查看运行时指标', parameters: Type.Object({}) },
+      { name: 'algo_memory_recall_stats', description: '召回统计（含 MMR、会话去重状态、DB 信息）', parameters: Type.Object({ agentId: Type.String() }) },
+      { name: 'algo_memory_recall_info', description: '查看最近召回记录（上一个查询和时间）', parameters: Type.Object({ agentId: Type.String() }) },
+      { name: 'algo_memory_recall_reset', description: '清除会话去重状态，允许相同查询再次召回', parameters: Type.Object({ agentId: Type.String() }) },
     ];
 
     for (const tool of tools) {
@@ -598,6 +644,9 @@ export default {
               case 'algo_memory_session': result = plugin.getSessionMemory(params.agentId || 'default'); break;
               case 'algo_memory_session_add': result = { success: plugin.addSessionMemory(params.agentId || 'default', params.content) }; break;
               case 'algo_memory_metrics': result = plugin.getMetrics(); break;
+              case 'algo_memory_recall_stats': result = plugin.getRecallStats(params.agentId); break;
+              case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(params.agentId); break;
+              case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
               default: result = { error: 'Unknown tool' };
             }
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };

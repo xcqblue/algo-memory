@@ -21,6 +21,10 @@ export interface RecallDeps {
   getVisibleAgentIds: (AgentId: string) => string[] | null;
   cache: Map<string, { hasMemory: boolean; memories: Memory[] }>;
   configHash: string;
+  /** 会话去重：上次召回的查询 */
+  lastRecallQuery?: string;
+  /** 会话去重：上次召回的时间戳 */
+  lastRecallTime?: number;
 }
 
 export interface RecallResult {
@@ -36,7 +40,7 @@ export async function recall(
   AgentId: string,
   query: string
 ): Promise<RecallResult> {
-  const { db, config, log, getVisibleAgentIds, cache, configHash } = deps;
+  const { db, config, log, getVisibleAgentIds, cache, configHash, lastRecallQuery, lastRecallTime } = deps;
 
   if (!db) {
     log.warn('[algo-memory] recall 失败: 数据库未初始化');
@@ -45,7 +49,7 @@ export async function recall(
 
   const recallStartTime = Date.now();
 
-  if (!shouldRetrieve(query, config.adaptiveRetrieval)) {
+  if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: lastRecallQuery ?? '', lastRecallTime: lastRecallTime ?? 0 })) {
     return { hasMemory: false, memories: [] };
   }
 
