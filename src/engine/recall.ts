@@ -30,6 +30,8 @@ export interface RecallDeps {
 export interface RecallResult {
   hasMemory: boolean;
   memories: Memory[];
+  /** True if context was already injected via buildInjectCtx (cache hit path) */
+  injected?: boolean;
 }
 
 /**
