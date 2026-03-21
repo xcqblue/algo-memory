@@ -12,7 +12,7 @@ import LRUCache from 'lru-cache';
 import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
-import { store as doStore, normalizeForStorage } from './engine/store.js';
+import { store as doStore, normalizeForStorage, safeContent } from './engine/store.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
 import type { RecallDeps } from './engine/recall.js';
@@ -31,8 +31,6 @@ import {
   estimateTokens,
   CACHE_MAX_SIZE,
   CACHE_TTL_MS,
-  SESSION_CACHE_MAX_SIZE,
-  SESSION_CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
 } from './utils.js';
 
@@ -85,9 +83,11 @@ class MemoryPlugin {
   private log: any;
   configHash: string = '';
   private ftsAvailable: boolean = false;
-  /** 会话去重追踪（公开给 hook 访问） */
-  lastRecallQuery: string = '';
-  lastRecallTime: number = 0;
+  /** per-agent 会话去重追踪（避免跨 Agent 误拦截） */
+  private lastRecallQuery: Map<string, string> = new Map();
+  private lastRecallTime: Map<string, number> = new Map();
+  getLastRecallQuery(agentId: string): string { return this.lastRecallQuery.get(agentId) ?? ''; }
+  getLastRecallTime(agentId: string): number { return this.lastRecallTime.get(agentId) ?? 0; }
 
   // Error metrics
   public metrics = {
@@ -188,13 +188,13 @@ class MemoryPlugin {
       getVisibleAgentIds: (aid: string) => this.getVisibleAgentIds(aid),
       cache: this.cache as any,
       configHash: this.configHash,
-      lastRecallQuery: this.lastRecallQuery,
-      lastRecallTime: this.lastRecallTime,
+      lastRecallQuery: this.lastRecallQuery.get(AgentId) ?? '',
+      lastRecallTime: this.lastRecallTime.get(AgentId) ?? 0,
     };
     const result = await doRecall(deps, AgentId, query);
     // 召回执行后更新会话去重状态（skip 的情况不更新，让下次同类查询仍能触发）
-    this.lastRecallQuery = query;
-    this.lastRecallTime = Date.now();
+    this.lastRecallQuery.set(AgentId, query);
+    this.lastRecallTime.set(AgentId, Date.now());
     return result;
   }
 
@@ -353,12 +353,12 @@ class MemoryPlugin {
 
   updateMemory(AgentId: string, memoryId: string, content: string): boolean {
     const normalized = normalizeText(content);
-    const safe = normalizeForStorage(content).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const isCore = isCoreKeyword(normalized, this.config.coreKeywords);
+    const safe = safeContent(content);
+    const isCore = isCoreKeyword(safe, this.config.coreKeywords);
     const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
     const changes = run(this._db(),
       'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ?, content_hash = ? WHERE id = ? AND agent_id = ?',
-      [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), hashContent(safe), memoryId, AgentId]
+      [safe, tier, isCore ? 'core' : 'general', extractKeywords(safe), isCore ? 1.0 : 0.5, Date.now(), hashContent(safe), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
     return changes > 0;
@@ -458,12 +458,12 @@ class MemoryPlugin {
 
   /** 详细召回统计（CLI 用） */
   getRecallStats(AgentId: string): any {
+    const lastQuery = this.lastRecallQuery.get(AgentId) ?? '';
+    const lastRecallTs = this.lastRecallTime.get(AgentId);
     const stats = this.getStats(AgentId);
     const dbPath = this.dbPath;
     const ftsAvailable = this.ftsAvailable;
     const sessionDedup = this.config.adaptiveRetrieval.sessionDedup;
-    const lastQuery = this.lastRecallQuery;
-    const lastRecallTs = this.lastRecallTime ? new Date(this.lastRecallTime).toISOString() : null;
     const mmrEnabled = this.config.mmr.enabled;
     const mmrLambda = this.config.mmr.lambda;
     return { ...stats, dbPath, ftsAvailable, sessionDedup, lastQuery, lastRecallTs, mmrEnabled, mmrLambda };
@@ -471,21 +471,23 @@ class MemoryPlugin {
 
   /** 查看最近召回记录（会话去重状态） */
   getLastRecallInfo(AgentId: string): any {
+    const lastQuery = this.lastRecallQuery.get(AgentId) ?? '';
+    const lastRecallTime = this.lastRecallTime.get(AgentId);
     return {
       agentId: AgentId,
-      lastQuery: this.lastRecallQuery || '(空)',
-      lastRecallTime: this.lastRecallTime ? new Date(this.lastRecallTime).toISOString() : null,
+      lastQuery: lastQuery || '(空)',
+      lastRecallTime: lastRecallTime ? new Date(lastRecallTime).toISOString() : null,
       sessionDedupEnabled: this.config.adaptiveRetrieval.sessionDedup?.enabled ?? false,
       sessionDedupWindowMs: this.config.adaptiveRetrieval.sessionDedup?.windowMs ?? 0,
       sessionDedupSimilarity: this.config.adaptiveRetrieval.sessionDedup?.similarityThreshold ?? 0,
     };
   }
 
-  /** 清除会话去重状态，允许相同查询再次召回 */
-  clearRecallDedup(_AgentId: string): { success: boolean; message: string } {
-    this.lastRecallQuery = '';
-    this.lastRecallTime = 0;
-    return { success: true, message: '会话去重状态已清除，同一查询可再次召回' };
+  /** 清除指定 Agent 的会话去重状态，允许相同查询再次召回 */
+  clearRecallDedup(AgentId: string): { success: boolean; message: string } {
+    this.lastRecallQuery.delete(AgentId);
+    this.lastRecallTime.delete(AgentId);
+    return { success: true, message: `Agent ${AgentId} 的会话去重状态已清除` };
   }
 
   /** 将会话期间新增的记忆写入 Markdown 摘要文件（跨 session 延续） */
@@ -601,8 +603,8 @@ export default {
             .map((m: any) => m.content.trim()).filter(Boolean);
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
-          // Session dedup is handled inside shouldRetrieve via plugin.lastRecallQuery/Time
-          if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: plugin.lastRecallQuery, lastRecallTime: plugin.lastRecallTime })) return;
+          // Session dedup is handled inside shouldRetrieve via per-agent dedup state
+          if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
 
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {

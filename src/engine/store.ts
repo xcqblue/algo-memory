@@ -44,7 +44,7 @@ export function normalizeForStorage(content: string): string {
 }
 
 // Helper to compute content_hash for storage
-function safeContent(content: string): string {
+export function safeContent(content: string): string {
   return normalizeForStorage(content).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
@@ -123,7 +123,7 @@ export async function store(
       }
 
       // Smart dedup
-      let isDuplicate = false;
+      let isDuplicate = false; // reset each outer iteration — must not persist across messages
       if (config.smartDedup) {
         const similar = queryAll(db,
           'SELECT id, content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?',

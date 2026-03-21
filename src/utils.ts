@@ -9,8 +9,6 @@ import type { Config, NoiseFilterConfig, TierConfig, ReinforcementConfig, Memory
 export const MAX_MESSAGE_LENGTH = 10000;
 export const CACHE_MAX_SIZE = 100;
 export const CACHE_TTL_MS = 5 * 60 * 1000;
-export const SESSION_CACHE_MAX_SIZE = 50;
-export const SESSION_CACHE_TTL_MS = 30 * 60 * 1000;
 export const DEFAULT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const MAX_KEYWORDS = 10;
 export const MAX_SIMILAR_CHECK = 10;
