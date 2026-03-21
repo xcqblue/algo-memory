@@ -62,12 +62,11 @@ openclaw logs | grep algo-memory
 ```
 [algo-memory] 数据库初始化: ~/.openclaw/state/algo-memory/memories.db
 [algo-memory] 每轮最多写入: 10 条
-[algo-memory] 插件已就绪, 工具数: 13, 自动捕获: true, 自动召回: true
 ```
 
-如果看到以下警告，说明 FTS5 不可用（不影响基本功能，搜索会降级为 LIKE）：
+如果看到以下警告，说明 FTS5 不可用（不影响基本功能，搜索会自动降级为 LIKE）：
 ```
-[algo-memory] FTS5 不可用，使用 LIKE 备用
+[algo-memory] FTS5 不可用，搜索将降级为 LIKE
 ```
 
 ---
@@ -123,4 +122,4 @@ sqlite3 ~/.openclaw/state/algo-memory/memories.db
 ```bash
 openclaw logs | grep "algo-memory"
 ```
-确认日志中出现 `工具数: 13` 和 `插件已就绪`。
+确认日志中出现 `数据库初始化:` 和 `每轮最多写入:`。
