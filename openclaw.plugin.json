@@ -23,10 +23,80 @@
       "capturePerTurn": { "type": "number", "default": 3, "description": "每轮最多写入数" },
       "scopes": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "enabled": { "type": "boolean", "default": true, "description": "启用隔离模式" },
           "defaultScope": { "type": "string", "default": "agent", "description": "默认作用域" },
           "visibleAgents": { "type": "array", "items": { "type": "string" }, "default": [], "description": "允许查看的Agent列表" }
+        }
+      },
+      "sessionMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "maxSessionItems": { "type": "number", "default": 10 }
+        }
+      },
+      "weibullDecay": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "shape": { "type": "number", "default": 1.5 },
+          "scale": { "type": "number", "default": 90 }
+        }
+      },
+      "reinforcement": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "factor": { "type": "number", "default": 0.5 },
+          "maxMultiplier": { "type": "number", "default": 3 }
+        }
+      },
+      "mmr": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "threshold": { "type": "number", "default": 0.85 }
+        }
+      },
+      "lengthNorm": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "anchor": { "type": "number", "default": 500 }
+        }
+      },
+      "hardMinScore": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "threshold": { "type": "number", "default": 0.35 }
+        }
+      },
+      "tier": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "coreThreshold": { "type": "number", "default": 10 },
+          "peripheralThreshold": { "type": "number", "default": 0.15 },
+          "ageDays": { "type": "number", "default": 60 },
+          "weights": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "core": { "type": "number", "default": 1.5 },
+              "working": { "type": "number", "default": 1.0 },
+              "peripheral": { "type": "number", "default": 0.5 }
+            }
+          }
         }
       },
       "llm": {

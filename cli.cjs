@@ -9,12 +9,16 @@ const path = require('path');
 const crypto = require('crypto');
 
 function getDb() {
-  const dbPath = process.env.ALGO_MEMORY_DB || path.join(process.env.HOME || '/home/x', '.openclaw', 'workspace', 'algo-memory', 'memories.db');
+  const dbPath = process.env.ALGO_MEMORY_DB || path.join(process.env.HOME || '/home/x', '.openclaw', 'state', 'algo-memory', 'memories.db');
   if (!fs.existsSync(dbPath)) {
     console.error('数据库不存在:', dbPath);
     process.exit(1);
   }
-  return new Database(dbPath);
+  // Disable WAL mode — sql.js (in-memory SQLite) does not support WAL,
+  // so using delete/journal mode ensures compatibility if both run concurrently.
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = DELETE');
+  return db;
 }
 
 function hashContent(content) {
@@ -23,6 +27,17 @@ function hashContent(content) {
 
 const args = process.argv.slice(2);
 const command = args[0];
+
+// Safety check: warn if the plugin PID file exists (plugin may be running)
+const stateDir = path.join(process.env.HOME || '/home/x', '.openclaw', 'state', 'algo-memory');
+const pidPath = path.join(stateDir, 'algo-memory.pid');
+try {
+  if (fs.existsSync(pidPath)) {
+    const oldPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+    try { process.kill(oldPid, 0); console.warn(`⚠️  检测到 algo-memory 可能正在运行 (PID ${oldPid})，建议先停止插件。`); }
+    catch (_) { /* dead */ }
+  }
+} catch (_) { /* ignore */ }
 
 switch (command) {
   case 'list': {

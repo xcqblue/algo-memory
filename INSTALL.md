@@ -59,7 +59,7 @@ openclaw logs | grep algo-memory
 ```
 [algo-memory] 数据库初始化: ~/.openclaw/workspace/algo-memory/memories.db
 [algo-memory] FTS5 全文搜索已启用
-[algo-memory] 插件注册完成, 工具数: 11, 自动启用: true
+[algo-memory] 插件已就绪, 工具数: 12, 自动捕获: true, 自动召回: true
 ```
 
 ---

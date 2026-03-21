@@ -17,7 +17,7 @@
 | **LLM 支持** | 可选启用，支持 11+ 模型 |
 | **存储** | 本地 SQLite（sql.js）/ FTS5 全文搜索 |
 | **智能** | 核心记忆 / 智能去重 / 时间衰减 |
-| **工具** | 10 个记忆管理工具 |
+| **工具** | 12 个记忆管理工具 |
 | **隔离** | Agent 记忆隔离 |
 
 ---
@@ -130,6 +130,8 @@ openclaw plugins install https://github.com/xcqblue/algo-memory
 | `algo_memory_export` | 导出所有记忆 |
 | `algo_memory_import` | 导入记忆 |
 | `algo_memory_session` | 获取 Session 临时记忆 |
+| `algo_memory_session_add` | 写入 Session 临时记忆 |
+| `algo_memory_metrics` | 查看错误指标 |
 
 ---
 

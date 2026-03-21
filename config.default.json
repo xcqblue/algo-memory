@@ -53,11 +53,17 @@
     "enabled": false,
     "coreThreshold": 10,
     "peripheralThreshold": 0.15,
-    "ageDays": 60
+    "ageDays": 60,
+    "weights": {
+      "core": 1.5,
+      "working": 1.0,
+      "peripheral": 0.5
+    }
   },
   "scopes": {
-    "enabled": false,
-    "defaultScope": "agent"
+    "enabled": true,
+    "defaultScope": "agent",
+    "visibleAgents": []
   },
   "llm": {
     "enabled": true,

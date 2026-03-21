@@ -1,0 +1,158 @@
+/**
+ * algo-memory v2.2.3 - Types & Default Config
+ */
+
+// ============= Config Interface =============
+export interface Config {
+  autoCapture: boolean;
+  autoRecall: boolean;
+  maxResults: number;
+  cleanupDays: number;
+  language: string;
+  coreKeywords: string[];
+  recencyDecay: boolean;
+  recencyHalfLife: number;
+  smartDedup: boolean;
+  dedupThreshold: number;
+  noiseFilter: NoiseFilterConfig;
+  adaptiveRetrieval: AdaptiveRetrievalConfig;
+  sessionMemory: SessionMemoryConfig;
+  weibullDecay: WeibullDecayConfig;
+  reinforcement: ReinforcementConfig;
+  mmr: MMRConfig;
+  lengthNorm: LengthNormConfig;
+  hardMinScore: HardMinScoreConfig;
+  tier: TierConfig;
+  scopes: ScopesConfig;
+  capturePerTurn: number;
+  llm: LLMConfig;
+  threshold: ThresholdConfig;
+}
+
+export interface NoiseFilterConfig {
+  enabled: boolean;
+  skipGreetings: boolean;
+  skipCommands: boolean;
+}
+
+export interface AdaptiveRetrievalConfig {
+  enabled: boolean;
+  minQueryLength: number;
+  forceKeywords: string[];
+}
+
+export interface SessionMemoryConfig {
+  enabled: boolean;
+  maxSessionItems: number;
+}
+
+export interface WeibullDecayConfig {
+  enabled: boolean;
+  shape: number;
+  scale: number;
+}
+
+export interface ReinforcementConfig {
+  enabled: boolean;
+  factor: number;
+  maxMultiplier: number;
+}
+
+export interface MMRConfig {
+  enabled: boolean;
+  threshold: number;
+}
+
+export interface LengthNormConfig {
+  enabled: boolean;
+  anchor: number;
+}
+
+export interface HardMinScoreConfig {
+  enabled: boolean;
+  threshold: number;
+}
+
+export interface TierConfig {
+  enabled: boolean;
+  coreThreshold: number;
+  peripheralThreshold: number;
+  ageDays: number;
+  weights: {
+    core: number;      // recall score multiplier for core memories
+    working: number;   // recall score multiplier for working memories
+    peripheral: number; // recall score multiplier for peripheral memories
+  };
+}
+
+export interface ScopesConfig {
+  enabled: boolean;
+  defaultScope: string;
+  visibleAgents: string[];
+}
+
+export interface LLMConfig {
+  enabled: boolean;
+  provider: string;
+  apiKey: string;
+  model: string;
+  baseURL: string;
+}
+
+export interface ThresholdConfig {
+  useLlmForCore: boolean;
+  useLlmForExtract: boolean;
+  useLlmForDedup: boolean;
+  minConfidence: number;
+  lengthForCore: number;
+  lengthForExtract: number;
+  dedupUncertaintyMin: number;
+  dedupUncertaintyMax: number;
+}
+
+// ============= Memory Type =============
+export interface Memory {
+  id: string;
+  agent_id: string;
+  scope: string;
+  content: string;
+  type: string;
+  tier: 'core' | 'working' | 'peripheral';
+  layer: string;
+  keywords: string;
+  importance: number;
+  access_count: number;
+  created_at: number;
+  last_accessed: number;
+  content_hash: string;
+  metadata: string;
+  // Computed score used during recall ranking
+  _score: number;
+}
+
+// ============= Default Config =============
+export const DEFAULT_CONFIG: Config = {
+  autoCapture: true,
+  autoRecall: true,
+  maxResults: 5,
+  cleanupDays: 180,
+  language: 'auto',
+  coreKeywords: ['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget'],
+  recencyDecay: true,
+  recencyHalfLife: 180,
+  smartDedup: true,
+  dedupThreshold: 0.85,
+  noiseFilter: { enabled: true, skipGreetings: true, skipCommands: true },
+  adaptiveRetrieval: { enabled: true, minQueryLength: 2, forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次'] },
+  sessionMemory: { enabled: false, maxSessionItems: 10 },
+  weibullDecay: { enabled: false, shape: 1.5, scale: 90 },
+  reinforcement: { enabled: false, factor: 0.5, maxMultiplier: 3 },
+  mmr: { enabled: false, threshold: 0.85 },
+  lengthNorm: { enabled: false, anchor: 500 },
+  hardMinScore: { enabled: false, threshold: 0.35 },
+  tier: { enabled: false, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },
+  scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
+  capturePerTurn: 3,
+  llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
+  threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 }
+};
