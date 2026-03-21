@@ -1,6 +1,6 @@
 # 配置参考
 
-完整默认配置见 `config.default.json`。
+完整默认配置见 `openclaw.plugin.json` 的 `configSchema`。
 
 ## 快速配置
 
@@ -22,7 +22,7 @@
 | `autoCapture` | boolean | `true` | 自动存储用户消息 |
 | `autoRecall` | boolean | `true` | 自动注入相关记忆到 prompt |
 | `maxResults` | number | `5` | 单次召回最大条数 |
-| `capturePerTurn` | number | `10` | 每轮最多存储条数 |
+| `capturePerTurn` | number | `3` | 每轮最多存储条数 |
 | `cleanupDays` | number | `180` | peripheral 记忆超过此天数后被清理 |
 | `language` | string | `"auto"` | 语言：auto / zh / en |
 
@@ -30,9 +30,11 @@
 
 | 配置 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `coreKeywords` | string[] | `[]` | 命中后直接标记为 core 的关键词（大小写不敏感） |
-| `recencyDecay` | boolean | `true` | 开启时间衰减评分 |
+| `coreKeywords` | string[] | 见下方 | 命中后直接标记为 core 的关键词 |
+| `recencyDecay` | boolean | `true` | 开启时间衰减评分（地板 0.5） |
 | `recencyHalfLife` | number | `180` | 时间衰减半衰期（天） |
+
+**coreKeywords 默认值**：`['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget']`
 
 ### 去重
 
@@ -63,33 +65,37 @@
 "adaptiveRetrieval": {
   "enabled": true,
   "minQueryLength": 2,
-  "forceKeywords": []
+  "forceKeywords": ["记住", "之前", "上次", ...],
+  "sessionDedup": {
+    "enabled": true,
+    "windowMs": 30000,
+    "similarityThreshold": 0.6
+  }
 }
 ```
 
 | 配置 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `adaptiveRetrieval.enabled` | boolean | `true` | 开启自适应检索判断 |
-| `adaptiveRetrieval.minQueryLength` | number | `2` | 查询长度小于此值时不触发召回 |
-| `adaptiveRetrieval.forceKeywords` | string[] | `[]` | 包含这些词时强制触发召回 |
+| `adaptiveRetrieval.minQueryLength` | number | `2` | 查询长度小于此值时不触发召回（中文 6 字符，英文 15 字符） |
+| `adaptiveRetrieval.forceKeywords` | string[] | 见下方 | 包含这些词时强制触发召回 |
+| `adaptiveRetrieval.sessionDedup.enabled` | boolean | `true` | 开启会话去重 |
+| `adaptiveRetrieval.sessionDedup.windowMs` | number | `30000` | 去重时间窗口（毫秒） |
+| `adaptiveRetrieval.sessionDedup.similarityThreshold` | number | `0.6` | Jaccard 相似度超过此值视为同一查询 |
 
-### Session 记忆
+**forceKeywords 默认值**：`['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', 'what', 'why', 'how', '什么', '为什么', '怎么']`
 
-Session 记忆存储在进程内存中（LRU），不持久化，重启后丢失。
-
-```json
-"sessionMemory": {
-  "enabled": false,
-  "maxSessionItems": 10
-}
-```
+**注意**：会话去重启用时，召回结果不缓存，确保每次判断都是实时的。
 
 ### 评分增强
 
 ```json
 "weibullDecay": { "enabled": false, "shape": 1.5, "scale": 90 },
 "reinforcement": { "enabled": false, "factor": 0.5, "maxMultiplier": 3 },
-"mmr": { "enabled": false, "threshold": 0.85 },
+"urgencyDecay": { "enabled": false, "halfLifeHours": 168 },
+"citedBoost": { "enabled": true, "factor": 0.05 },
+"mmr": { "enabled": false, "threshold": 0.85, "lambda": 0.7 },
+"lexicalOverlap": { "enabled": true, "threshold": 0.5, "penalty": 0.3 },
 "lengthNorm": { "enabled": false, "anchor": 500 },
 "hardMinScore": { "enabled": false, "threshold": 0.35 }
 ```
@@ -98,9 +104,18 @@ Session 记忆存储在进程内存中（LRU），不持久化，重启后丢失
 |------|------|
 | `weibullDecay` | Weibull 分布衰减（替代指数衰减） |
 | `reinforcement` | 访问次数强化因子（访问越多分数越高） |
-| `mmr` | 最大边际相关性，去除召回结果中的冗余 |
+| `urgencyDecay` | 新记忆 urgency=1.0，按半衰期快速淡化（默认 168h = 7 天） |
+| `citedBoost` | 被引用次数多的记忆排名更高：`score × (1 + factor × cited_count)` |
+| `mmr` | 最大边际相关性：真 MMR 公式 `λ×rel − (1−λ)×div`，`lambda` 控制相关/多样权重 |
+| `lexicalOverlap` | MMR 后二次词重叠降权，超阈值 penalize 低分项 |
 | `lengthNorm` | 长度归一化，防止长记忆占太多分数 |
 | `hardMinScore` | 硬阈值过滤，分数低于此值的结果直接丢弃 |
+
+**时间衰减公式**（recencyDecay）：
+```
+score *= 0.5 + 0.5 * 0.5^(daysOld / halfLife)
+```
+地板值 0.5，老记忆最低保留 50% 权重。
 
 ### 三层晋升
 
@@ -128,7 +143,23 @@ Session 记忆存储在进程内存中（LRU），不持久化，重启后丢失
 | `tier.weights.working` | number | `1.0` | working 记忆的召回权重倍数 |
 | `tier.weights.peripheral` | number | `0.5` | peripheral 记忆的召回权重倍数 |
 
-> 召回评分公式：`score = tier权重 × importance × 时间衰减`
+> 召回评分公式：`score = tier权重 × importance × 时间衰减 × (0.5 + 0.5 × decay)`
+
+### Session 摘要
+
+```json
+"sessionSummary": {
+  "enabled": false,
+  "dir": "memory",
+  "maxItems": 50
+}
+```
+
+| 配置 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `sessionSummary.enabled` | boolean | `false` | 开启 session 结束时写 Markdown 摘要 |
+| `sessionSummary.dir` | string | `"memory"` | 摘要目录（相对于 stateDir） |
+| `sessionSummary.maxItems` | number | `50` | 每次写入的最大条数 |
 
 ### Agent 隔离
 
@@ -149,7 +180,7 @@ Session 记忆存储在进程内存中（LRU），不持久化，重启后丢失
 
 ```json
 "llm": {
-  "enabled": false,
+  "enabled": true,
   "provider": "auto",
   "apiKey": "",
   "model": "",
@@ -157,9 +188,31 @@ Session 记忆存储在进程内存中（LRU），不持久化，重启后丢失
 }
 ```
 
-支持提供商：MiniMax / DeepSeek / 智谱 / Kimi / 百炼 / ollama（本地）。
+支持提供商：MiniMax / DeepSeek / 智谱 / Kimi / 百炼 / 混元 / SiliconFlow / OpenAI / Anthropic / Ollama。
 
 | 配置 | 说明 |
 |------|------|
 | `llm.enabled=false` | 纯算法模式，零 API 费用 |
 | `llm.enabled=true` | LLM 增强（核心判断、关键词提取、去重判断） |
+
+### 阈值（Threshold）
+
+```json
+"threshold": {
+  "useLlmForCore": false,
+  "useLlmForExtract": false,
+  "useLlmForDedup": false,
+  "minConfidence": 0.8,
+  "lengthForCore": 100,
+  "lengthForExtract": 200,
+  "dedupUncertaintyMin": 0.5,
+  "dedupUncertaintyMax": 0.98
+}
+```
+
+| 配置 | 说明 |
+|------|------|
+| `useLlmForCore` | 用 LLM 判断是否为核心记忆 |
+| `useLlmForExtract` | 用 LLM 提取关键词 |
+| `useLlmForDedup` | 在不确定区间内用 LLM 判断重复 |
+| `dedupUncertaintyMin/Max` | Jaccard 在此区间内调用 LLM 去重 |
