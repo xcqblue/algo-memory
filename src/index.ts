@@ -40,7 +40,14 @@ import { recall as doRecall, type RecallDeps } from './engine/recall.js';
 // ============= Config merge helper =============
 // Spreads userConfig over DEFAULT_CONFIG for every top-level key,
 // returning the fully-typed merged Config. Avoids repetitive `??` chains.
+// Uses explicit `!== undefined` checks so that `false`/`0` values from userConfig
+// are NOT swallowed by the nullish coalescing operator.
 function mergeConfig(userConfig: Partial<Config>): Config {
+  const scalar = <K extends keyof Config>(
+    key: K, fallback: Config[K]
+  ): Config[K] => {
+    return userConfig[key] !== undefined ? userConfig[key] as Config[K] : fallback;
+  };
   return {
     ...DEFAULT_CONFIG,
     noiseFilter: { ...DEFAULT_CONFIG.noiseFilter, ...userConfig.noiseFilter },
@@ -59,18 +66,18 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     scopes: { ...DEFAULT_CONFIG.scopes, ...userConfig.scopes },
     llm: resolveLLMConfig({ ...DEFAULT_CONFIG.llm, ...userConfig.llm }),
     threshold: { ...DEFAULT_CONFIG.threshold, ...userConfig.threshold },
-    // Simple scalar overrides
-    autoCapture: userConfig.autoCapture !== undefined ? userConfig.autoCapture : DEFAULT_CONFIG.autoCapture,
-    autoRecall: userConfig.autoRecall !== undefined ? userConfig.autoRecall : DEFAULT_CONFIG.autoRecall,
-    maxResults: userConfig.maxResults ?? DEFAULT_CONFIG.maxResults,
-    cleanupDays: userConfig.cleanupDays ?? DEFAULT_CONFIG.cleanupDays,
-    language: userConfig.language ?? DEFAULT_CONFIG.language,
-    coreKeywords: userConfig.coreKeywords ?? DEFAULT_CONFIG.coreKeywords,
-    recencyDecay: userConfig.recencyDecay !== undefined ? userConfig.recencyDecay : DEFAULT_CONFIG.recencyDecay,
-    recencyHalfLife: userConfig.recencyHalfLife ?? DEFAULT_CONFIG.recencyHalfLife,
-    smartDedup: userConfig.smartDedup !== undefined ? userConfig.smartDedup : DEFAULT_CONFIG.smartDedup,
-    dedupThreshold: userConfig.dedupThreshold ?? DEFAULT_CONFIG.dedupThreshold,
-    capturePerTurn: userConfig.capturePerTurn ?? DEFAULT_CONFIG.capturePerTurn,
+    // Scalars use explicit !== undefined so false/0 from userConfig are respected
+    autoCapture: scalar('autoCapture', DEFAULT_CONFIG.autoCapture),
+    autoRecall: scalar('autoRecall', DEFAULT_CONFIG.autoRecall),
+    maxResults: scalar('maxResults', DEFAULT_CONFIG.maxResults),
+    cleanupDays: scalar('cleanupDays', DEFAULT_CONFIG.cleanupDays),
+    language: scalar('language', DEFAULT_CONFIG.language),
+    coreKeywords: scalar('coreKeywords', DEFAULT_CONFIG.coreKeywords),
+    recencyDecay: scalar('recencyDecay', DEFAULT_CONFIG.recencyDecay),
+    recencyHalfLife: scalar('recencyHalfLife', DEFAULT_CONFIG.recencyHalfLife),
+    smartDedup: scalar('smartDedup', DEFAULT_CONFIG.smartDedup),
+    dedupThreshold: scalar('dedupThreshold', DEFAULT_CONFIG.dedupThreshold),
+    capturePerTurn: scalar('capturePerTurn', DEFAULT_CONFIG.capturePerTurn),
   };
 }
 
@@ -101,8 +108,9 @@ class MemoryPlugin {
     this.log = log;
     this.cache = new LRUCache({ max: CACHE_MAX_SIZE, ttl: CACHE_TTL_MS });
     this.sessionCache = new LRUCache({ max: SESSION_CACHE_MAX_SIZE, ttl: SESSION_CACHE_TTL_MS });
-    // Include all config fields that affect recall scoring
-    this.configHash = hashContent(JSON.stringify({
+    // Include all config fields that affect recall scoring.
+    // Sort keys so hash is stable regardless of object property iteration order.
+    const recallFields = {
       maxResults: this.config.maxResults,
       recencyDecay: this.config.recencyDecay,
       recencyHalfLife: this.config.recencyHalfLife,
@@ -112,7 +120,11 @@ class MemoryPlugin {
       lengthNorm: this.config.lengthNorm,
       hardMinScore: this.config.hardMinScore,
       tier: this.config.tier,
-    }));
+    };
+    // Stable key ordering via alphabetically sorted JSON
+    this.configHash = hashContent(
+      Object.keys(recallFields).sort().map(k => `${k}=${JSON.stringify(recallFields[k as keyof typeof recallFields])}`).join('|')
+    );
 
     if (this.config.llm.enabled && this.config.llm.apiKey) {
       this.llmClient = new LLMClient(this.config, log);
@@ -275,13 +287,16 @@ class MemoryPlugin {
     return doRecall(deps, AgentId, query);
   }
 
-  addSessionMemory(AgentId: string, content: string): void {
-    if (!this.config.sessionMemory.enabled) return;
+  addSessionMemory(AgentId: string, content: string): boolean {
+    if (!this.config.sessionMemory.enabled) return false;
     const key = `session:${AgentId}`;
     const session = this.sessionCache.get(key) || [];
+    // Skip if the same content already exists (dedup)
+    if (session.some((s: any) => s.content === content)) return false;
     session.unshift({ content, time: Date.now() });
     if (session.length > this.config.sessionMemory.maxSessionItems) session.pop();
     this.sessionCache.set(key, session);
+    return true;
   }
 
   getSessionMemory(AgentId: string): any[] {
@@ -294,8 +309,8 @@ class MemoryPlugin {
     if (!this.db) return;
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
     const BATCH = 500;
-    // sql.js does not support DELETE...LIMIT (no SQLITE_ENABLE_UPDATE_DELETE_LIMIT),
-    // so delete via ROWID subquery which is universally supported.
+    // sql.js does not support DELETE...LIMIT, so delete via ROWID subquery.
+    // Each batch runs in its own transaction to avoid long write locks.
     let total = 0;
     let deleted = 0;
     do {
@@ -305,14 +320,23 @@ class MemoryPlugin {
       );
       if (rows.length === 0) break;
       const rowids = rows.map((r: any) => r.rowid);
-      deleted = run(this.db,
-        `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
-        rowids
-      );
-      total += deleted;
+      // Transaction ensures atomicity within this batch
+      runOrThrow(this.db, 'BEGIN IMMEDIATE');
+      try {
+        deleted = run(this.db,
+          `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
+          rowids
+        );
+        total += deleted;
+        runOrThrow(this.db, 'COMMIT');
+      } catch (err) {
+        runOrThrow(this.db, 'ROLLBACK');
+        this.log.error('[algo-memory] 清理批次失败，跳过剩余批次:', err);
+        break;
+      }
     } while (deleted === BATCH);
     if (total > 0) this.scheduleSave();
-    this.log.info('[algo-memory] 清理了', total, '条过期记忆（分批删除）');
+    this.log.info('[algo-memory] 清理了', total, '条过期记忆');
   }
 
   // ===== Tool Methods =====
@@ -363,24 +387,26 @@ class MemoryPlugin {
       this.log.warn('[algo-memory] FTS5 搜索不可用，使用 LIKE 备用:', (err as Error).message);
     }
 
-    // Fallback: LIKE query — split into OR terms so multi-word queries match
-    // "小明 名字" → content LIKE '%小明%' OR content LIKE '%名字%'
+    // Fallback: LIKE query — split into OR terms so multi-word queries match.
+    // Also search the pre-tokenized keywords column for better recall.
     const terms = query.trim().split(/\s+/);
     const likeLimit = Math.min(this.config.maxResults, 20);
     if (visibleAgentIds === null) {
-      const clause = terms.map(() => 'content LIKE ?').join(' OR ');
+      const contentClause = terms.map(() => 'content LIKE ?').join(' OR ');
+      const keywordsClause = terms.map(() => 'keywords LIKE ?').join(' OR ');
       const params = terms.map(t => `%${t}%`);
       return queryAll(this.db,
-        `SELECT * FROM memories WHERE (${clause}) ORDER BY importance DESC LIMIT ?`,
-        [...params, likeLimit]
+        `SELECT * FROM memories WHERE (${contentClause} OR ${keywordsClause}) ORDER BY importance DESC LIMIT ?`,
+        [...params, ...params, likeLimit]
       );
     }
     const placeholders = visibleAgentIds.map(() => '?').join(',');
-    const clause = terms.map(() => 'content LIKE ?').join(' OR ');
+    const contentClause = terms.map(() => 'content LIKE ?').join(' OR ');
+    const keywordsClause = terms.map(() => 'keywords LIKE ?').join(' OR ');
     const params = terms.map(t => `%${t}%`);
     return queryAll(this.db,
-      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (${clause}) ORDER BY importance DESC LIMIT ?`,
-      [...visibleAgentIds, ...params, likeLimit]
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (${contentClause} OR ${keywordsClause}) ORDER BY importance DESC LIMIT ?`,
+      [...visibleAgentIds, ...params, ...params, likeLimit]
     );
   }
 
@@ -459,26 +485,31 @@ class MemoryPlugin {
   }
 
   updateMemory(AgentId: string, memoryId: string, content: string): boolean {
-    const safe = normalizeText(content).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const isCore = isCoreKeyword(safe, this.config.coreKeywords);
+    // Normalize + escape: same logic as store path to keep behavior consistent
+    const normalized = normalizeText(content);
+    const safe = normalized.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const isCore = isCoreKeyword(normalized, this.config.coreKeywords);
     const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
     const changes = run(this.db,
       'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ? WHERE id = ? AND agent_id = ?',
-      [safe, tier, isCore ? 'core' : 'general', extractKeywords(safe), isCore ? 1.0 : 0.5, Date.now(), memoryId, AgentId]
+      [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
     if (changes > 0) this.scheduleSave();
     return changes > 0;
   }
 
-  exportMemories(AgentId: string): any[] {
+  exportMemories(AgentId: string, maxExport: number = 1000): any[] {
     if (!this.db) return [];
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
     if (visibleAgentIds === null) {
-      return queryAll(this.db, 'SELECT * FROM memories');
+      return queryAll(this.db, 'SELECT * FROM memories ORDER BY created_at DESC LIMIT ?', [maxExport]);
     }
     const placeholders = visibleAgentIds.map(() => '?').join(',');
-    return queryAll(this.db, `SELECT * FROM memories WHERE agent_id IN (${placeholders})`, visibleAgentIds);
+    return queryAll(this.db,
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`,
+      [...visibleAgentIds, maxExport]
+    );
   }
 
   importMemories(AgentId: string, memories: any[]): number {
