@@ -292,7 +292,7 @@ class MemoryPlugin {
     const key = `session:${AgentId}`;
     const session = this.sessionCache.get(key) || [];
     // Skip if the same content already exists (dedup)
-    if (session.some((s: any) => s.content === content)) return false;
+    if (session.some((s: any) => s.content === content) || false) return false;
     session.unshift({ content, time: Date.now() });
     if (session.length > this.config.sessionMemory.maxSessionItems) session.pop();
     this.sessionCache.set(key, session);
