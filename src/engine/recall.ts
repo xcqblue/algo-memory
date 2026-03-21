@@ -25,6 +25,8 @@ export interface RecallDeps {
   lastRecallQuery?: string;
   /** 会话去重：上次召回的时间戳 */
   lastRecallTime?: number;
+  /** FTS5 是否可用（由插件注入） */
+  ftsEnabled?: boolean;
 }
 
 export interface RecallResult {
@@ -68,7 +70,6 @@ export async function recall(
     return cached;
   }
 
-  const visibleAgentIds = getVisibleAgentIds(AgentId);
   const safeLimit = Math.min(config.maxResults * 3, 100);
 
   let memories: Memory[];

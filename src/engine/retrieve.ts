@@ -11,13 +11,12 @@
 
 import type { Database as DatabaseType } from 'better-sqlite3';
 import { queryAll } from '../db/queries.js';
+import type { Config, Memory } from '../types.js';
 import {
   mmrDeduplicate,
   weibullDecay,
   reinforcementFactor,
   lengthNorm,
-  type Config,
-  type Memory,
 } from '../utils.js';
 
 export type DbLike = DatabaseType;
@@ -46,7 +45,7 @@ const FIELDS = `id, agent_id, scope, content, type, tier, layer, keywords,
  * Main retrieval function — handles FTS5 → score → MMR → filter.
  */
 export function retrieve(options: RetrievalOptions): Memory[] {
-  const { db, config, log, agentId, visibleAgentIds, query, mmrEnabled, limit } = options;
+  const { db, config, log, agentId, visibleAgentIds, query, mmrEnabled, limit, ftsEnabled } = options;
 
   const safeLimit = Math.min(limit, 100);
   const agentFilter = visibleAgentIds !== null

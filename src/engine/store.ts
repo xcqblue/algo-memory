@@ -19,6 +19,16 @@ import { queryAll, queryOne, run, runOrThrow } from '../db/queries.js';
 import { LLMClient } from './llm.js';
 import type { DbLike } from '../db/queries.js';
 
+/**
+ * Score a message by how many core keywords it contains.
+ * Higher score = more likely to be worth storing.
+ */
+function messagePriority(content: string, coreKeywords: string[]): number {
+  if (!coreKeywords.length) return 0;
+  const lower = content.toLowerCase();
+  return coreKeywords.filter(kw => lower.includes(kw.toLowerCase())).length;
+}
+
 // Raw row types returned by queryAll
 type IdRow = { id: string };
 type IdContentRow = { id: string; content: string };
