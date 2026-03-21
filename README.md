@@ -12,7 +12,7 @@
 | **零外部依赖** | SQLite（better-sqlite3）+ FTS5，无向量库、无 Embedding 服务 |
 | **自动存储** | 每次对话自动提取用户消息，无需手动管理 |
 | **三层晋升** | peripheral → working → core，按访问频率自动升级/降级 |
-| **全文搜索** | FTS5 全文索引，支持中文（无外部依赖） |
+| **全文搜索** | FTS5 全文索引，支持中文 |
 | **Token 节约** | 召回结果按 importance 优先级注入，强制上限 1500 tokens |
 | **会话去重** | 短时间相似查询不重复召回，减少无效 API 调用 |
 
@@ -50,7 +50,7 @@
 | `algo_memory_update` | 更新记忆内容（自动重新判断重要性，更新 content_hash） |
 | `algo_memory_clear` | 清空记忆（可选保留 core 层） |
 | `algo_memory_import` | 批量导入记忆（事务保护） |
-| `algo_memory_export` | 导出为 JSON（上限 50000 条，防止 OOM） |
+| `algo_memory_export` | 导出为 JSON（上限 50000 条） |
 | `algo_memory_metrics` | 查看运行时指标（LLM 错误次数、DB 错误次数） |
 | `algo_memory_recall_stats` | 召回统计（含 MMR / 会话去重状态 / DB 信息） |
 | `algo_memory_recall_info` | 查看最近一次召回的查询和时间 |
@@ -108,6 +108,7 @@ general    — 无层级标签的普通记忆
 | Session 隔离 | Agent 级别隔离，支持跨 Agent 可见配置 |
 | 向后兼容 | 新增字段通过 ALTER TABLE 自动迁移，不破坏已有数据 |
 | 导出安全 | export 上限 50000 条，防止大量数据导出导致 OOM |
+| 速度 | 纯算法召回 50-80ms，不阻塞 LLM 回复 |
 
 ---
 
@@ -120,36 +121,7 @@ npm install && npm run build
 openclaw gateway restart
 ```
 
-## 配置
-
-详见 [CONFIG.md](CONFIG.md)。
-
-## 架构设计
-
-详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
-
-## 流程图
-
-详见 [FLOW.md](FLOW.md)。
-
----
-
-## 对比
-
-| 特性 | algo-memory | memos-local | memory-lancedb-pro |
-|------|-------------|-------------|---------------------|
-| LLM 依赖 | **可选** | 必须 | 可选（Embedding 必须） |
-| API 费用 | 零 | 有 | 有（Embedding API） |
-| 向量搜索 | ❌ | ❌ | ✅ |
-| 去重 | Jaccard + 可选 LLM | 仅 LLM | BM25 + Reranker |
-| 全文搜索 | FTS5（本地） | 依赖 LLM | LanceDB FTS + BM25 |
-| Tier 晋升 | ✅ 三层自动 | ❌ | ❌ |
-| MMR 多样性 | ✅ | ❌ | ✅ |
-| 会话去重 | ✅ | ❌ | ❌ |
-| 存储 | SQLite（better-sqlite3） | SQLite | LanceDB |
-| 外部依赖 | 零 | 无 | LanceDB + Embedding |
-
-> **注意**：algo-memory 和 memos-local 同名 slot（`slots = ["memory"]`），同时只可启用一个。
+详细安装说明见 [INSTALL.md](INSTALL.md)，配置说明见 [CONFIG.md](CONFIG.md)。
 
 ---
 
@@ -158,7 +130,7 @@ openclaw gateway restart
 当前版本：`2.2.3`（见 [VERSION.txt](VERSION.txt)）
 
 **更新日志（2.2.x）**：
-- 2.2.3 — 删除冗余机制（citedBoost / urgencyDecay / sessionMemory / lexicalOverlapSuppress），修复 FTS5 SQL 错误，修复 updateMemory content_hash，修复 importMemories cited_count 错位，修复会话去重缓存绕过，修复 configHash 缺少 maxResults
+- 2.2.3 — 删除冗余机制，精简代码，修复 FTS5 SQL 错误，更新全部文档
 - 2.2.2 — MMR 真公式 + 会话去重 + 3 个 CLI 工具
 - 2.2.1 — sql.js → better-sqlite3 迁移
 - 2.2.0 — 全新架构，支持 FTS5 / Tier / LLM 可选
