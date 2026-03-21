@@ -2,7 +2,7 @@
 
 > OpenClaw 记忆管理插件 — 纯算法召回，零 API 费用，零外部依赖
 
-**版本 2.2.4** · [更新日志](#更新日志) · [配置参考](CONFIG.md)
+**版本 2.2.5** · [更新日志](#更新日志) · [配置参考](CONFIG.md)
 
 ---
 
@@ -12,9 +12,10 @@
 |---|---|
 | 🤖 **全自动** | 对话结束自动存储，无需手动管理 |
 | 💰 **零成本** | 纯算法（Jaccard + BM25 + MMR），LLM 完全可选 |
-| 🔍 **精准召回** | FTS5 全文搜索 + 关键词权重 2× + 自适应查询扩展 |
+| 🔍 **精准召回** | FTS5 全文搜索 + BM25F 关键词权重 2× + 自适应查询扩展 |
 | 📊 **智能分层** | peripheral → working → core，按访问频率自动晋升 |
 | 🔄 **安全删除** | 软删除 + 可恢复，误删无忧 |
+| 🎯 **统一检索** | recall 和 search 共用同一检索引擎，评分一致 |
 
 ---
 
@@ -23,7 +24,7 @@
 | 工具 | 说明 |
 |---|---|
 | `algo_memory_list` | 列出记忆，支持分页 |
-| `algo_memory_search` | 全文搜索（FTS5 + LIKE 兜底） |
+| `algo_memory_search` | 全文搜索（FTS5 + LIKE 兜底），按综合相关性排序 |
 | `algo_memory_stats` | 统计：total / core / working / peripheral |
 | `algo_memory_get` | 查看单条记忆详情 |
 | `algo_memory_update` | 更新记忆内容 |
@@ -42,10 +43,12 @@
 
 ## 工作流程
 
+### 存储
+
 ```
 用户消息
     ↓
-存储优先级打分（核心词 + 代码 + 数字 + 长度）
+存储优先级打分（核心词 +5 / 代码 +3 / 数字 +2 / 长度）
     ↓
 噪声过滤 → 精确查重 → 智能去重（Jaccard）
     ↓
@@ -54,6 +57,8 @@
 SQLite + FTS5 索引
 ```
 
+### 召回
+
 ```
 用户提问
     ↓
@@ -61,11 +66,19 @@ Prompt Gating（过滤 emoji / 招呼 / 反问句）
     ↓
 会话去重（30s 内相似查询不重复召回）
     ↓
-FTS5 检索 + BM25F 排序（keywords 权重 2×）
-    ↓
-时间衰减 → 访问强化 → MMR 多样性去重
+统一检索引擎（FTS5 → 评分 → MMR → 截断）
     ↓
 Token 上限注入（自动适应上下文剩余量）
+```
+
+### 搜索
+
+```
+用户主动搜索
+    ↓
+统一检索引擎（FTS5 → 评分，不含 MMR）
+    ↓
+返回按综合相关性排序的结果
 ```
 
 ---
@@ -83,7 +96,9 @@ general    ▸ 无层级标签
 
 ## 核心机制
 
-**MMR 多样性** · `λ×relevance − (1−λ)×diversity`，默认 λ=0.7，平衡相关性与多样性
+**统一检索引擎** · recall 和 search 共用同一检索管道：FTS5 + BM25F 关键词权重 + 时间衰减 + 访问强化 + MMR（recall）或纯评分（search）
+
+**MMR 多样性** · `λ×relevance − (1−λ)×diversity`，默认 λ=0.7
 
 **时间衰减** · 半衰期 180 天，地板值 0.5，老记忆不会归零
 
@@ -107,14 +122,12 @@ npm install
 openclaw gateway restart
 ```
 
-验证安装：
+验证：
 
 ```bash
 openclaw logs | grep algo-memory
 # → [algo-memory] 数据库初始化: ~/.openclaw/state/algo-memory/memories.db
 ```
-
-> ℹ️ `npm run build` 是可选的。OpenClaw 通过 jiti 直接加载 TypeScript，预编译仅在发布时需要。
 
 详细配置说明见 [CONFIG.md](CONFIG.md)。
 
@@ -124,7 +137,8 @@ openclaw logs | grep algo-memory
 
 | 版本 | 内容 |
 |------|------|
-| **2.2.4** | 存储优先级打分（核心词/代码/数字/长度）；Query Expansion；动态 Token 上限；BM25F keywords 权重 2×；软删除 + restoreMemory |
-| 2.2.3 | 删除冗余机制（citedBoost/urgencyDecay/sessionMemory/lexicalOverlap）；修复 FTS5 SQL 错误 |
+| **2.2.5** | 统一检索引擎（retrieve.ts），recall/search 共用同一管道；recall 保留 agent 权重 1.5×；Bug 修复 |
+| **2.2.4** | 存储优先级打分 / Query Expansion / 动态 Token 上限 / BM25F / 软删除 |
+| **2.2.3** | 删除冗余机制（citedBoost/urgencyDecay/sessionMemory/lexicalOverlap）|
 | 2.2.2 | MMR 真公式 + 会话去重 + CLI 工具 |
 | 2.2.1 | sql.js → better-sqlite3 迁移 |

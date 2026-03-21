@@ -13,6 +13,7 @@ import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
 import { store as doStore, normalizeForStorage, safeContent } from './engine/store.js';
+import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
 import type { RecallDeps } from './engine/recall.js';
@@ -190,6 +191,7 @@ class MemoryPlugin {
       configHash: this.configHash,
       lastRecallQuery: this.lastRecallQuery.get(AgentId) ?? '',
       lastRecallTime: this.lastRecallTime.get(AgentId) ?? 0,
+      ftsEnabled: this.ftsAvailable,
     };
     const result = await doRecall(deps, AgentId, query);
     // 召回执行后更新会话去重状态（skip 的情况不更新，让下次同类查询仍能触发）

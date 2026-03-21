@@ -42,18 +42,20 @@ export async function recall(
   AgentId: string,
   query: string
 ): Promise<RecallResult> {
-  const { db, config, log, getVisibleAgentIds, cache, configHash, lastRecallQuery, lastRecallTime } = deps;
+  const { db, config, log, getVisibleAgentIds, cache, configHash, lastRecallQuery, lastRecallTime, ftsEnabled } = deps;
 
   if (!db) {
     log.warn('[algo-memory] recall 失败: 数据库未初始化');
-    return { hasMemory: false, memories: [] };
+    return { hasMemory: false, memories: [], injected: false };
   }
 
   const recallStartTime = Date.now();
 
   if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: lastRecallQuery ?? '', lastRecallTime: lastRecallTime ?? 0 })) {
-    return { hasMemory: false, memories: [] };
+    return { hasMemory: false, memories: [], injected: false };
   }
+
+  const visibleAgentIds = getVisibleAgentIds(AgentId);
 
   // Session dedup is active — do NOT use cache, because same query at different times
   // should produce different results (one eligible, one skipped). Cache would bypass dedup.
