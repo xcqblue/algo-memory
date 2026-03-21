@@ -25,7 +25,7 @@ type IdContentRow = { id: string; content: string };
 type TierRow = { id: string; importance: number; access_count: number; created_at: number };
 
 // Normalize content before storing: strip @mentions, compress whitespace, remove markdown noise
-function normalizeForStorage(content: string): string {
+export function normalizeForStorage(content: string): string {
   let text = content
     // Strip @mentions
     .replace(/@\w+/g, '')

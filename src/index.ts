@@ -12,7 +12,7 @@ import LRUCache from 'lru-cache';
 import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
-import { store as doStore } from './engine/store.js';
+import { store as doStore, normalizeForStorage } from './engine/store.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
 import type { RecallDeps } from './engine/recall.js';
@@ -106,10 +106,18 @@ class MemoryPlugin {
     this.sessionCache = new LRUCache({ max: SESSION_CACHE_MAX_SIZE, ttl: SESSION_CACHE_TTL_MS });
 
     const recallFields = {
-      maxResults: this.config.maxResults, recencyDecay: this.config.recencyDecay,
-      recencyHalfLife: this.config.recencyHalfLife, weibullDecay: this.config.weibullDecay,
-      reinforcement: this.config.reinforcement, mmr: this.config.mmr,
-      lengthNorm: this.config.lengthNorm, hardMinScore: this.config.hardMinScore, tier: this.config.tier,
+      maxResults: this.config.maxResults,
+      recencyDecay: this.config.recencyDecay,
+      recencyHalfLife: this.config.recencyHalfLife,
+      weibullDecay: this.config.weibullDecay,
+      reinforcement: this.config.reinforcement,
+      mmr: this.config.mmr,
+      lengthNorm: this.config.lengthNorm,
+      hardMinScore: this.config.hardMinScore,
+      tier: this.config.tier,
+      citedBoost: this.config.citedBoost,
+      lexicalOverlap: this.config.lexicalOverlap,
+      urgencyDecay: this.config.urgencyDecay,
     };
     this.configHash = hashContent(
       Object.keys(recallFields).sort()
@@ -363,12 +371,12 @@ class MemoryPlugin {
 
   updateMemory(AgentId: string, memoryId: string, content: string): boolean {
     const normalized = normalizeText(content);
-    const safe = normalized.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safe = normalizeForStorage(content).replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const isCore = isCoreKeyword(normalized, this.config.coreKeywords);
     const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
     const changes = run(this._db(),
-      'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ? WHERE id = ? AND agent_id = ?',
-      [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), memoryId, AgentId]
+      'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ?, content_hash = ? WHERE id = ? AND agent_id = ?',
+      [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), hashContent(safe), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
     if (changes > 0) this.saveDatabase();
@@ -384,12 +392,13 @@ class MemoryPlugin {
         try {
           const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
           run(this._db(),
-            `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, created_at, last_accessed, content_hash, metadata)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               m.id || generateId(), AgentId, m.scope || 'global',
               m.content, m.type || 'other', tier, m.layer || 'general',
               m.keywords || '', m.importance || 0.5, m.access_count || 1,
+              m.cited_count || 0,
               m.created_at || Date.now(), m.last_accessed || Date.now(),
               m.content_hash || hashContent(m.content), m.metadata || null
             ]
@@ -523,8 +532,23 @@ class MemoryPlugin {
       const summaryDir = path.join(stateDir, this.config.sessionSummary.dir);
       if (!fs.existsSync(summaryDir)) fs.mkdirSync(summaryDir, { recursive: true });
       const filePath = path.join(summaryDir, `${today}.md`);
+      const markerPath = path.join(summaryDir, `.${today}.lastids`); // tracks last written IDs
 
-      // 读取现有内容（避免重复写入）
+      // 读取最近 N 条记忆的 ID 作为指纹
+      const recentMemories = queryAll(this._db(),
+        `SELECT id FROM memories ORDER BY created_at DESC LIMIT ?`,
+        [this.config.sessionSummary.maxItems]
+      ) as unknown as Array<{ id: string }>;
+      if (recentMemories.length === 0) return;
+
+      const currentIds = recentMemories.map(m => m.id).join(',');
+
+      // 读取上次写入的 ID 指纹，避免无变化重复写入
+      let lastIds = '';
+      if (fs.existsSync(markerPath)) lastIds = fs.readFileSync(markerPath, 'utf-8').trim();
+      if (lastIds === currentIds) return; // 无新内容，跳过
+
+      // 读取现有 Markdown 内容
       let existing = '';
       if (fs.existsSync(filePath)) existing = fs.readFileSync(filePath, 'utf-8');
 
@@ -532,32 +556,28 @@ class MemoryPlugin {
         ? ''
         : `# Algo-Memory 日记\n\n`;
 
-      // 收集最近一次 session 写入的记忆（从 DB 最新记录）
-      const sessionMemories = queryAll(this._db(),
-        `SELECT content, tier, importance, created_at FROM memories
+      // 收集记忆详情
+      const memoryDetails = queryAll(this._db(),
+        `SELECT id, content, tier, importance, created_at FROM memories
          ORDER BY created_at DESC LIMIT ?`,
         [this.config.sessionSummary.maxItems]
-      ) as unknown as Array<{ content: string; tier: string; importance: number; created_at: number }>;
-
-      if (sessionMemories.length === 0) return;
+      ) as unknown as Array<{ id: string; content: string; tier: string; importance: number; created_at: number }>;
 
       const lines: string[] = [];
       const dateStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
       lines.push(`\n## ${dateStr}  Session 摘要\n`);
-      for (const m of sessionMemories) {
+      for (const m of memoryDetails) {
         const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
         lines.push(`- [${m.tier.toUpperCase()}] ${m.content.slice(0, 200)}${m.content.length > 200 ? '…' : ''} *(重要性: ${m.importance.toFixed(2)}, ${time})*`);
       }
 
-      let output = header;
-      if (!existing) output += header;
-      // 避免重复追加：检查末尾是否已有相同内容
-      const newBlock = lines.join('\n');
-      if (!existing.endsWith(newBlock) && !existing.includes(newBlock.slice(0, 50))) {
-        output = existing + newBlock + '\n';
-        fs.writeFileSync(filePath, output, 'utf-8');
-        this.log.info(`[algo-memory] Session 摘要已写入: ${filePath}`);
-      }
+      let output = existing || header;
+      if (!output.includes('# Algo-Memory 日记')) output = header + output;
+      output = output.replace(/\n+$/, '\n') + lines.join('\n') + '\n';
+
+      fs.writeFileSync(filePath, output, 'utf-8');
+      fs.writeFileSync(markerPath, currentIds, 'utf-8'); // 保存本次 ID 指纹
+      this.log.info(`[algo-memory] Session 摘要已写入: ${filePath}`);
     } catch (err) {
       this.log.error('[algo-memory] Session 摘要写入失败:', err);
     }
@@ -580,9 +600,6 @@ class MemoryPlugin {
     this.log.info('[algo-memory] 插件已关闭');
   }
 }
-
-// ============= Shared dedup key =============
-const lastRecallKey: Map<string, string> = new Map();
 
 // ============= Plugin Export =============
 export default {
@@ -622,11 +639,8 @@ export default {
             .map((m: any) => m.content.trim()).filter(Boolean);
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
+          // Session dedup is handled inside shouldRetrieve via plugin.lastRecallQuery/Time
           if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: plugin.lastRecallQuery, lastRecallTime: plugin.lastRecallTime })) return;
-
-          const lastKey = lastRecallKey.get(agentId) || '';
-          if (query === lastKey) return;
-          lastRecallKey.set(agentId, query);
 
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {

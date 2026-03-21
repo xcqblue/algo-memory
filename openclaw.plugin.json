@@ -107,6 +107,14 @@
           "factor": { "type": "number", "default": 0.05 }
         }
       },
+      "urgencyDecay": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "halfLifeHours": { "type": "number", "default": 168 }
+        }
+      },
       "tier": {
         "type": "object",
         "additionalProperties": false,
@@ -306,6 +314,9 @@
     "citedBoost": { "label": "引用强化", "description": "被引用次数多的记忆排名更高" },
     "citedBoost.enabled": { "label": "启用引用强化" },
     "citedBoost.factor": { "label": "引用乘数" },
+    "urgencyDecay": { "label": "紧急度衰减", "description": "新信息 urgency 快速衰减，半衰期后快速淡化" },
+    "urgencyDecay.enabled": { "label": "启用紧急度衰减" },
+    "urgencyDecay.halfLifeHours": { "label": "紧急度衰减半衰期" },
     "tier": { "label": "分层管理", "description": "核心/工作/外围记忆分层" },
     "tier.enabled": { "label": "启用分层管理" },
     "tier.coreThreshold": { "label": "核心阈值" },
