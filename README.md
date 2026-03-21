@@ -1,188 +1,117 @@
-# 🧠 algo-memory
+# algo-memory
 
-**纯算法长期记忆插件 - 无需 LLM 也能工作**
+> OpenClaw 记忆管理插件 — 纯算法召回，无需 LLM API
 
-[![Version](https://img.shields.io/badge/Version-2.2.3-blue)](https://github.com/xcqblue/algo-memory)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+## 核心特点
 
----
-
-## ✨ 特性
-
-| 分类 | 特性 |
+| 特点 | 说明 |
 |------|------|
-| **零配置** | 开箱即用，无需配置自动启用 |
-| **纯算法** | 无需 LLM 也能正常工作 |
-| **智能召回** | 自动召回相关记忆，上下文感知 |
-| **LLM 支持** | 可选启用，支持 11+ 模型 |
-| **存储** | 本地 SQLite（sql.js）/ FTS5 全文搜索 |
-| **智能** | 核心记忆 / 智能去重 / 时间衰减 |
-| **工具** | 13 个记忆管理工具 |
-| **隔离** | Agent 记忆隔离 |
+| **零 API 费用** | 纯算法（Jaccard + BM25）完成召回，LLM 完全可选 |
+| **自动存储** | 每次对话自动提取用户消息，无需手动管理 |
+| **三层晋升** | peripheral → working → core，按访问频率自动升级/降级 |
+| **全文搜索** | FTS5 全文索引，支持中文（无外部依赖） |
+| **Token 节约** | 召回结果按 importance 优先级注入，强制上限 1500 tokens |
 
 ---
 
-## 🚀 安装
+## 工作流程
 
-### 方式一：手动安装（推荐）
+```
+用户消息 → 文本归一化 → 噪声过滤 → 精确查重 → 智能去重 → 核心判断 → 层级晋升 → 写入数据库
+                                                              ↓
+                                                    定时清理（自动）
+```
+
+```
+用户提问 → 全文搜索（FTS5/LIKE）→ 时间衰减评分 → MMR去重 → Token上限注入 → 返回记忆
+```
+
+---
+
+## 工具（13 个）
+
+| 工具 | 说明 |
+|------|------|
+| `algo_memory_list` | 列出记忆（支持 limit + offset 分页） |
+| `algo_memory_search` | 全文搜索（FTS5 优先，LIKE 兜底） |
+| `algo_memory_stats` | 查看统计（total / core / working / peripheral） |
+| `algo_memory_get` | 获取单条记忆详情 |
+| `algo_memory_delete` | 删除单条记忆 |
+| `algo_memory_delete_bulk` | 批量删除（原子事务） |
+| `algo_memory_update` | 更新记忆内容（自动重新判断重要性） |
+| `algo_memory_clear` | 清空记忆（可选保留 core 层） |
+| `algo_memory_import` | 批量导入记忆（事务保护） |
+| `algo_memory_export` | 导出为 JSON（默认最多 1000 条） |
+| `algo_memory_session` | 获取当前 Session 临时记忆 |
+| `algo_memory_session_add` | 写入 Session 临时记忆 |
+| `algo_memory_metrics` | 查看运行时指标（LLM 错误次数、DB 错误次数） |
+
+---
+
+## 存储层级
+
+```
+core       — 重要、频繁访问的记忆（权重 ×1.5）
+working    — 普通对话记忆（权重 ×1.0）
+peripheral — 边缘记忆，可被自动清理（权重 ×0.5）
+general    — 无层级标签的普通记忆
+```
+
+---
+
+## 性能与安全
+
+| 方面 | 措施 |
+|------|------|
+| 写入性能 | 500ms debounce 批量持久化，高频写入不卡 |
+| 数据安全 | 每 30s 强制 flush，崩溃最多丢 30s 数据 |
+| 并发安全 | PID 文件检测，防止插件重复加载 |
+| SQL 安全 | 所有用户输入走参数化查询，无注入风险 |
+| Session 隔离 | Agent 级别隔离，支持跨 Agent 可见配置 |
+
+---
+
+## 安装
+
+详见 [INSTALL.md](INSTALL.md)，完整步骤：
 
 ```bash
-# 1. 复制插件目录到 extensions
-cp -r algo-memory ~/.openclaw/extensions/
-
-# 2. 重启 OpenClaw（依赖会自动安装）
+git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
+cd ~/.openclaw/extensions/algo-memory
+npm install && npm run build
 openclaw gateway restart
 ```
 
-### 方式二：从 GitHub 安装
+## 配置
 
-```bash
-# 注意：URL 安装可能有 bug，建议使用手动安装
-openclaw plugins install https://github.com/xcqblue/algo-memory
-```
+详见 [CONFIG.md](CONFIG.md)。
 
----
+## 架构设计
 
-## ⚙️ 配置
+详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-### 零配置（默认）
+## 流程图
 
-插件会自动启用以下默认配置：
-
-```json
-{
-  "autoCapture": true,
-  "autoRecall": true,
-  "maxResults": 5,
-  "cleanupDays": 180,
-  "recencyDecay": true,
-  "smartDedup": true
-}
-```
-
-### 可选配置
-
-如果需要自定义配置，在 `openclaw.json` 中添加：
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "algo-memory": {
-        "enabled": true,
-        "autoCapture": true,
-        "autoRecall": true,
-        "maxResults": 5
-      }
-    }
-  }
-}
-```
-
-### LLM 配置（可选）
-
-如需使用 LLM 功能（智能判断核心/关键词/去重）：
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "algo-memory": {
-        "enabled": true,
-        "llm": {
-          "enabled": true,
-          "provider": "minimax",
-          "apiKey": "your-api-key",
-          "model": "abab6.5s-chat"
-        }
-      }
-    }
-  }
-}
-```
-
-#### 支持的 LLM
-
-| 类型 | 提供商 | 模型 |
-|------|--------|------|
-| 🇨🇳 默认 | MiniMax | abab6.5s-chat |
-| 🇨🇳 国内 | 阿里百炼 | qwen-plus, qwen-turbo |
-| 🇨🇳 国内 | DeepSeek | deepseek-chat |
-| 🇨🇳 国内 | Kimi | kimi-chat |
-| 🇨🇳 国内 | 智谱 | glm-4-flash |
-| 🌍 国外 | OpenAI | gpt-4o-mini |
-| 🌍 本地 | Ollama | llama2, mistral |
+详见 [FLOW.md](FLOW.md)。
 
 ---
 
-## 📖 工具
+## 对比 memos-local
 
-| 工具名 | 说明 |
-|--------|------|
-| `algo_memory_list` | 列出所有记忆 |
-| `algo_memory_search` | 搜索记忆 |
-| `algo_memory_stats` | 查看记忆统计 |
-| `algo_memory_get` | 获取单条记忆详情 |
-| `algo_memory_delete` | 删除单条记忆 |
-| `algo_memory_delete_bulk` | 批量删除记忆 |
-| `algo_memory_clear` | 清空记忆 |
-| `algo_memory_update` | 更新记忆内容 |
-| `algo_memory_export` | 导出所有记忆 |
-| `algo_memory_import` | 导入记忆 |
-| `algo_memory_session` | 获取 Session 临时记忆 |
-| `algo_memory_session_add` | 写入 Session 临时记忆 |
-| `algo_memory_metrics` | 查看错误指标 |
+| 特性 | algo-memory | memos-local |
+|------|-------------|-------------|
+| LLM 依赖 | **可选**（纯算法优先） | 必须 |
+| API 费用 | 零 | 有（按 token 计费） |
+| 去重 | Jaccard + 可选 LLM | 仅 LLM |
+| 全文搜索 | FTS5（本地索引） | 依赖 LLM embedding |
+| Tier 晋升 | 自动三层晋升 | 无 |
+| 存储 | SQLite（sql.js） | SQLite |
+| Slot 冲突 | 有（与 memos-local 互斥） | 有（与 algo-memory 互斥） |
+
+> **注意**：两个插件同名 slot (`slots = ["memory"]`），同时只可启用一个。
 
 ---
 
-## ⚠️ 注意事项
+## 版本
 
-### 1. 与 MemOS 冲突
-
-algo-memory 和 memos-local/memos-cloud **不能同时启用**，因为它们都占用 `memory` slot。
-
-**解决方案**：在 `openclaw.json` 中禁用 memos：
-
-```json
-{
-  "plugins": {
-    "slots": {
-      "memory": "algo-memory"
-    },
-    "entries": {
-      "memos-local-openclaw-plugin": {
-        "enabled": false
-      }
-    }
-  }
-}
-```
-
-### 2. 安全警告
-
-如果启用 LLM 功能，OpenClaw 可能会显示安全警告。这是因为 LLM 需要：
-- 读取环境变量（获取 API Key）
-- 发送网络请求（调用 LLM API）
-
-这是**正常行为**，不是恶意代码。
-
----
-
-## 🛠️ 开发
-
-```bash
-# 安装依赖
-npm install
-
-# 构建
-npm run build
-
-# 开发模式
-npm run dev
-```
-
----
-
-## 📄 许可证
-
-MIT License
+当前版本：`2.2.3`（见 [VERSION.txt](VERSION.txt)）

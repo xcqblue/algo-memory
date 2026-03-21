@@ -1,39 +1,20 @@
-# 📖 安装指南
+# 安装指南
 
 ## 环境要求
 
-| 项目 | 最低 | 推荐 |
-|------|------|------|
-| Node.js | >= 20.0.0 | >= 24.0.0 |
-| 内存 | 256MB | 512MB+ |
-| 磁盘 | 50MB | 100MB+ |
-
----
+- Node.js >= 20.0.0
+- SQLite3（大多数系统已预装）
 
 ## 安装步骤
 
-### 1. 安装系统依赖
-
-```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install -y build-essential libsqlite3-dev python3
-
-# CentOS/RHEL
-sudo yum install -y gcc-c++ make python3 sqlite-devel
-
-# macOS
-xcode-select --install
-```
-
-### 2. 克隆插件
+### 1. 克隆插件
 
 ```bash
 mkdir -p ~/.openclaw/extensions
 git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
 ```
 
-### 3. 安装依赖并构建
+### 2. 安装依赖并构建
 
 ```bash
 cd ~/.openclaw/extensions/algo-memory
@@ -43,18 +24,15 @@ npm run build
 
 > ⚠️ 必须执行 `npm run build`，插件是 TypeScript 源码，不构建无法运行。
 
-### 4. 重启 OpenClaw
+### 3. 重启 OpenClaw
 
 ```bash
 openclaw gateway restart
 ```
 
----
-
 ## 验证安装
 
 ```bash
-# 查看日志
 openclaw logs | grep algo-memory
 ```
 
@@ -64,7 +42,7 @@ openclaw logs | grep algo-memory
 [algo-memory] 每轮最多写入: 10 条
 ```
 
-如果看到以下警告，说明 FTS5 不可用（不影响基本功能，搜索会自动降级为 LIKE）：
+如果看到以下警告，说明 FTS5 不可用（搜索自动降级为 LIKE，不影响基本功能）：
 ```
 [algo-memory] FTS5 不可用，搜索将降级为 LIKE
 ```
@@ -77,7 +55,19 @@ openclaw logs | grep algo-memory
 npm test
 ```
 
-当前共 **41 个单元测试**，涵盖所有纯算法函数（Jaccard / Weibull 衰减 / 关键词提取 / 噪声过滤 / 层级晋升 / Token 估算等）。
+当前共 **41 个单元测试**，覆盖所有纯算法函数。
+
+---
+
+## 配置
+
+插件默认配置在 `config.default.json`，可复制为 `config.json` 进行自定义：
+
+```bash
+cp config.default.json config.json
+```
+
+详见 [CONFIG.md](CONFIG.md)。
 
 ---
 
@@ -93,33 +83,30 @@ openclaw gateway restart
 
 ## 常见问题
 
-### Q: npm install 报错？
-
-```bash
-# 确保安装了编译工具
-sudo apt-get install build-essential
-```
-
 ### Q: npm run build 报错？
 
-确保 Node.js 版本 >= 20.0.0：
+确保 Node.js >= 20.0.0：
 ```bash
 node --version
 ```
 
-### Q: 如何查看数据库？
+### Q: FTS5 警告是什么意思？
+
+正常。sql.js 在某些环境不支持 FTS5，插件会自动降级为 LIKE 搜索，记忆功能不受影响。
+
+### Q: 如何查看数据库内容？
 
 ```bash
 sqlite3 ~/.openclaw/state/algo-memory/memories.db
 ```
 
-### Q: 插件启动后 FTS5 警告？
-
-正常。sql.js 在某些环境不支持 FTS5，插件会自动降级为 LIKE 搜索，记忆功能不受影响。
-
 ### Q: 如何确认插件已正常加载？
 
 ```bash
-openclaw logs | grep "algo-memory"
+openclaw logs | grep "数据库初始化"
 ```
-确认日志中出现 `数据库初始化:` 和 `每轮最多写入:`。
+确认出现数据库路径和"每轮最多写入"日志。
+
+### Q: 两个插件同时安装会怎样？
+
+`algo-memory` 和 `memos-local` 使用相同的 slot（`memory`），同时只可启用一个，否则后加载的会覆盖先加载的。
