@@ -220,13 +220,22 @@ class MemoryPlugin {
   }
 
   private clearRecallCache(AgentId: string): void {
-    // Invalidate all recall cache entries for this agent
-    // Cache key format: recall:${AgentId}:${configHash}:${query}
-    const cache = (this.cache as any).cache as Map<string, any>;
-    for (const key of cache.keys()) {
-      if (key.startsWith(`recall:${AgentId}:`)) {
-        cache.delete(key);
+    // Invalidate all recall cache entries for this agent.
+    // lru-cache v7 stores data in a private Map accessible as `.store`.
+    // Defensively fall back to cache.clear() if the internal structure changes.
+    try {
+      const store = (this.cache as any).store as Map<string, any> | undefined;
+      if (store && typeof store.keys === 'function') {
+        for (const key of store.keys()) {
+          if (key.startsWith(`recall:${AgentId}:`)) {
+            store.delete(key);
+          }
+        }
+      } else {
+        this.cache.clear();
       }
+    } catch (_) {
+      this.cache.clear();
     }
   }
 
@@ -284,13 +293,26 @@ class MemoryPlugin {
   cleanup(): void {
     if (!this.db) return;
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
-    const CLEANUP_BATCH = 500;  // delete in batches to avoid long write locks
-    const changes = run(this.db,
-      `DELETE FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
-      [cutoff, CLEANUP_BATCH]
-    );
-    if (changes > 0) this.scheduleSave();
-    this.log.info('[algo-memory] 清理了', changes, '条过期记忆（上限' + CLEANUP_BATCH + '条/次）');
+    const BATCH = 500;
+    // sql.js does not support DELETE...LIMIT (no SQLITE_ENABLE_UPDATE_DELETE_LIMIT),
+    // so delete via ROWID subquery which is universally supported.
+    let total = 0;
+    let deleted = 0;
+    do {
+      const rows = queryAll(this.db,
+        `SELECT rowid FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
+        [cutoff, BATCH]
+      );
+      if (rows.length === 0) break;
+      const rowids = rows.map((r: any) => r.rowid);
+      deleted = run(this.db,
+        `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
+        rowids
+      );
+      total += deleted;
+    } while (deleted === BATCH);
+    if (total > 0) this.scheduleSave();
+    this.log.info('[algo-memory] 清理了', total, '条过期记忆（分批删除）');
   }
 
   // ===== Tool Methods =====
@@ -341,16 +363,24 @@ class MemoryPlugin {
       this.log.warn('[algo-memory] FTS5 搜索不可用，使用 LIKE 备用:', (err as Error).message);
     }
 
-    // Fallback: LIKE query
-    const q = `%${query}%`;
+    // Fallback: LIKE query — split into OR terms so multi-word queries match
+    // "小明 名字" → content LIKE '%小明%' OR content LIKE '%名字%'
+    const terms = query.trim().split(/\s+/);
     const likeLimit = Math.min(this.config.maxResults, 20);
     if (visibleAgentIds === null) {
-      return queryAll(this.db, 'SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC LIMIT ?', [q, q, likeLimit]);
+      const clause = terms.map(() => 'content LIKE ?').join(' OR ');
+      const params = terms.map(t => `%${t}%`);
+      return queryAll(this.db,
+        `SELECT * FROM memories WHERE (${clause}) ORDER BY importance DESC LIMIT ?`,
+        [...params, likeLimit]
+      );
     }
     const placeholders = visibleAgentIds.map(() => '?').join(',');
+    const clause = terms.map(() => 'content LIKE ?').join(' OR ');
+    const params = terms.map(t => `%${t}%`);
     return queryAll(this.db,
-      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC LIMIT ?`,
-      [...visibleAgentIds, q, q, likeLimit]
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (${clause}) ORDER BY importance DESC LIMIT ?`,
+      [...visibleAgentIds, ...params, likeLimit]
     );
   }
 
@@ -554,6 +584,7 @@ const algoMemoryPlugin = {
     const config = mergeConfig(userConfig);
 
     const plugin = new MemoryPlugin(config, log);
+    _captureInstance(plugin);  // test helper
 
     const stateDir = api.getStateDir?.() || api.stateDir ||
       path.join(process.env.HOME || process.env.USERPROFILE || '/home/x', '.openclaw', 'state', 'algo-memory');
@@ -699,3 +730,9 @@ const algoMemoryPlugin = {
 };
 
 export default algoMemoryPlugin;
+
+// Test helper: captures the MemoryPlugin instance after register() is called.
+// Usage: after register(mockApi), call _getPluginInstance() to get the instance.
+let _capturedInstance: any = null;
+export function _captureInstance(p: any) { _capturedInstance = p; }
+export function _getPluginInstance(): any { return _capturedInstance; }
