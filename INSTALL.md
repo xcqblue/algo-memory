@@ -14,15 +14,14 @@ mkdir -p ~/.openclaw/extensions
 git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
 ```
 
-### 2. 安装依赖并构建
+### 2. 安装依赖
 
 ```bash
 cd ~/.openclaw/extensions/algo-memory
 npm install
-npm run build
 ```
 
-> ⚠️ 必须执行 `npm run build`，插件是 TypeScript 源码，不构建无法运行。
+> ℹ️ **构建步骤是可选的**：OpenClaw 通过 jiti 直接加载 TypeScript 源码，不需要预编译。如果需要预编译（用于发布或调试），可以执行 `npm run build`。
 
 ### 3. 重启 OpenClaw
 
