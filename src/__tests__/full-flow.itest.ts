@@ -27,7 +27,6 @@ const mockApi = {
     coreKeywords: ['记住', '重要', '小明'],
     noiseFilter: { enabled: true, skipGreetings: true, skipCommands: true },
     adaptiveRetrieval: { enabled: true, minQueryLength: 2, forceKeywords: ['记住'] },
-    sessionMemory: { enabled: true, maxSessionItems: 5 },
     tier: { enabled: true, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },
     weibullDecay: { enabled: false }, reinforcement: { enabled: false },
     mmr: { enabled: false }, lengthNorm: { enabled: false }, hardMinScore: { enabled: false },

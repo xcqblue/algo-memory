@@ -16,21 +16,17 @@ export interface Config {
   dedupThreshold: number;
   noiseFilter: NoiseFilterConfig;
   adaptiveRetrieval: AdaptiveRetrievalConfig;
-  sessionMemory: SessionMemoryConfig;
   weibullDecay: WeibullDecayConfig;
   reinforcement: ReinforcementConfig;
   mmr: MMRConfig;
   lengthNorm: LengthNormConfig;
   hardMinScore: HardMinScoreConfig;
   tier: TierConfig;
-  urgencyDecay: UrgencyDecayConfig;
   scopes: ScopesConfig;
   capturePerTurn: number;
   llm: LLMConfig;
   threshold: ThresholdConfig;
-  lexicalOverlap: LexicalOverlapConfig;
   sessionSummary: SessionSummaryConfig;
-  citedBoost: CitedBoostConfig;
 }
 
 export interface NoiseFilterConfig {
@@ -52,11 +48,6 @@ export interface SessionDedupConfig {
   windowMs: number;
   /** Jaccard 相似度超过此值视为"同一查询" */
   similarityThreshold: number;
-}
-
-export interface SessionMemoryConfig {
-  enabled: boolean;
-  maxSessionItems: number;
 }
 
 export interface WeibullDecayConfig {
@@ -87,31 +78,12 @@ export interface HardMinScoreConfig {
   threshold: number;
 }
 
-export interface LexicalOverlapConfig {
-  enabled: boolean;
-  /** 超过此词重叠率（0-1）则降权 */
-  threshold: number;
-  /** 降权倍数 */
-  penalty: number;
-}
-
 export interface SessionSummaryConfig {
   enabled: boolean;
   /** Markdown 摘要写入目录，默认为 <stateDir>/memory */
   dir: string;
   /** 摘要文件最大条数（超出截断旧条目） */
   maxItems: number;
-}
-
-export interface CitedBoostConfig {
-  enabled: boolean;
-  /** cited_count 乘数（乘以引用次数加一） */
-  factor: number;
-}
-
-export interface UrgencyDecayConfig {
-  enabled: boolean;      // 开启 urgency 快速衰减
-  halfLifeHours: number; // urgency 衰减半衰期（小时），默认 168（7天）
 }
 
 export interface TierConfig {
@@ -164,7 +136,7 @@ export interface Memory {
   importance: number;
   access_count: number;
   cited_count: number;
-  urgency: number;       // starts at 1.0, decays with urgencyDecay halfLife
+  urgency: number;       // starts at 1.0 (urgencyDecay feature was removed, field kept for DB compatibility)
   created_at: number;
   last_accessed: number;
   content_hash: string;
@@ -192,19 +164,15 @@ export const DEFAULT_CONFIG: Config = {
     forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次', 'what', 'why', 'how', '什么', '为什么', '怎么'],
     sessionDedup: { enabled: true, windowMs: 30_000, similarityThreshold: 0.6 }
   },
-  sessionMemory: { enabled: false, maxSessionItems: 10 },
   weibullDecay: { enabled: false, shape: 1.5, scale: 90 },
   reinforcement: { enabled: false, factor: 0.5, maxMultiplier: 3 },
   mmr: { enabled: false, threshold: 0.85, lambda: 0.7 },
   lengthNorm: { enabled: false, anchor: 500 },
   hardMinScore: { enabled: false, threshold: 0.35 },
   tier: { enabled: false, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },
-  urgencyDecay: { enabled: false, halfLifeHours: 168 },
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
   llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
   threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
-  lexicalOverlap: { enabled: true, threshold: 0.5, penalty: 0.3 },
   sessionSummary: { enabled: false, dir: 'memory', maxItems: 50 },
-  citedBoost: { enabled: true, factor: 0.05 },
 };

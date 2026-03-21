@@ -92,10 +92,7 @@
 ```json
 "weibullDecay": { "enabled": false, "shape": 1.5, "scale": 90 },
 "reinforcement": { "enabled": false, "factor": 0.5, "maxMultiplier": 3 },
-"urgencyDecay": { "enabled": false, "halfLifeHours": 168 },
-"citedBoost": { "enabled": true, "factor": 0.05 },
 "mmr": { "enabled": false, "threshold": 0.85, "lambda": 0.7 },
-"lexicalOverlap": { "enabled": true, "threshold": 0.5, "penalty": 0.3 },
 "lengthNorm": { "enabled": false, "anchor": 500 },
 "hardMinScore": { "enabled": false, "threshold": 0.35 }
 ```
@@ -104,10 +101,7 @@
 |------|------|
 | `weibullDecay` | Weibull 分布衰减（替代指数衰减） |
 | `reinforcement` | 访问次数强化因子（访问越多分数越高） |
-| `urgencyDecay` | 新记忆 urgency=1.0，按半衰期快速淡化（默认 168h = 7 天） |
-| `citedBoost` | 被引用次数多的记忆排名更高：`score × (1 + factor × cited_count)` |
 | `mmr` | 最大边际相关性：真 MMR 公式 `λ×rel − (1−λ)×div`，`lambda` 控制相关/多样权重 |
-| `lexicalOverlap` | MMR 后二次词重叠降权，超阈值 penalize 低分项 |
 | `lengthNorm` | 长度归一化，防止长记忆占太多分数 |
 | `hardMinScore` | 硬阈值过滤，分数低于此值的结果直接丢弃 |
 
@@ -143,7 +137,7 @@ score *= 0.5 + 0.5 * 0.5^(daysOld / halfLife)
 | `tier.weights.working` | number | `1.0` | working 记忆的召回权重倍数 |
 | `tier.weights.peripheral` | number | `0.5` | peripheral 记忆的召回权重倍数 |
 
-> 召回评分公式：`score = tier权重 × importance × 时间衰减 × (0.5 + 0.5 × decay)`
+> 召回评分公式：`score = tier权重 × importance × 时间衰减`
 
 ### Session 摘要
 
@@ -157,7 +151,7 @@ score *= 0.5 + 0.5 * 0.5^(daysOld / halfLife)
 
 | 配置 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `sessionSummary.enabled` | boolean | `false` | 开启 session 结束时写 Markdown 摘要 |
+| `sessionSummary.enabled` | boolean | `false` | 开启 session 结束时写 Markdown 摘要到 stateDir/memory/ |
 | `sessionSummary.dir` | string | `"memory"` | 摘要目录（相对于 stateDir） |
 | `sessionSummary.maxItems` | number | `50` | 每次写入的最大条数 |
 

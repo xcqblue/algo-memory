@@ -45,7 +45,6 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     ...DEFAULT_CONFIG,
     noiseFilter: { ...DEFAULT_CONFIG.noiseFilter, ...userConfig.noiseFilter },
     adaptiveRetrieval: { ...DEFAULT_CONFIG.adaptiveRetrieval, ...userConfig.adaptiveRetrieval },
-    sessionMemory: { ...DEFAULT_CONFIG.sessionMemory, ...userConfig.sessionMemory },
     weibullDecay: { ...DEFAULT_CONFIG.weibullDecay, ...userConfig.weibullDecay },
     reinforcement: { ...DEFAULT_CONFIG.reinforcement, ...userConfig.reinforcement },
     mmr: { ...DEFAULT_CONFIG.mmr, ...userConfig.mmr },
@@ -56,7 +55,6 @@ function mergeConfig(userConfig: Partial<Config>): Config {
       ...userConfig.tier,
       weights: { ...DEFAULT_CONFIG.tier.weights, ...(userConfig.tier?.weights || {}) }
     },
-    urgencyDecay: { ...DEFAULT_CONFIG.urgencyDecay, ...userConfig.urgencyDecay },
     scopes: { ...DEFAULT_CONFIG.scopes, ...userConfig.scopes },
     llm: resolveLLMConfig({ ...DEFAULT_CONFIG.llm, ...userConfig.llm }),
     threshold: { ...DEFAULT_CONFIG.threshold, ...userConfig.threshold },
@@ -79,7 +77,6 @@ class MemoryPlugin {
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
-  private sessionCache: LRUCache<string, any>;
   private cleanupInterval: NodeJS.Timeout | null = null;
   private config: Config;
   // Internal non-null db accessor (caller must guard against null)
@@ -103,7 +100,6 @@ class MemoryPlugin {
     this.config = mergeConfig(config);
     this.log = log;
     this.cache = new LRUCache({ max: CACHE_MAX_SIZE, ttl: CACHE_TTL_MS });
-    this.sessionCache = new LRUCache({ max: SESSION_CACHE_MAX_SIZE, ttl: SESSION_CACHE_TTL_MS });
 
     const recallFields = {
       maxResults: this.config.maxResults,
@@ -115,9 +111,6 @@ class MemoryPlugin {
       lengthNorm: this.config.lengthNorm,
       hardMinScore: this.config.hardMinScore,
       tier: this.config.tier,
-      citedBoost: this.config.citedBoost,
-      lexicalOverlap: this.config.lexicalOverlap,
-      urgencyDecay: this.config.urgencyDecay,
     };
     this.configHash = hashContent(
       Object.keys(recallFields).sort()
@@ -172,14 +165,7 @@ class MemoryPlugin {
     this.log.info('[algo-memory] 数据库初始化:', this.dbPath);
     this.log.info(`[algo-memory] 每轮最多写入: ${this.config.capturePerTurn} 条`);
 
-    this.cleanup();
     this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
-  }
-
-  // better-sqlite3 auto-persists to disk, saveDatabase() is now a no-op
-  private saveDatabase(): void {
-    // No-op: better-sqlite3 writes synchronously on every statement.
-    // WAL mode (DELETE journal) ensures durability without blocking.
   }
 
   async store(AgentId: string, messages: any[]): Promise<void> {
@@ -188,7 +174,6 @@ class MemoryPlugin {
       config: this.config,
       llmClient: this.llmClient,
       log: this.log,
-      saveDatabase: () => this.saveDatabase(),
       clearRecallCache: (aid: string) => this.clearRecallCache(aid),
       metrics: this.metrics
     };
@@ -238,13 +223,13 @@ class MemoryPlugin {
       const ftsLimit = Math.min(this.config.maxResults, 20);
       if (visibleAgentIds === null) {
         return queryAll(this._db(),
-          `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
+          `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE fts MATCH ? ORDER BY bm25(fts) DESC, m.importance DESC LIMIT ?`,
           [ftsQuery, ftsLimit]
         );
       }
       const placeholders = visibleAgentIds.map(() => '?').join(',');
       return queryAll(this._db(),
-        `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE m.agent_id IN (${placeholders}) AND memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
+        `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE m.agent_id IN (${placeholders}) AND fts MATCH ? ORDER BY bm25(fts) DESC, m.importance DESC LIMIT ?`,
         [...visibleAgentIds, ftsQuery, ftsLimit]
       );
     } catch (_) {
@@ -343,7 +328,6 @@ class MemoryPlugin {
       [memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
     return changes > 0;
   }
 
@@ -355,7 +339,6 @@ class MemoryPlugin {
       [...memoryIds, AgentId]
     );
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
     return changes;
   }
 
@@ -365,7 +348,6 @@ class MemoryPlugin {
       ? run(this._db(), 'DELETE FROM memories WHERE agent_id = ? AND tier != ?', [AgentId, 'core'])
       : run(this._db(), 'DELETE FROM memories WHERE agent_id = ?', [AgentId]);
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
     return changes;
   }
 
@@ -379,7 +361,6 @@ class MemoryPlugin {
       [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), hashContent(safe), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
-    if (changes > 0) this.saveDatabase();
     return changes > 0;
   }
 
@@ -412,38 +393,23 @@ class MemoryPlugin {
       return 0;
     }
     if (imported > 0) {
-      this.saveDatabase();
       this.clearRecallCache(AgentId);
     }
     return imported;
   }
 
   exportMemories(AgentId: string, maxExport: number = 1000): any[] {
+    const safeLimit = Math.min(maxExport, 50000); // hard upper bound to prevent OOM
     if (!this.db) return [];
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
     if (visibleAgentIds === null) {
-      return queryAll(this._db(), 'SELECT * FROM memories ORDER BY created_at DESC LIMIT ?', [maxExport]);
+      return queryAll(this._db(), 'SELECT * FROM memories ORDER BY created_at DESC LIMIT ?', [safeLimit]);
     }
     const placeholders = visibleAgentIds.map(() => '?').join(',');
     return queryAll(this._db(),
       `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`,
-      [...visibleAgentIds, maxExport]
+      [...visibleAgentIds, safeLimit]
     );
-  }
-
-  getSessionMemory(AgentId: string): any[] {
-    return this.sessionCache.get(`session:${AgentId}`) || [];
-  }
-
-  addSessionMemory(AgentId: string, content: string): boolean {
-    if (!this.config.sessionMemory.enabled) return false;
-    const key = `session:${AgentId}`;
-    const session = this.sessionCache.get(key) || [];
-    if (session.some((s: any) => s.content === content) || false) return false;
-    session.unshift({ content, time: Date.now() });
-    if (session.length > this.config.sessionMemory.maxSessionItems) session.pop();
-    this.sessionCache.set(key, session);
-    return true;
   }
 
   getMetrics() {
@@ -468,7 +434,7 @@ class MemoryPlugin {
   cleanup(): void {
     if (!this.db) return;
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
-    const BATCH = 500;
+    const BATCH = 5000;
     // better-sqlite3 supports DELETE...LIMIT natively
     let total = 0;
     let deleted = 0;
@@ -485,7 +451,6 @@ class MemoryPlugin {
       );
       total += deleted;
     } while (deleted === BATCH);
-    if (total > 0) this.saveDatabase();
     this.log.info('[algo-memory] 清理了', total, '条过期记忆');
   }
 
@@ -584,11 +549,8 @@ class MemoryPlugin {
   }
 
   close(): void {
-    // 写入 session 摘要（双重保险：session_end 钩子 + close 时写入）
-    this.writeSessionSummary();
     if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
     this.cache.clear();
-    this.sessionCache.clear();
     if (this.db) {
       try {
         const pidPath = this.dbPath.replace(/[/\\][^/\\]+$/, '') + '/algo-memory.pid';
@@ -688,8 +650,6 @@ export default {
       { name: 'algo_memory_update', description: '更新记忆内容（自动重新判断重要性）', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String(), content: Type.String() }) },
       { name: 'algo_memory_import', description: '批量导入记忆', parameters: Type.Object({ agentId: Type.String(), memories: Type.Array(Type.Any()) }) },
       { name: 'algo_memory_export', description: '导出记忆为 JSON（默认最多 1000 条）', parameters: Type.Object({ agentId: Type.String(), maxExport: Type.Optional(Type.Number()) }) },
-      { name: 'algo_memory_session', description: '获取 Session 临时记忆', parameters: Type.Object({ agentId: Type.Optional(Type.String()) }) },
-      { name: 'algo_memory_session_add', description: '写入 Session 临时记忆', parameters: Type.Object({ agentId: Type.Optional(Type.String()), content: Type.String() }) },
       { name: 'algo_memory_metrics', description: '查看运行时指标', parameters: Type.Object({}) },
       { name: 'algo_memory_recall_stats', description: '召回统计（含 MMR、会话去重状态、DB 信息）', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_recall_info', description: '查看最近召回记录（上一个查询和时间）', parameters: Type.Object({ agentId: Type.String() }) },
@@ -715,8 +675,6 @@ export default {
               case 'algo_memory_update': result = { success: plugin.updateMemory(params.agentId, params.memoryId, params.content) }; break;
               case 'algo_memory_import': result = { imported: plugin.importMemories(params.agentId, params.memories) }; break;
               case 'algo_memory_export': result = plugin.exportMemories(params.agentId, params.maxExport || 1000); break;
-              case 'algo_memory_session': result = plugin.getSessionMemory(params.agentId || 'default'); break;
-              case 'algo_memory_session_add': result = { success: plugin.addSessionMemory(params.agentId || 'default', params.content) }; break;
               case 'algo_memory_metrics': result = plugin.getMetrics(); break;
               case 'algo_memory_recall_stats': result = plugin.getRecallStats(params.agentId); break;
               case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(params.agentId); break;

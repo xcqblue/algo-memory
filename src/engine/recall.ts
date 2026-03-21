@@ -9,10 +9,9 @@ import {
   weibullDecay,
   reinforcementFactor,
   mmrDeduplicate,
-  lexicalOverlapSuppress,
   lengthNorm
 } from '../utils.js';
-import { queryAll, run } from '../db/queries.js';
+import { queryAll } from '../db/queries.js';
 import type { DbLike } from '../db/queries.js';
 
 export interface RecallDeps {
@@ -87,17 +86,9 @@ export async function recall(
     const halfLife = config.recencyHalfLife || 180;
     memories = memories.map(m => {
       const daysOld = (Date.now() - m.last_accessed) / (1000 * 60 * 60 * 24);
-      const hoursOld = daysOld * 24;
       const w = config.tier.weights;
       const tierMultiplier = m.tier === 'core' ? w.core : m.tier === 'working' ? w.working : w.peripheral;
       let score = tierMultiplier * m.importance;
-
-      // Urgency decay: urgency starts at 1.0, decays rapidly (default half-life 7 days)
-      if (config.urgencyDecay.enabled) {
-        const urgency = m.urgency ?? 1.0;
-        const urgencyDecay = Math.pow(0.5, hoursOld / config.urgencyDecay.halfLifeHours);
-        score *= urgency * urgencyDecay;
-      }
 
       if (config.weibullDecay.enabled) {
         score *= weibullDecay(daysOld, config.weibullDecay.shape, config.weibullDecay.scale);
@@ -107,11 +98,6 @@ export async function recall(
       }
 
       score *= reinforcementFactor(m.access_count, config.reinforcement);
-
-      // cited_count boost: more cited memories rank higher
-      if (config.citedBoost?.enabled && m.cited_count > 0) {
-        score *= (1 + config.citedBoost.factor * m.cited_count);
-      }
 
       if (config.lengthNorm.enabled) {
         score *= lengthNorm(m.content, config.lengthNorm.anchor);
@@ -125,26 +111,11 @@ export async function recall(
     memories = mmrDeduplicate(memories, config.mmr);
   }
 
-  // Lexical overlap suppression — post-MMR secondary pass
-  if (config.lexicalOverlap?.enabled) {
-    memories = lexicalOverlapSuppress(memories, config.lexicalOverlap);
-  }
-
   if (config.hardMinScore.enabled) {
     memories = memories.filter(m => (m._score || m.importance) >= config.hardMinScore.threshold);
   }
 
   const limited = memories.slice(0, config.maxResults);
-
-  // Auto-increment cited_count for each recalled memory
-  if (limited.length > 0) {
-    const ids = limited.map(m => m.id);
-    const placeholders = ids.map(() => '?').join(',');
-    run(db,
-      `UPDATE memories SET cited_count = cited_count + 1, last_accessed = ? WHERE id IN (${placeholders})`,
-      [Date.now(), ...ids]
-    );
-  }
 
   const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
 

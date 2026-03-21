@@ -53,7 +53,6 @@ export interface StoreDeps {
   config: Config;
   llmClient: LLMClient | null;
   log: any;
-  saveDatabase: () => void;
   clearRecallCache: (agentId: string) => void;
   metrics: {
     llmErrors: { core: number; extract: number; dedup: number };
@@ -71,7 +70,7 @@ export async function store(
   AgentId: string,
   messages: any[]
 ): Promise<number> {
-  const { db, config, llmClient, log, saveDatabase, clearRecallCache, metrics } = deps;
+  const { db, config, llmClient, log, clearRecallCache, metrics } = deps;
 
   // Boundary checks
   if (!AgentId) {
@@ -94,8 +93,6 @@ export async function store(
   let captured = 0;
   const maxCapture = config.capturePerTurn || 3;
   const storeStartTime = Date.now();
-  // Session-level cap: skip content similar to what we just stored this batch
-  const sessionRecentHashes: string[] = [];
 
   try {
     // Collect tier-update candidates to batch them (avoids N+1 queries)
@@ -110,18 +107,6 @@ export async function store(
 
       const safe = safeContent(content);
       const contentHash = hashContent(safe);
-
-      // === Recent同类 capping: skip if very similar to what we just stored this batch ===
-      if (sessionRecentHashes.length > 0) {
-        const recentContents = queryAll(db,
-          `SELECT content FROM memories WHERE id IN (${sessionRecentHashes.map(() => '?').join(',')})`,
-          sessionRecentHashes
-        ) as Array<{ content: string }>;
-        const isDupInSession = recentContents.some(rc =>
-          jaccardSimilarity(safe, rc.content) >= 0.8
-        );
-        if (isDupInSession) continue; // skip without counting toward maxCapture
-      }
 
       // Exact dedup check
       const existing = queryOne(db,
@@ -228,7 +213,6 @@ export async function store(
         [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.urgency, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
       );
 
-      sessionRecentHashes.push(memory.id);
       captured++;
     }
 
@@ -249,7 +233,6 @@ export async function store(
     if (tierCandidates.length > 0) clearRecallCache(AgentId);
     const storeDuration = Date.now() - storeStartTime;
     if (captured > 0) {
-      saveDatabase();
       log.info(`[algo-memory] 存储完成, 新增: ${captured}, agentId: ${AgentId}, 耗时: ${storeDuration}ms`);
     }
   } catch (err) {
