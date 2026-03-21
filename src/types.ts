@@ -23,6 +23,7 @@ export interface Config {
   lengthNorm: LengthNormConfig;
   hardMinScore: HardMinScoreConfig;
   tier: TierConfig;
+  urgencyDecay: UrgencyDecayConfig;
   scopes: ScopesConfig;
   capturePerTurn: number;
   llm: LLMConfig;
@@ -71,6 +72,11 @@ export interface LengthNormConfig {
 export interface HardMinScoreConfig {
   enabled: boolean;
   threshold: number;
+}
+
+export interface UrgencyDecayConfig {
+  enabled: boolean;      // 开启 urgency 快速衰减
+  halfLifeHours: number; // urgency 衰减半衰期（小时），默认 168（7天）
 }
 
 export interface TierConfig {
@@ -151,6 +157,7 @@ export const DEFAULT_CONFIG: Config = {
   lengthNorm: { enabled: false, anchor: 500 },
   hardMinScore: { enabled: false, threshold: 0.35 },
   tier: { enabled: false, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },
+  urgencyDecay: { enabled: false, halfLifeHours: 168 },
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
   llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },

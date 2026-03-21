@@ -1,72 +1,71 @@
 /**
- * algo-memory v2.2.3 - Database Query Helpers
+ * Database query wrappers — compatible with better-sqlite3 API.
+ * better-sqlite3 is fully synchronous, no async/await needed.
+ * Persistence is automatic (SQLite writes to disk directly).
  */
 
-export interface SqlJsDatabase {
-  run(sql: string, params?: unknown[]): void;
-  getRowsModified(): number;
-  prepare(sql: string): SqlJsStatement;
-  export(): Uint8Array;
-  close(): void;
-}
+import { type Database as DatabaseType } from 'better-sqlite3';
 
-export interface SqlJsStatement {
-  bind(params?: unknown[]): void;
-  step(): boolean;
-  getAsObject(): Record<string, unknown>;
-  free(): void;
-}
+// Re-export for use in other modules
+export type DbLike = DatabaseType;
+export type SqlJsDatabase = DbLike;
+export type AnyDatabase = DbLike;
 
-export interface AnyDatabase {
-  run(sql: string, params?: unknown[]): void;
-  getRowsModified(): number;
-  prepare(sql: string): SqlJsStatement;
+// Convert a raw row (array) to an object keyed by column names
+function rowToObject(row: unknown[], cols: string[]): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  cols.forEach((col: string, i: number) => { obj[col] = row[i]; });
+  return obj;
 }
-
-export type DbLike = {
-  run(sql: string, params?: unknown[]): void;
-  getRowsModified(): number;
-  prepare(sql: string): SqlJsStatement;
-};
 
 /**
- * Execute a query and return all rows as objects.
+ * Run a SELECT query, return all rows as objects.
+ * @example queryAll(db, 'SELECT * FROM memories WHERE id = ?', ['mem_abc'])
  */
 export function queryAll(db: DbLike, sql: string, params: unknown[] = []): Record<string, unknown>[] {
   try {
     const stmt = db.prepare(sql);
-    if (params.length > 0) stmt.bind(params);
-    const results: Record<string, unknown>[] = [];
-    while (stmt.step()) {
-      results.push(stmt.getAsObject());
+    stmt.bind(params as []);
+    const cols = stmt.columns().map(c => c.name);
+    const rows: Record<string, unknown>[] = [];
+    // better-sqlite3: iterate over results with stmt.step() equivalent via get()
+    // Use all() directly for simple case
+    const results = stmt.all() as unknown[][];
+    for (const row of results) {
+      rows.push(rowToObject(row, cols));
     }
-    stmt.free();
-    return results;
+    return rows;
   } catch (err) {
+    console.error('[algo-memory] SQL query error:', err);
     return [];
   }
 }
 
 /**
- * Execute a query and return the first row as an object.
+ * Run a SELECT query, return the first row as an object (or null).
  */
 export function queryOne(db: DbLike, sql: string, params: unknown[] = []): Record<string, unknown> | null {
-  const results = queryAll(db, sql, params);
-  return results.length > 0 ? results[0] : null;
+  try {
+    const stmt = db.prepare(sql);
+    stmt.bind(params as []);
+    const cols = stmt.columns().map(c => c.name);
+    const row = stmt.get() as unknown[] | undefined;
+    return row ? rowToObject(row, cols) : null;
+  } catch (err) {
+    console.error('[algo-memory] SQL query error:', err);
+    return null;
+  }
 }
 
 /**
  * Execute an INSERT/UPDATE/DELETE statement.
- * Returns number of affected rows; logs errors instead of throwing so callers
- * can remain unaware of SQL failures (they treat any falsy return as "no effect").
+ * Returns number of affected rows.
  */
 export function run(db: DbLike, sql: string, params: unknown[] = []): number {
   try {
-    db.run(sql, params);
-    return db.getRowsModified();
+    const result = db.prepare(sql).run(...(params as []));
+    return result.changes;
   } catch (err) {
-    // Log but don't throw — callers that check the return value still work as-is,
-    // and callers that ignore it won't crash the plugin on transient SQL errors.
     console.error('[algo-memory] SQL execution error:', err);
     return 0;
   }
@@ -77,10 +76,6 @@ export function run(db: DbLike, sql: string, params: unknown[] = []): number {
  * Use when continuing past a failure would be wrong (e.g. INSERT after validation).
  */
 export function runOrThrow(db: DbLike, sql: string, params: unknown[] = []): number {
-  try {
-    db.run(sql, params);
-    return db.getRowsModified();
-  } catch (err) {
-    throw err;
-  }
+  const result = db.prepare(sql).run(...(params as []));
+  return result.changes;
 }

@@ -3,17 +3,21 @@
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
- * 支持国内主流模型: MiniMax/百炼/DeepSeek/Kimi/智谱/腾讯/百度
- * 默认启用Agent隔离模式，支持配置跨Agent查看
  */
 
-import { Type } from '@sinclair/typebox';
+import path from 'path';
+import fs from 'fs';
+import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import LRUCache from 'lru-cache';
-import initSqlJs from 'sql.js';
-import * as fs from 'fs';
-import * as path from 'path';
-
-import type { Config, Memory } from './types.js';
+import { Type } from '@sinclair/typebox';
+import { initSchema } from './db/schema.js';
+import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
+import { store as doStore } from './engine/store.js';
+import { recall as doRecall } from './engine/recall.js';
+import type { StoreDeps } from './engine/store.js';
+import type { RecallDeps } from './engine/recall.js';
+import { LLMClient, resolveLLMConfig } from './engine/llm.js';
+import type { Config } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
 import {
   normalizeText,
@@ -31,23 +35,12 @@ import {
   SESSION_CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
 } from './utils.js';
-import { initSchema } from './db/schema.js';
-import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
-import { LLMClient, resolveLLMConfig } from './engine/llm.js';
-import { store as doStore, type StoreDeps } from './engine/store.js';
-import { recall as doRecall, type RecallDeps } from './engine/recall.js';
 
 // ============= Config merge helper =============
-// Spreads userConfig over DEFAULT_CONFIG for every top-level key,
-// returning the fully-typed merged Config. Avoids repetitive `??` chains.
-// Uses explicit `!== undefined` checks so that `false`/`0` values from userConfig
-// are NOT swallowed by the nullish coalescing operator.
+// Uses explicit `!== undefined` so that `false`/`0` from userConfig are respected.
 function mergeConfig(userConfig: Partial<Config>): Config {
-  const scalar = <K extends keyof Config>(
-    key: K, fallback: Config[K]
-  ): Config[K] => {
-    return userConfig[key] !== undefined ? userConfig[key] as Config[K] : fallback;
-  };
+  const scalar = <K extends keyof Config>(key: K, fallback: Config[K]): Config[K] =>
+    userConfig[key] !== undefined ? userConfig[key] as Config[K] : fallback;
   return {
     ...DEFAULT_CONFIG,
     noiseFilter: { ...DEFAULT_CONFIG.noiseFilter, ...userConfig.noiseFilter },
@@ -63,10 +56,10 @@ function mergeConfig(userConfig: Partial<Config>): Config {
       ...userConfig.tier,
       weights: { ...DEFAULT_CONFIG.tier.weights, ...(userConfig.tier?.weights || {}) }
     },
+    urgencyDecay: { ...DEFAULT_CONFIG.urgencyDecay, ...userConfig.urgencyDecay },
     scopes: { ...DEFAULT_CONFIG.scopes, ...userConfig.scopes },
     llm: resolveLLMConfig({ ...DEFAULT_CONFIG.llm, ...userConfig.llm }),
     threshold: { ...DEFAULT_CONFIG.threshold, ...userConfig.threshold },
-    // Scalars use explicit !== undefined so false/0 from userConfig are respected
     autoCapture: scalar('autoCapture', DEFAULT_CONFIG.autoCapture),
     autoRecall: scalar('autoRecall', DEFAULT_CONFIG.autoRecall),
     maxResults: scalar('maxResults', DEFAULT_CONFIG.maxResults),
@@ -83,20 +76,20 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 
 // ============= MemoryPlugin =============
 class MemoryPlugin {
-  private db: any = null;
+  private db: Database.Database | null = null;
   private dbPath: string = '';
-  private SQL: any = null;
   private cache: LRUCache<string, any>;
   private sessionCache: LRUCache<string, any>;
   private cleanupInterval: NodeJS.Timeout | null = null;
   private config: Config;
-  private llmClient: LLMClient | null = null;
+  // Internal non-null db accessor (caller must guard against null)
+  private _db(): DatabaseType { return this.db!; }
+  llmClient: LLMClient | null = null;
   private log: any;
-  private configHash: string = '';
-  // FTS5 availability — determined once at init, never changes
+  configHash: string = '';
   private ftsAvailable: boolean = false;
 
-  // Error metrics (Task 3)
+  // Error metrics
   public metrics = {
     llmErrors: { core: 0, extract: 0, dedup: 0 },
     dbErrors: 0,
@@ -104,144 +97,347 @@ class MemoryPlugin {
   };
 
   constructor(config: Partial<Config>, log: any = console) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = mergeConfig(config);
     this.log = log;
     this.cache = new LRUCache({ max: CACHE_MAX_SIZE, ttl: CACHE_TTL_MS });
     this.sessionCache = new LRUCache({ max: SESSION_CACHE_MAX_SIZE, ttl: SESSION_CACHE_TTL_MS });
-    // Include all config fields that affect recall scoring.
-    // Sort keys so hash is stable regardless of object property iteration order.
+
     const recallFields = {
-      maxResults: this.config.maxResults,
-      recencyDecay: this.config.recencyDecay,
-      recencyHalfLife: this.config.recencyHalfLife,
-      weibullDecay: this.config.weibullDecay,
-      reinforcement: this.config.reinforcement,
-      mmr: this.config.mmr,
-      lengthNorm: this.config.lengthNorm,
-      hardMinScore: this.config.hardMinScore,
-      tier: this.config.tier,
+      maxResults: this.config.maxResults, recencyDecay: this.config.recencyDecay,
+      recencyHalfLife: this.config.recencyHalfLife, weibullDecay: this.config.weibullDecay,
+      reinforcement: this.config.reinforcement, mmr: this.config.mmr,
+      lengthNorm: this.config.lengthNorm, hardMinScore: this.config.hardMinScore, tier: this.config.tier,
     };
-    // Stable key ordering via alphabetically sorted JSON
     this.configHash = hashContent(
-      Object.keys(recallFields).sort().map(k => `${k}=${JSON.stringify(recallFields[k as keyof typeof recallFields])}`).join('|')
+      Object.keys(recallFields).sort()
+        .map(k => `${k}=${JSON.stringify(recallFields[k as keyof typeof recallFields])}`).join('|')
     );
 
     if (this.config.llm.enabled && this.config.llm.apiKey) {
-      this.llmClient = new LLMClient(this.config, log);
-      // Wire up error metrics callbacks
+      this.llmClient = new LLMClient(this.config, this.log);
       this.llmClient.onCoreError = () => { this.metrics.llmErrors.core++; this.metrics.lastErrorAt = Date.now(); };
       this.llmClient.onExtractError = () => { this.metrics.llmErrors.extract++; this.metrics.lastErrorAt = Date.now(); };
       this.llmClient.onDedupError = () => { this.metrics.llmErrors.dedup++; this.metrics.lastErrorAt = Date.now(); };
     }
   }
 
+  // Detect duplicate plugin instance via PID file
+  private checkPidFile(stateDir: string): void {
+    try {
+      const pidPath = path.join(stateDir, 'algo-memory.pid');
+      if (fs.existsSync(pidPath)) {
+        const oldPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+        try { process.kill(oldPid, 0); } catch (_) { return; }
+        this.log.warn(`[algo-memory] 检测到另一个实例正在运行 (PID ${oldPid})`);
+      }
+      fs.writeFileSync(pidPath, String(process.pid));
+    } catch (_) { /* non-critical */ }
+  }
+
   async init(stateDir: string): Promise<void> {
     if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true });
     this.dbPath = path.join(stateDir, 'memories.db');
+    this.checkPidFile(stateDir);
 
-    // Detect duplicate plugin instances via PID file
-    const pidPath = path.join(stateDir, 'algo-memory.pid');
+    // Load existing DB or create new — synchronous with better-sqlite3
     try {
-      if (fs.existsSync(pidPath)) {
-        const oldPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
-        // Check if that PID is still alive (works on Linux/macOS)
-        try {
-          process.kill(oldPid, 0);
-          this.log.warn(`[algo-memory] 检测到另一个 algo-memory 实例正在运行 (PID ${oldPid})，当前实例不会覆盖其数据。`);
-        } catch (_) {
-          // Old PID is dead, safe to proceed
-        }
-      }
-      fs.writeFileSync(pidPath, String(process.pid));
-    } catch (e) {
-      this.log.warn('[algo-memory] 无法写入 PID 文件:', e);
+      this.db = new Database(this.dbPath);
+    } catch (err) {
+      this.log.error('[algo-memory] 数据库打开失败:', err);
+      throw err;
     }
 
-    const SQL = await initSqlJs();
-    this.SQL = SQL;
+    initSchema(this._db(), this.log);
 
-    if (fs.existsSync(this.dbPath)) {
-      try {
-        const fileBuffer = fs.readFileSync(this.dbPath);
-        this.db = new SQL.Database(fileBuffer);
-      } catch (err) {
-        this.log.warn('[algo-memory] 加载数据库失败，创建新数据库:', err);
-        this.db = new SQL.Database();
-      }
-    } else {
-      this.db = new SQL.Database();
-    }
-
-    initSchema(this.db, this.log);
-    // Probe FTS5 availability once
+    // Probe FTS5 availability
     try {
-      this.db.exec("SELECT count(*) FROM memories_fts LIMIT 0");
+      this._db().exec("SELECT count(*) FROM memories_fts LIMIT 0");
       this.ftsAvailable = true;
     } catch (_) {
       this.ftsAvailable = false;
       this.log.warn('[algo-memory] FTS5 不可用，搜索将降级为 LIKE');
     }
-    this.saveDatabase();
 
     this.log.info('[algo-memory] 数据库初始化:', this.dbPath);
     this.log.info(`[algo-memory] 每轮最多写入: ${this.config.capturePerTurn} 条`);
 
-    // Kick off first cleanup immediately so the timer doesn't drift for days
     this.cleanup();
     this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
-    this.startFlushTimer();
   }
 
+  // better-sqlite3 auto-persists to disk, saveDatabase() is now a no-op
   private saveDatabase(): void {
-    if (!this.db || !this.dbPath) return;
+    // No-op: better-sqlite3 writes synchronously on every statement.
+    // WAL mode (DELETE journal) ensures durability without blocking.
+  }
+
+  async store(AgentId: string, messages: any[]): Promise<void> {
+    const deps: StoreDeps = {
+      db: this._db(),
+      config: this.config,
+      llmClient: this.llmClient,
+      log: this.log,
+      saveDatabase: () => this.saveDatabase(),
+      clearRecallCache: (aid: string) => this.clearRecallCache(aid),
+      metrics: this.metrics
+    };
+    await doStore(deps, AgentId, messages);
+  }
+
+  async recall(AgentId: string, query: string): Promise<{ hasMemory: boolean; memories: any[] }> {
+    const deps = {
+      db: this._db(),
+      config: this.config,
+      log: this.log,
+      getVisibleAgentIds: (aid: string) => this.getVisibleAgentIds(aid),
+      cache: this.cache as any,
+      configHash: this.configHash,
+    };
+    return doRecall(deps, AgentId, query);
+  }
+
+  listMemories(AgentId: string, limit: number = 20, offset: number = 0): any[] {
+    if (!this.db) return [];
+    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
+    if (visibleAgentIds === null) {
+      return queryAll(this._db(),
+        'SELECT * FROM memories ORDER BY CASE tier WHEN \'core\' THEN 0 WHEN \'working\' THEN 1 ELSE 2 END, importance DESC, created_at DESC LIMIT ? OFFSET ?',
+        [limit, offset]
+      );
+    }
+    const placeholders = visibleAgentIds.map(() => '?').join(',');
+    return queryAll(this._db(),
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, created_at DESC LIMIT ? OFFSET ?`,
+      [...visibleAgentIds, limit, offset]
+    );
+  }
+
+  private ftsQuery(AgentId: string, query: string, visibleAgentIds: string[] | null, safeLimit: number): any[] {
     try {
-      const data = this.db.export();
-      const buffer = Buffer.from(data);
-      fs.writeFileSync(this.dbPath, buffer);
-    } catch (err) {
-      this.log.error('[algo-memory] 保存数据库失败:', err);
-      this.metrics.dbErrors++;
-      this.metrics.lastErrorAt = Date.now();
+      if (!this.ftsAvailable) throw new Error('FTS5 unavailable');
+      const terms = query.replace(/[^\w\s\u4e00-\u9fa5]/g, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 20);
+      const ftsQuery = terms.map((w: string) => `"${w}"*`).join(' OR ') || '';
+      if (!ftsQuery) return [];
+      const ftsLimit = Math.min(this.config.maxResults, 20);
+      if (visibleAgentIds === null) {
+        return queryAll(this._db(),
+          `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
+          [ftsQuery, ftsLimit]
+        );
+      }
+      const placeholders = visibleAgentIds.map(() => '?').join(',');
+      return queryAll(this._db(),
+        `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE m.agent_id IN (${placeholders}) AND memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
+        [...visibleAgentIds, ftsQuery, ftsLimit]
+      );
+    } catch (_) {
+      return [];
     }
   }
 
-  // Debounced save — avoids hammering disk on rapid store() calls
-  private pendingSave: NodeJS.Timeout | null = null;
-  private flushTimer: NodeJS.Timeout | null = null;   // periodic forced flush
-  private lastPersistTime: number = Date.now();       // track last save for periodic check
-
-  private scheduleSave(): void {
-    if (this.pendingSave) return;  // already scheduled
-    this.pendingSave = setTimeout(() => {
-      this.pendingSave = null;
-      this.saveDatabase();
-      this.lastPersistTime = Date.now();
-    }, 500);  // flush within 500ms
+  private likeFallback(AgentId: string, query: string, visibleAgentIds: string[] | null): any[] {
+    const terms = query.trim().split(/\s+/);
+    const likeLimit = Math.min(this.config.maxResults, 20);
+    if (visibleAgentIds === null) {
+      const clause = terms.map(() => 'content LIKE ? OR keywords LIKE ?').join(' OR ');
+      const params = terms.flatMap(t => [`%${t}%`, `%${t}%`]);
+      return queryAll(this._db(),
+        `SELECT * FROM memories WHERE (${clause}) ORDER BY importance DESC LIMIT ?`,
+        [...params, likeLimit]
+      );
+    }
+    const placeholders = visibleAgentIds.map(() => '?').join(',');
+    const clause = terms.map(() => 'content LIKE ? OR keywords LIKE ?').join(' OR ');
+    const params = terms.flatMap(t => [`%${t}%`, `%${t}%`]);
+    return queryAll(this._db(),
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (${clause}) ORDER BY importance DESC LIMIT ?`,
+      [...visibleAgentIds, ...params, likeLimit]
+    );
   }
 
-  private startFlushTimer(): void {
-    // Every 30s force a flush — guarantees data at risk < 30s even on crash
-    this.flushTimer = setInterval(() => {
-      if (this.pendingSave) {
-        clearTimeout(this.pendingSave);
-        this.pendingSave = null;
-        this.saveDatabase();
-        this.lastPersistTime = Date.now();
+  searchMemories(AgentId: string, query: string): any[] {
+    if (!this.db || !query?.trim()) return [];
+    // Extract tag:xxx filters
+    const tagMatch = query.matchAll(/(?:^|\s)tag:(\S+)/g);
+    const tags = [...tagMatch].map(m => m[1]);
+    const cleanQuery = query.replace(/(?:^|\s)tag:\S+/g, '').trim();
+    if (!cleanQuery) return [];
+
+    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
+    const safeLimit = Math.min(this.config.maxResults * 3, 100);
+    let results = this.ftsQuery(AgentId, cleanQuery, visibleAgentIds, safeLimit);
+    if (results.length === 0) results = this.likeFallback(AgentId, cleanQuery, visibleAgentIds);
+
+    // Apply tag filters
+    if (tags.length > 0) {
+      results = results.filter(m => {
+        const meta = m.metadata || '';
+        return tags.some(tag => meta.includes(`"${tag}"`));
+      });
+    }
+    return results;
+  }
+
+  private getVisibleAgentIds(AgentId: string): string[] | null {
+    const { scopes } = this.config;
+    if (!scopes.enabled) return null;
+    if (scopes.visibleAgents && scopes.visibleAgents.length > 0) {
+      if (scopes.visibleAgents.includes('*')) return null;
+      return [AgentId, ...scopes.visibleAgents];
+    }
+    return [AgentId];
+  }
+
+  getStats(AgentId: string): any {
+    if (!this.db) return { total: 0, core: 0, working: 0, peripheral: 0, general: 0, metrics: this.metrics };
+    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
+    let row: Record<string, unknown> | null;
+    if (visibleAgentIds === null) {
+      row = queryOne(this._db(),
+        `SELECT COUNT(*) as total, SUM(tier = 'core') as core, SUM(tier = 'peripheral') as peripheral, SUM(layer = 'general') as general FROM memories`
+      );
+    } else {
+      const placeholders = visibleAgentIds.map(() => '?').join(',');
+      row = queryOne(this._db(),
+        `SELECT COUNT(*) as total, SUM(tier = 'core') as core, SUM(tier = 'peripheral') as peripheral, SUM(layer = 'general') as general FROM memories WHERE agent_id IN (${placeholders})`,
+        visibleAgentIds
+      );
+    }
+    const total = (row?.total as number) || 0;
+    const core = (row?.core as number) || 0;
+    const peripheral = (row?.peripheral as number) || 0;
+    const general = (row?.general as number) || 0;
+    return { total, core, working: total - core - peripheral, peripheral, general, metrics: this.metrics };
+  }
+
+  getMemory(AgentId: string, memoryId: string): any {
+    if (!this.db) return null;
+    const row = queryOne(this._db(),
+      'SELECT * FROM memories WHERE id = ? AND agent_id = ?',
+      [memoryId, AgentId]
+    );
+    return row || null;
+  }
+
+  deleteMemory(AgentId: string, memoryId: string): boolean {
+    if (!this.db) return false;
+    const changes = run(this._db(),
+      'DELETE FROM memories WHERE id = ? AND agent_id = ?',
+      [memoryId, AgentId]
+    );
+    this.clearRecallCache(AgentId);
+    if (changes > 0) this.saveDatabase();
+    return changes > 0;
+  }
+
+  deleteBulk(AgentId: string, memoryIds: string[]): number {
+    if (!this.db || memoryIds.length === 0) return 0;
+    const placeholders = memoryIds.map(() => '?').join(',');
+    const changes = run(this._db(),
+      `DELETE FROM memories WHERE id IN (${placeholders}) AND agent_id = ?`,
+      [...memoryIds, AgentId]
+    );
+    this.clearRecallCache(AgentId);
+    if (changes > 0) this.saveDatabase();
+    return changes;
+  }
+
+  clearMemories(AgentId: string, keepCore: boolean = true): number {
+    if (!this.db) return 0;
+    const changes = keepCore
+      ? run(this._db(), 'DELETE FROM memories WHERE agent_id = ? AND tier != ?', [AgentId, 'core'])
+      : run(this._db(), 'DELETE FROM memories WHERE agent_id = ?', [AgentId]);
+    this.clearRecallCache(AgentId);
+    if (changes > 0) this.saveDatabase();
+    return changes;
+  }
+
+  updateMemory(AgentId: string, memoryId: string, content: string): boolean {
+    const normalized = normalizeText(content);
+    const safe = normalized.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const isCore = isCoreKeyword(normalized, this.config.coreKeywords);
+    const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
+    const changes = run(this._db(),
+      'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ? WHERE id = ? AND agent_id = ?',
+      [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), memoryId, AgentId]
+    );
+    this.clearRecallCache(AgentId);
+    if (changes > 0) this.saveDatabase();
+    return changes > 0;
+  }
+
+  importMemories(AgentId: string, memories: any[]): number {
+    if (!this.db) return 0;
+    let imported = 0;
+    try {
+      runOrThrow(this._db(), 'BEGIN IMMEDIATE');
+      for (const m of memories) {
+        try {
+          const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
+          run(this._db(),
+            `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, created_at, last_accessed, content_hash, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              m.id || generateId(), AgentId, m.scope || 'global',
+              m.content, m.type || 'other', tier, m.layer || 'general',
+              m.keywords || '', m.importance || 0.5, m.access_count || 1,
+              m.created_at || Date.now(), m.last_accessed || Date.now(),
+              m.content_hash || hashContent(m.content), m.metadata || null
+            ]
+          );
+          imported++;
+        } catch (_) { /* skip bad rows */ }
       }
-    }, 30_000);
+      runOrThrow(this._db(), 'COMMIT');
+    } catch (_) {
+      try { runOrThrow(this._db(), 'ROLLBACK'); } catch (_) { /* ignore */ }
+      return 0;
+    }
+    if (imported > 0) {
+      this.saveDatabase();
+      this.clearRecallCache(AgentId);
+    }
+    return imported;
+  }
+
+  exportMemories(AgentId: string, maxExport: number = 1000): any[] {
+    if (!this.db) return [];
+    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
+    if (visibleAgentIds === null) {
+      return queryAll(this._db(), 'SELECT * FROM memories ORDER BY created_at DESC LIMIT ?', [maxExport]);
+    }
+    const placeholders = visibleAgentIds.map(() => '?').join(',');
+    return queryAll(this._db(),
+      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`,
+      [...visibleAgentIds, maxExport]
+    );
+  }
+
+  getSessionMemory(AgentId: string): any[] {
+    return this.sessionCache.get(`session:${AgentId}`) || [];
+  }
+
+  addSessionMemory(AgentId: string, content: string): boolean {
+    if (!this.config.sessionMemory.enabled) return false;
+    const key = `session:${AgentId}`;
+    const session = this.sessionCache.get(key) || [];
+    if (session.some((s: any) => s.content === content) || false) return false;
+    session.unshift({ content, time: Date.now() });
+    if (session.length > this.config.sessionMemory.maxSessionItems) session.pop();
+    this.sessionCache.set(key, session);
+    return true;
+  }
+
+  getMetrics() {
+    return this.metrics;
   }
 
   private clearRecallCache(AgentId: string): void {
-    // Invalidate all recall cache entries for this agent.
-    // lru-cache v7 stores data in a private Map accessible as `.store`.
-    // Defensively fall back to cache.clear() if the internal structure changes.
     try {
       const store = (this.cache as any).store as Map<string, any> | undefined;
       if (store && typeof store.keys === 'function') {
         for (const key of store.keys()) {
-          if (key.startsWith(`recall:${AgentId}:`)) {
-            store.delete(key);
-          }
+          if (key.startsWith(`recall:${AgentId}:`)) store.delete(key);
         }
       } else {
         this.cache.clear();
@@ -251,403 +447,141 @@ class MemoryPlugin {
     }
   }
 
-  private getVisibleAgentIds(AgentId: string): string[] | null {
-    const { scopes } = this.config;
-    if (!scopes.enabled) return null;
-
-    if (scopes.visibleAgents && scopes.visibleAgents.length > 0) {
-      if (scopes.visibleAgents.includes('*')) return null;
-      return [AgentId, ...scopes.visibleAgents];
-    }
-    return [AgentId];
-  }
-
-  async store(AgentId: string, messages: any[]): Promise<void> {
-    const deps: StoreDeps = {
-      db: this.db,
-      config: this.config,
-      llmClient: this.llmClient,
-      log: this.log,
-      saveDatabase: () => this.saveDatabase(),
-      clearRecallCache: (aid) => this.clearRecallCache(aid),
-      metrics: this.metrics
-    };
-    await doStore(deps, AgentId, messages);
-  }
-
-  async recall(AgentId: string, query: string): Promise<{ hasMemory: boolean; memories: any[] }> {
-    const deps: RecallDeps = {
-      db: this.db,
-      config: this.config,
-      log: this.log,
-      getVisibleAgentIds: (aid) => this.getVisibleAgentIds(aid),
-      cache: (this.cache as any).cache as Map<string, any>,
-      configHash: this.configHash
-    };
-    return doRecall(deps, AgentId, query);
-  }
-
-  addSessionMemory(AgentId: string, content: string): boolean {
-    if (!this.config.sessionMemory.enabled) return false;
-    const key = `session:${AgentId}`;
-    const session = this.sessionCache.get(key) || [];
-    // Skip if the same content already exists (dedup)
-    if (session.some((s: any) => s.content === content) || false) return false;
-    session.unshift({ content, time: Date.now() });
-    if (session.length > this.config.sessionMemory.maxSessionItems) session.pop();
-    this.sessionCache.set(key, session);
-    return true;
-  }
-
-  getSessionMemory(AgentId: string): any[] {
-    return this.config.sessionMemory.enabled
-      ? (this.sessionCache.get(`session:${AgentId}`) || [])
-      : [];
-  }
-
   cleanup(): void {
     if (!this.db) return;
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
     const BATCH = 500;
-    // sql.js does not support DELETE...LIMIT, so delete via ROWID subquery.
-    // Each batch runs in its own transaction to avoid long write locks.
+    // better-sqlite3 supports DELETE...LIMIT natively
     let total = 0;
     let deleted = 0;
     do {
-      const rows = queryAll(this.db,
+      const rows = queryAll(this._db(),
         `SELECT rowid FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
         [cutoff, BATCH]
       );
       if (rows.length === 0) break;
       const rowids = rows.map((r: any) => r.rowid);
-      // Transaction ensures atomicity within this batch
-      runOrThrow(this.db, 'BEGIN IMMEDIATE');
-      try {
-        deleted = run(this.db,
-          `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
-          rowids
-        );
-        total += deleted;
-        runOrThrow(this.db, 'COMMIT');
-      } catch (err) {
-        runOrThrow(this.db, 'ROLLBACK');
-        this.log.error('[algo-memory] 清理批次失败，跳过剩余批次:', err);
-        break;
-      }
+      deleted = run(this._db(),
+        `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
+        rowids
+      );
+      total += deleted;
     } while (deleted === BATCH);
-    if (total > 0) this.scheduleSave();
+    if (total > 0) this.saveDatabase();
     this.log.info('[algo-memory] 清理了', total, '条过期记忆');
   }
 
-  // ===== Tool Methods =====
-  listMemories(AgentId: string, limit: number = 20, offset: number = 0): any[] {
-    if (!this.db) return [];
-    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
-    if (visibleAgentIds === null) {
-      return queryAll(this.db,
-        'SELECT * FROM memories ORDER BY CASE tier WHEN \'core\' THEN 0 WHEN \'working\' THEN 1 ELSE 2 END, importance DESC, created_at DESC LIMIT ? OFFSET ?',
-        [limit, offset]
-      );
-    }
-    const placeholders = visibleAgentIds.map(() => '?').join(',');
-    return queryAll(this.db,
-      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, created_at DESC LIMIT ? OFFSET ?`,
-      [...visibleAgentIds, limit, offset]
-    );
-  }
-
-  searchMemories(AgentId: string, query: string): any[] {
-    if (!this.db) return [];
-    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
-
-    try {
-      if (!this.ftsAvailable) throw new Error('FTS5 unavailable');
-      // Strip FTS5 special characters; limit query length to prevent ReDoS / abuse
-      const rawQuery = query.replace(/[^\w\s\u4e00-\u9fa5]/g, ' ').trim();
-      const terms = rawQuery.split(/\s+/).filter(Boolean).slice(0, 20);  // max 20 terms
-      const ftsQuery = terms.map((w: string) => `"${w}"*`).join(' OR ') || '';
-      if (ftsQuery) {
-        let results;
-        const ftsLimit = Math.min(this.config.maxResults, 20);
-        if (visibleAgentIds === null) {
-          results = queryAll(this.db,
-            `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
-            [ftsQuery, ftsLimit]
-          );
-        } else {
-          const placeholders = visibleAgentIds.map(() => '?').join(',');
-          results = queryAll(this.db,
-            `SELECT m.* FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE m.agent_id IN (${placeholders}) AND memories_fts MATCH ? ORDER BY bm25(memories_fts) DESC, m.importance DESC LIMIT ?`,
-            [...visibleAgentIds, ftsQuery, ftsLimit]
-          );
-        }
-        if (results.length > 0) return results;
-      }
-    } catch (err) {
-      this.log.warn('[algo-memory] FTS5 搜索不可用，使用 LIKE 备用:', (err as Error).message);
-    }
-
-    // Fallback: LIKE query — split into OR terms so multi-word queries match.
-    // Also search the pre-tokenized keywords column for better recall.
-    const terms = query.trim().split(/\s+/);
-    const likeLimit = Math.min(this.config.maxResults, 20);
-    if (visibleAgentIds === null) {
-      const contentClause = terms.map(() => 'content LIKE ?').join(' OR ');
-      const keywordsClause = terms.map(() => 'keywords LIKE ?').join(' OR ');
-      const params = terms.map(t => `%${t}%`);
-      return queryAll(this.db,
-        `SELECT * FROM memories WHERE (${contentClause} OR ${keywordsClause}) ORDER BY importance DESC LIMIT ?`,
-        [...params, ...params, likeLimit]
-      );
-    }
-    const placeholders = visibleAgentIds.map(() => '?').join(',');
-    const contentClause = terms.map(() => 'content LIKE ?').join(' OR ');
-    const keywordsClause = terms.map(() => 'keywords LIKE ?').join(' OR ');
-    const params = terms.map(t => `%${t}%`);
-    return queryAll(this.db,
-      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) AND (${contentClause} OR ${keywordsClause}) ORDER BY importance DESC LIMIT ?`,
-      [...visibleAgentIds, ...params, ...params, likeLimit]
-    );
-  }
-
-  getStats(AgentId: string): { total: number; core: number; working: number; peripheral: number; general: number; metrics: typeof MemoryPlugin.prototype.metrics } {
-    if (!this.db) return { total: 0, core: 0, working: 0, peripheral: 0, general: 0, metrics: this.metrics };
-    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
-
-    let row: Record<string, unknown> | null;
-    if (visibleAgentIds === null) {
-      row = queryOne(this.db,
-        `SELECT
-          COUNT(*) as total,
-          SUM(tier = 'core') as core,
-          SUM(tier = 'peripheral') as peripheral,
-          SUM(layer = 'general') as general
-         FROM memories`
-      );
-    } else {
-      const placeholders = visibleAgentIds.map(() => '?').join(',');
-      row = queryOne(this.db,
-        `SELECT
-          COUNT(*) as total,
-          SUM(tier = 'core') as core,
-          SUM(tier = 'peripheral') as peripheral,
-          SUM(layer = 'general') as general
-         FROM memories WHERE agent_id IN (${placeholders})`,
-        visibleAgentIds
-      );
-    }
-
-    const total = (row?.total as number) || 0;
-    const core = (row?.core as number) || 0;
-    const peripheral = (row?.peripheral as number) || 0;
-    const general = (row?.general as number) || 0;
-
-    return {
-      total,
-      core,
-      working: total - core - peripheral,
-      peripheral,
-      general,
-      metrics: this.metrics
-    };
-  }
-
-  getMemory(AgentId: string, memoryId: string): any | null {
-    if (!this.db) return null;
-    return queryOne(this.db, 'SELECT * FROM memories WHERE id = ? AND agent_id = ?', [memoryId, AgentId]);
-  }
-
-  deleteMemory(AgentId: string, memoryId: string): boolean {
-    if (!this.db) return false;
-    const changes = run(this.db, 'DELETE FROM memories WHERE id = ? AND agent_id = ?', [memoryId, AgentId]);
-    this.clearRecallCache(AgentId);
-    if (changes > 0) this.scheduleSave();
-    return changes > 0;
-  }
-
-  deleteBulk(AgentId: string, memoryIds: string[]): number {
-    if (!this.db || memoryIds.length === 0) return 0;
-    const placeholders = memoryIds.map(() => '?').join(',');
-    const changes = run(this.db, `DELETE FROM memories WHERE id IN (${placeholders}) AND agent_id = ?`, [...memoryIds, AgentId]);
-    this.clearRecallCache(AgentId);
-    if (changes > 0) this.scheduleSave();
-    return changes;
-  }
-
-  clearMemories(AgentId: string, keepCore: boolean = true): number {
-    if (!this.db) return 0;
-    const changes = keepCore
-      ? run(this.db, 'DELETE FROM memories WHERE agent_id = ? AND tier != ?', [AgentId, 'core'])
-      : run(this.db, 'DELETE FROM memories WHERE agent_id = ?', [AgentId]);
-    this.clearRecallCache(AgentId);
-    if (changes > 0) this.scheduleSave();
-    return changes;
-  }
-
-  updateMemory(AgentId: string, memoryId: string, content: string): boolean {
-    // Normalize + escape: same logic as store path to keep behavior consistent
-    const normalized = normalizeText(content);
-    const safe = normalized.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const isCore = isCoreKeyword(normalized, this.config.coreKeywords);
-    const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
-    const changes = run(this.db,
-      'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ? WHERE id = ? AND agent_id = ?',
-      [safe, tier, isCore ? 'core' : 'general', extractKeywords(normalized), isCore ? 1.0 : 0.5, Date.now(), memoryId, AgentId]
-    );
-    this.clearRecallCache(AgentId);
-    if (changes > 0) this.scheduleSave();
-    return changes > 0;
-  }
-
-  exportMemories(AgentId: string, maxExport: number = 1000): any[] {
-    if (!this.db) return [];
-    const visibleAgentIds = this.getVisibleAgentIds(AgentId);
-    if (visibleAgentIds === null) {
-      return queryAll(this.db, 'SELECT * FROM memories ORDER BY created_at DESC LIMIT ?', [maxExport]);
-    }
-    const placeholders = visibleAgentIds.map(() => '?').join(',');
-    return queryAll(this.db,
-      `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`,
-      [...visibleAgentIds, maxExport]
-    );
-  }
-
-  importMemories(AgentId: string, memories: any[]): number {
-    if (!this.db) return 0;
-    let imported = 0;
-    try {
-      runOrThrow(this.db, 'BEGIN TRANSACTION');
-      for (const m of memories) {
-        try {
-          const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
-          run(this.db,
-            `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, created_at, last_accessed, content_hash, metadata)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              m.id || generateId(),
-              AgentId,
-              m.scope || 'global',
-              m.content,
-              m.type || 'other',
-              tier,
-              m.layer || 'general',
-              m.keywords || '',
-              m.importance || 0.5,
-              m.access_count || 1,
-              m.created_at || Date.now(),
-              m.last_accessed || Date.now(),
-              m.content_hash || hashContent(m.content),
-              m.metadata || null
-            ]
-          );
-          imported++;
-        } catch (e) {
-          this.log.warn('[algo-memory] 导入单条记忆失败:', e);
-        }
-      }
-      runOrThrow(this.db, 'COMMIT');
-    } catch (e) {
-      try { this.db.run('ROLLBACK'); } catch (_) { /* ignore */ }
-      this.log.error('[algo-memory] 导入记忆事务失败:', e);
-      this.metrics.dbErrors++;
-      this.metrics.lastErrorAt = Date.now();
-      return 0;
-    }
-    if (imported > 0) {
-      this.scheduleSave();
-      this.clearRecallCache(AgentId);
-    }
-    return imported;
-  }
-
-  // ===== Metrics =====
-  getMetrics(): typeof MemoryPlugin.prototype.metrics {
-    return this.metrics;
-  }
-
   close(): void {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-    }
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer);
-      this.flushTimer = null;
-    }
+    if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
     this.cache.clear();
     this.sessionCache.clear();
-    if (this.pendingSave) {
-      clearTimeout(this.pendingSave);
-      this.pendingSave = null;
-    }
     if (this.db) {
-      // Force immediate flush before closing — no more async scheduling
-      this.saveDatabase();
+      try {
+        const pidPath = this.dbPath.replace(/[/\\][^/\\]+$/, '') + '/algo-memory.pid';
+        fs.unlinkSync(pidPath);
+      } catch (_) { /* ignore */ }
       this.db.close();
       this.db = null;
     }
-    // Remove PID file so a fresh start is clean next time
-    // Derive from dbPath so it always matches what init() wrote
-    try {
-      if (this.dbPath) {
-        const pidPath = this.dbPath.replace(/[/\\][^/\\]+$/, '') + '/algo-memory.pid';
-        fs.unlinkSync(pidPath);
-      }
-    } catch (_) { /* ignore */ }
     this.log.info('[algo-memory] 插件已关闭');
   }
 }
 
-// ============= Plugin Export =============
-// Shared dedup key: prevents re-injecting the same memory block on
-// successive before_prompt_build calls within the same conversation
+// ============= Shared dedup key =============
 const lastRecallKey: Map<string, string> = new Map();
 
-const algoMemoryPlugin = {
-  id: "algo-memory",
-  name: "Algo Memory",
-  description: "纯算法长期记忆插件 - 支持多模型/智能去重/时间衰减",
-  kind: "memory" as const,
-
+// ============= Plugin Export =============
+export default {
+  id: 'algo-memory',
+  name: 'algo-memory',
+  version: '2.2.3',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
     const config = mergeConfig(userConfig);
 
     const plugin = new MemoryPlugin(config, log);
-    _captureInstance(plugin);  // test helper
 
-    const stateDir = api.getStateDir?.() || api.stateDir ||
-      path.join(process.env.HOME || process.env.USERPROFILE || '/home/x', '.openclaw', 'state', 'algo-memory');
+    await plugin.init(api.getStateDir?.() || api.stateDir ||
+      path.join(process.env.HOME || '/home/x', '.openclaw', 'state', 'algo-memory'));
 
-    await plugin.init(stateDir);
+    // === Hooks ===
+    if (config.autoCapture) {
+      api.on('agent_end', async (event: any) => {
+        try {
+          const agentId = event?.agentId || 'default';
+          const messages = event?.messages || [];
+          await plugin.store(agentId, messages);
+        } catch (err) {
+          log.error('[algo-memory] agent_end 钩子错误:', err);
+        }
+      });
+    }
 
-    log.info('[algo-memory] 插件已加载，自动捕获: ' + config.autoCapture + ', 自动召回: ' + config.autoRecall);
+    if (config.autoRecall) {
+      api.on('before_prompt_build', async (event: any) => {
+        try {
+          const agentId = event?.agentId || 'default';
+          const messages = event?.messages || [];
+          const userMessages = (messages as any[])
+            .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
+            .map((m: any) => m.content.trim()).filter(Boolean);
+          if (userMessages.length === 0) return;
+          const query = userMessages.slice(-3).join(' ');
+          if (!shouldRetrieve(query, config.adaptiveRetrieval)) return;
 
-    // ===== Tool Definitions =====
-    const toolDefinitions = [
-      { name: 'algo_memory_list', description: '列出所有记忆', parameters: Type.Object({ agentId: Type.String(), limit: Type.Optional(Type.Number()), offset: Type.Optional(Type.Number()) }) },
-      { name: 'algo_memory_search', description: '搜索记忆', parameters: Type.Object({ agentId: Type.String(), query: Type.String() }) },
-      { name: 'algo_memory_stats', description: '查看记忆统计', parameters: Type.Object({ agentId: Type.String() }) },
+          const lastKey = lastRecallKey.get(agentId) || '';
+          if (query === lastKey) return;
+          lastRecallKey.set(agentId, query);
+
+          const { hasMemory, memories } = await plugin.recall(agentId, query);
+          if (hasMemory && memories.length > 0) {
+            const MAX_INJECT_TOKENS = 1500;
+            const header = '\n\n以下是相关记忆：\n';
+            let tokenCount = estimateTokens(header);
+            const selected: string[] = [];
+            let omitted = 0;
+            for (const m of memories) {
+              const line = `[记忆] ${m.content}`;
+              const lineTokens = estimateTokens(line) + 1;
+              if (tokenCount + lineTokens <= MAX_INJECT_TOKENS) {
+                selected.push(line);
+                tokenCount += lineTokens;
+              } else omitted++;
+            }
+            const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
+            log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
+            api.prependSystemContext(selected.join('\n') + suffix + '\n');
+          }
+        } catch (err) {
+          log.error('[algo-memory] before_prompt_build 钩子错误:', err);
+        }
+      }, { priority: 10 });
+    }
+
+    // === Tools ===
+    const tools = [
+      { name: 'algo_memory_list', description: '列出记忆（支持 limit + offset 分页）', parameters: Type.Object({ agentId: Type.String(), limit: Type.Optional(Type.Number()), offset: Type.Optional(Type.Number()) }) },
+      { name: 'algo_memory_search', description: '全文搜索（FTS5 优先，LIKE 兜底）', parameters: Type.Object({ agentId: Type.String(), query: Type.String() }) },
+      { name: 'algo_memory_stats', description: '查看统计（total / core / working / peripheral）', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_get', description: '获取单条记忆详情', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String() }) },
       { name: 'algo_memory_delete', description: '删除单条记忆', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String() }) },
       { name: 'algo_memory_delete_bulk', description: '批量删除记忆', parameters: Type.Object({ agentId: Type.String(), memoryIds: Type.Array(Type.String()) }) },
-      { name: 'algo_memory_clear', description: '清空记忆（可选保留核心记忆）', parameters: Type.Object({ agentId: Type.String(), keepCore: Type.Optional(Type.Boolean()) }) },
-      { name: 'algo_memory_update', description: '更新记忆内容', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String(), content: Type.String() }) },
-      { name: 'algo_memory_export', description: '导出所有记忆', parameters: Type.Object({ agentId: Type.String() }) },
-      { name: 'algo_memory_import', description: '导入记忆', parameters: Type.Object({ agentId: Type.String(), memories: Type.Array(Type.Object({})) }) },
-      { name: 'algo_memory_session', description: '获取当前 Session 的临时记忆', parameters: Type.Object({ agentId: Type.String() }) },
-      { name: 'algo_memory_metrics', description: '导出错误指标（LLM/DB 错误计数及最后错误时间）', parameters: Type.Object({}) },
-      { name: 'algo_memory_session_add', description: '写入当前 Session 的临时记忆', parameters: Type.Object({ agentId: Type.String(), content: Type.String() }) }
+      { name: 'algo_memory_clear', description: '清空记忆（keepCore=true 时保留 core 层）', parameters: Type.Object({ agentId: Type.String(), keepCore: Type.Optional(Type.Boolean()) }) },
+      { name: 'algo_memory_update', description: '更新记忆内容（自动重新判断重要性）', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String(), content: Type.String() }) },
+      { name: 'algo_memory_import', description: '批量导入记忆', parameters: Type.Object({ agentId: Type.String(), memories: Type.Array(Type.Any()) }) },
+      { name: 'algo_memory_export', description: '导出记忆为 JSON（默认最多 1000 条）', parameters: Type.Object({ agentId: Type.String(), maxExport: Type.Optional(Type.Number()) }) },
+      { name: 'algo_memory_session', description: '获取 Session 临时记忆', parameters: Type.Object({ agentId: Type.Optional(Type.String()) }) },
+      { name: 'algo_memory_session_add', description: '写入 Session 临时记忆', parameters: Type.Object({ agentId: Type.Optional(Type.String()), content: Type.String() }) },
+      { name: 'algo_memory_metrics', description: '查看运行时指标', parameters: Type.Object({}) },
     ];
 
-    // ===== Register Tools =====
-    toolDefinitions.forEach(tool => {
+    for (const tool of tools) {
       api.registerTool({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
-        async execute(_id: string, params: any) {
+        execute: async (callId: string, params: any) => {
           try {
             let result: any;
             switch (tool.name) {
@@ -659,111 +593,24 @@ const algoMemoryPlugin = {
               case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(params.agentId, params.memoryIds) }; break;
               case 'algo_memory_clear': result = { deleted: plugin.clearMemories(params.agentId, params.keepCore !== false) }; break;
               case 'algo_memory_update': result = { success: plugin.updateMemory(params.agentId, params.memoryId, params.content) }; break;
-              case 'algo_memory_export': result = plugin.exportMemories(params.agentId); break;
               case 'algo_memory_import': result = { imported: plugin.importMemories(params.agentId, params.memories) }; break;
-              case 'algo_memory_session': result = plugin.getSessionMemory(params.agentId); break;
+              case 'algo_memory_export': result = plugin.exportMemories(params.agentId, params.maxExport || 1000); break;
+              case 'algo_memory_session': result = plugin.getSessionMemory(params.agentId || 'default'); break;
+              case 'algo_memory_session_add': result = { success: plugin.addSessionMemory(params.agentId || 'default', params.content) }; break;
               case 'algo_memory_metrics': result = plugin.getMetrics(); break;
-              case 'algo_memory_session_add': result = { success: plugin.addSessionMemory(params.agentId, params.content) }; break;
+              default: result = { error: 'Unknown tool' };
             }
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
           } catch (err: any) {
-            return { content: [{ type: 'text', text: 'Error: ' + String(err) }], isError: true };
+            log.error(`[algo-memory] 工具执行失败 ${tool.name}:`, err);
+            return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
           }
         }
       });
-    });
-
-    // ===== Lifecycle Hooks =====
-    if (typeof api.on === 'function') {
-      // agent_end: store memories after agent response
-      api.on('agent_end', async (event: any) => {
-        try {
-          const agentId = event?.agentId || 'default';
-          const messages = event?.messages || [];
-          if (config.autoCapture && messages.length > 0) {
-            await plugin.store(agentId, messages);
-          }
-        } catch (err) {
-          log.error('[algo-memory] agent_end 钩子错误:', err);
-        }
-      });
-
-      // before_prompt_build: inject memory context before prompt building
-      // Task 1 fix: use api.prependSystemContext() instead of return value
-      if (config.autoRecall) {
-        api.on('before_prompt_build', async (event: any) => {
-          try {
-            const agentId = event?.agentId || 'default';
-            const messages = event?.messages || [];
-            // Collect all user messages in this turn to form a comprehensive query
-            const userMessages = (messages as any[])
-              .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
-              .map((m: any) => m.content.trim())
-              .filter(Boolean);
-            if (userMessages.length === 0) return;
-
-            // Join last few user messages as query (up to 3 to avoid over-loading)
-            const query = userMessages.slice(-3).join(' ');
-            if (!shouldRetrieve(query, config.adaptiveRetrieval)) return;
-
-            // Skip if the query is identical to last recall — memories already in context
-            const lastKey = lastRecallKey.get(agentId) || '';
-            if (query === lastKey) return;
-            lastRecallKey.set(agentId, query);
-
-            const { hasMemory, memories } = await plugin.recall(agentId, query);
-            if (hasMemory && memories.length > 0) {
-              // Token-budgeted injection: fill context up to MAX_INJECT_TOKENS,
-              // keeping highest-importance memories first
-              const MAX_INJECT_TOKENS = 1500;
-              const header = '\n\n以下是相关记忆：\n';
-              const headerTokens = estimateTokens(header);
-              const selected: string[] = [];
-              let tokenCount = headerTokens;
-              let omitted = 0;
-              for (const m of memories) {
-                const line = `[记忆] ${m.content}`;
-                const lineTokens = estimateTokens(line) + 1;  // +1 for '\n'
-                if (tokenCount + lineTokens <= MAX_INJECT_TOKENS) {
-                  selected.push(line);
-                  tokenCount += lineTokens;
-                } else {
-                  omitted++;
-                }
-              }
-              const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
-              log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
-              api.prependSystemContext(selected.join('\n') + suffix + '\n');
-            }
-          } catch (err) {
-            log.error('[algo-memory] before_prompt_build 钩子错误:', err);
-          }
-        }, { priority: 10 });
-      }
     }
 
-    // ===== Service Lifecycle =====
-    api.registerService({
-      id: "algo-memory",
-      start: async () => { log.info('[algo-memory] 服务已启动'); },
-      stop: async () => {
-        try {
-          plugin.close();
-          log.info('[algo-memory] 服务已停止');
-        } catch (err) {
-          log.error('[algo-memory] 服务停止错误:', err);
-        }
-      }
-    });
-
-    log.info(`[algo-memory] 插件已就绪, 工具数: ${toolDefinitions.length}, 自动捕获: ${config.autoCapture}, 自动召回: ${config.autoRecall}`);
+    api.registerService(plugin);
   }
 };
 
-export default algoMemoryPlugin;
 
-// Test helper: captures the MemoryPlugin instance after register() is called.
-// Usage: after register(mockApi), call _getPluginInstance() to get the instance.
-let _capturedInstance: any = null;
-export function _captureInstance(p: any) { _capturedInstance = p; }
-export function _getPluginInstance(): any { return _capturedInstance; }

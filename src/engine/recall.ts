@@ -79,9 +79,17 @@ export async function recall(
     const halfLife = config.recencyHalfLife || 180;
     memories = memories.map(m => {
       const daysOld = (Date.now() - m.last_accessed) / (1000 * 60 * 60 * 24);
+      const hoursOld = daysOld * 24;
       const w = config.tier.weights;
       const tierMultiplier = m.tier === 'core' ? w.core : m.tier === 'working' ? w.working : w.peripheral;
       let score = tierMultiplier * m.importance;
+
+      // Urgency decay: urgency starts at 1.0, decays rapidly (default half-life 7 days)
+      if (config.urgencyDecay.enabled) {
+        const urgency = (m as any).urgency ?? 1.0;
+        const urgencyDecay = Math.pow(0.5, hoursOld / config.urgencyDecay.halfLifeHours);
+        score *= urgency * urgencyDecay;
+      }
 
       if (config.weibullDecay.enabled) {
         score *= weibullDecay(daysOld, config.weibullDecay.shape, config.weibullDecay.scale);
