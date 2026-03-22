@@ -73,6 +73,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 
 // ============= MemoryPlugin =============
 class MemoryPlugin {
+  id = 'algo-memory';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -125,6 +126,9 @@ class MemoryPlugin {
       this.llmClient.onDedupError = () => { this.metrics.llmErrors.dedup++; this.metrics.lastErrorAt = Date.now(); };
     }
   }
+
+  // Called by OpenClaw registry after registerService
+  async start(_context: any): Promise<void> {}
 
   // Detect duplicate plugin instance via PID file
   private checkPidFile(stateDir: string): void {
