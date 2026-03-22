@@ -48,6 +48,7 @@ openclaw config set "plugins.slots.memory" "algo-memory"
         // === 核心功能（默认已开启）===
         "autoCapture": true,
         "autoRecall": true,
+        "maxInjectTokens": 1500,
         "recencyDecay": true,
         "smartDedup": true,
         "noiseFilter": { "enabled": true, "skipGreetings": true, "skipCommands": true },
