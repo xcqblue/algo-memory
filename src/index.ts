@@ -30,7 +30,6 @@ import {
   getTier,
   shouldRetrieve,
   estimateTokens,
-  jaccardSimilarity,
   CACHE_MAX_SIZE,
   CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
@@ -804,30 +803,29 @@ export default {
             const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
             log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
             api.prependSystemContext(selected.join('\n') + suffix + '\n');
-
-            // === 补充存储：召回成功后，检查最新用户消息是否有新内容未存 ===
-            const latestRaw = (messages as any[])
-              .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
-              .map((m: any) => m.content.trim())
-              .filter(Boolean)
-              .at(-1);
-            if (latestRaw) {
-              const latestNorm = normalizeText(latestRaw);
-              // 与已有记忆 Jaccard ≥ 0.5 说明已包含在召回内容里，不需要补充
-              // Jaccard < 0.5 才视为"新内容"
-              const isNew = memories.every(m =>
-                jaccardSimilarity(latestNorm, m.content) < 0.5
-              );
-              if (isNew && !isNoise(latestNorm, config.noiseFilter)) {
-                await plugin.supplementStore(agentId, latestRaw);
-                log.info(`[algo-memory] 补充存储: ${latestNorm.substring(0, 50)}`);
-              }
-            }
           }
         } catch (err) {
           log.error('[algo-memory] before_prompt_build 钩子错误:', err);
         }
       }, { priority: 10 });
+
+    // === 补充存储：每次 before_prompt_build 都检查，不管有没有召回成功 ===
+    // 目的：解决"冷启动"——没有任何历史记忆时，补充存储仍然能沉淀信息
+    api.on('before_prompt_build', async (event: any) => {
+      try {
+        const latestRaw = (event?.messages as any[] || [])
+          .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
+          .map((m: any) => m.content.trim())
+          .filter(Boolean)
+          .at(-1);
+        if (!latestRaw) return;
+        const latestNorm = normalizeText(latestRaw);
+        if (isNoise(latestNorm, config.noiseFilter)) return;
+        await plugin.supplementStore(event?.agentId || 'default', latestRaw);
+      } catch (err) {
+        log.error('[algo-memory] supplement store 错误:', err);
+      }
+    }, { priority: 5 });
     }
 
     // === Session Summary ===
