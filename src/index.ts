@@ -30,6 +30,7 @@ import {
   getTier,
   shouldRetrieve,
   estimateTokens,
+  jaccardSimilarity,
   CACHE_MAX_SIZE,
   CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
@@ -208,6 +209,44 @@ class MemoryPlugin {
       this.lastRecallTime.set(AgentId, Date.now());
     }
     return result;
+  }
+
+  /**
+   * 补充存储：存储不重要/新发现的信息，不触发 tier 更新，不走 LLM 判断。
+   * 用于 before_prompt_build 召回成功后，发现用户最新消息有未存储的新内容时补充。
+   */
+  async supplementStore(AgentId: string, rawContent: string): Promise<void> {
+    if (!this.db || !rawContent?.trim()) return;
+    const content = normalizeText(rawContent);
+    if (isNoise(content, this.config.noiseFilter)) return;
+
+    const safe = safeContent(content);
+    const contentHash = hashContent(safe);
+    const now = Date.now();
+
+    // 检查是否已存在（精确去重）
+    const existing = queryOne(this._db(),
+      'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ?',
+      [AgentId, contentHash]
+    );
+    if (existing) return; // 精确命中则不存
+
+    const scope = this.config.scopes.enabled
+      ? `${this.config.scopes.defaultScope}:${AgentId}`
+      : 'global';
+
+    // 补充存储：importance = 0.4（低于普通记忆的 0.5），access_count = 0（不触发 tier 变化）
+    run(this._db(),
+      `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        generateId(), AgentId, scope, safe, 'other', 'peripheral', 'general',
+        extractKeywords(safe), 0.4, 0, 0, 1.0,
+        now, now, contentHash,
+        JSON.stringify({ memory_category: 'other', confidence: 0.4, source_session: AgentId, supplementary: true })
+      ]
+    );
+    this.clearRecallCache(AgentId);
   }
 
   listMemories(AgentId: string, limit: number = 20, offset: number = 0): any[] {
@@ -765,6 +804,25 @@ export default {
             const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
             log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
             api.prependSystemContext(selected.join('\n') + suffix + '\n');
+
+            // === 补充存储：召回成功后，检查最新用户消息是否有新内容未存 ===
+            const latestRaw = (messages as any[])
+              .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
+              .map((m: any) => m.content.trim())
+              .filter(Boolean)
+              .at(-1);
+            if (latestRaw) {
+              const latestNorm = normalizeText(latestRaw);
+              // 与已有记忆 Jaccard ≥ 0.5 说明已包含在召回内容里，不需要补充
+              // Jaccard < 0.5 才视为"新内容"
+              const isNew = memories.every(m =>
+                jaccardSimilarity(latestNorm, m.content) < 0.5
+              );
+              if (isNew && !isNoise(latestNorm, config.noiseFilter)) {
+                await plugin.supplementStore(agentId, latestRaw);
+                log.info(`[algo-memory] 补充存储: ${latestNorm.substring(0, 50)}`);
+              }
+            }
           }
         } catch (err) {
           log.error('[algo-memory] before_prompt_build 钩子错误:', err);
