@@ -404,13 +404,30 @@ class MemoryPlugin {
     return changes;
   }
 
-  updateMemory(AgentId: string, memoryId: string, content: string): boolean {
+  async updateMemory(AgentId: string, memoryId: string, content: string): Promise<boolean> {
+    if (!this.db) return false;
+    const row = queryOne(this._db(),
+      'SELECT * FROM memories WHERE id = ? AND agent_id = ?',
+      [memoryId, AgentId]
+    ) as any;
+    if (!row) return false;
+
     const safe = safeContent(content);
-    const isCore = isCoreKeyword(safe, this.config.coreKeywords);
-    const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
+    let isCore = isCoreKeyword(safe, this.config.coreKeywords);
+    let importance = isCore ? 1.0 : 0.5;
+
+    // Core determination: prefer local keyword check; LLM if enabled and still uncertain
+    if (!isCore && this.llmClient && this.config.threshold.useLlmForCore &&
+        safe.length >= this.config.threshold.lengthForCore) {
+      const r = await this.llmClient.isCoreMemory(safe);
+      isCore = r.isCore;
+      importance = r.confidence;
+    }
+
+    const tier = getTier(importance, row.access_count || 1, 0, this.config.tier);
     const changes = run(this._db(),
       'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ?, content_hash = ? WHERE id = ? AND agent_id = ?',
-      [safe, tier, isCore ? 'core' : 'general', extractKeywords(safe), isCore ? 1.0 : 0.5, Date.now(), hashContent(safe), memoryId, AgentId]
+      [safe, tier, isCore ? 'core' : 'general', extractKeywords(safe), importance, Date.now(), hashContent(safe), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
     return changes > 0;
@@ -523,7 +540,7 @@ confidence 是 0-1 的置信度。
   /**
    * 应用确认后的修正
    */
-  applyFeedback(AgentId: string, memoryId: string, updatedContent: string): boolean {
+  async applyFeedback(AgentId: string, memoryId: string, updatedContent: string): Promise<boolean> {
     return this.updateMemory(AgentId, memoryId, updatedContent);
   }
 
@@ -870,7 +887,7 @@ export default {
               case 'algo_memory_delete': result = { success: plugin.deleteMemory(params.agentId, params.memoryId) }; break;
               case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(params.agentId, params.memoryIds) }; break;
               case 'algo_memory_clear': result = { deleted: plugin.clearMemories(params.agentId, params.keepCore !== false) }; break;
-              case 'algo_memory_update': result = { success: plugin.updateMemory(params.agentId, params.memoryId, params.content) }; break;
+              case 'algo_memory_update': result = { success: await plugin.updateMemory(params.agentId, params.memoryId, params.content) }; break;
               case 'algo_memory_import': result = { imported: plugin.importMemories(params.agentId, params.memories) }; break;
               case 'algo_memory_export': result = plugin.exportMemories(params.agentId, params.maxExport || 1000); break;
               case 'algo_memory_metrics': result = plugin.getMetrics(); break;
@@ -878,7 +895,7 @@ export default {
               case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(params.agentId); break;
               case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
               case 'algo_memory_feedback': result = await plugin.feedback(params.agentId, params.correction); break;
-              case 'algo_memory_apply_feedback': result = { success: plugin.applyFeedback(params.agentId, params.memoryId, params.updatedContent) }; break;
+              case 'algo_memory_apply_feedback': result = { success: await plugin.applyFeedback(params.agentId, params.memoryId, params.updatedContent) }; break;
               default: result = { error: 'Unknown tool' };
             }
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -1019,9 +1036,9 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             case 'algo_memory_delete': result = { success: plugin.deleteMemory(args.agentId, args.memoryId) }; break;
             case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(args.agentId, args.memoryIds) }; break;
             case 'algo_memory_clear': result = { deleted: plugin.clearMemories(args.agentId, args.keepCore !== false) }; break;
-            case 'algo_memory_update': result = { success: plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
+            case 'algo_memory_update': result = { success: await plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
             case 'algo_memory_feedback': result = await plugin.feedback(args.agentId, args.correction); break;
-            case 'algo_memory_apply_feedback': result = { success: plugin.applyFeedback(args.agentId, args.memoryId, args.updatedContent) }; break;
+            case 'algo_memory_apply_feedback': result = { success: await plugin.applyFeedback(args.agentId, args.memoryId, args.updatedContent) }; break;
             case 'algo_memory_export': result = plugin.exportMemories(args.agentId, args.maxExport || 1000); break;
             case 'algo_memory_import': result = { imported: plugin.importMemories(args.agentId, args.memories) }; break;
             case 'algo_memory_metrics': result = plugin.getMetrics(); break;

@@ -124,23 +124,27 @@ export async function recall(
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
   }
 
+  // Save all scored candidates before MMR/tier filtering mutates the reference
+  const scoredCandidates = memories;
+
+  // Build the final returned set: MMR → hardMinScore → truncate
   if (config.mmr.enabled) {
     memories = mmrDeduplicate(memories, config.mmr);
   }
-
   if (config.hardMinScore.enabled) {
     memories = memories.filter(m => (m._score || m.importance) >= config.hardMinScore.threshold);
   }
-
   const limited = memories.slice(0, config.maxResults);
 
-  // 召回完成后更新 cited_count（被实际召回使用说明这条记忆对本次对话有帮助）
-  if (limited.length > 0) {
-    const ids = limited.map(m => m.id);
-    const placeholders = ids.map(() => '?').join(',');
+  // cited_count: update ALL scored candidates (before MMR dedup and truncation).
+  // Items removed by MMR were still scored and relevant (similar to selected ones).
+  // Items that survived MMR but were cut by truncation are also relevant.
+  const candidateIds = scoredCandidates.map((m: Memory) => m.id);
+  if (candidateIds.length > 0) {
+    const placeholders = candidateIds.map(() => '?').join(',');
     run(db,
       `UPDATE memories SET cited_count = cited_count + 1 WHERE id IN (${placeholders})`,
-      ids
+      candidateIds
     );
   }
 
