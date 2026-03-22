@@ -21,7 +21,6 @@ import { LLMClient, resolveLLMConfig } from './engine/llm.js';
 import type { Config } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
 import {
-  normalizeText,
   isNoise,
   isCoreKeyword,
   extractKeywords,
@@ -247,7 +246,17 @@ class MemoryPlugin {
   }
 
   private likeFallback(AgentId: string, query: string, visibleAgentIds: string[] | null): any[] {
-    const terms = query.trim().split(/\s+/);
+    // Normalize each term to match safeContent() storage (strip markdown markers)
+    const stripMarkdown = (t: string) => t
+      .replace(/```[\s\S]*?```/g, m => m.replace(/```/g, ''))
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/^#+\s*/gm, '')
+      .replace(/^[-*+]\s+/gm, '')
+      .replace(/^\d+\.\s*/gm, '');
+    const terms = query.trim().split(/\s+/).map(stripMarkdown).filter(Boolean);
+    if (terms.length === 0) return [];
     const likeLimit = Math.min(this.config.maxResults, 20);
     if (visibleAgentIds === null) {
       const clause = terms.map(() => 'content LIKE ? OR keywords LIKE ?').join(' OR ');
@@ -305,20 +314,21 @@ class MemoryPlugin {
     let row: Record<string, unknown> | null;
     if (visibleAgentIds === null) {
       row = queryOne(this._db(),
-        `SELECT COUNT(*) as total, SUM(tier = 'core') as core, SUM(tier = 'peripheral') as peripheral, SUM(layer = 'general') as general FROM memories`
+        `SELECT COUNT(*) as total, SUM(tier = 'core') as core, SUM(tier = 'working') as working, SUM(tier = 'peripheral') as peripheral, SUM(layer = 'general') as general FROM memories`
       );
     } else {
       const placeholders = visibleAgentIds.map(() => '?').join(',');
       row = queryOne(this._db(),
-        `SELECT COUNT(*) as total, SUM(tier = 'core') as core, SUM(tier = 'peripheral') as peripheral, SUM(layer = 'general') as general FROM memories WHERE agent_id IN (${placeholders})`,
+        `SELECT COUNT(*) as total, SUM(tier = 'core') as core, SUM(tier = 'working') as working, SUM(tier = 'peripheral') as peripheral, SUM(layer = 'general') as general FROM memories WHERE agent_id IN (${placeholders})`,
         visibleAgentIds
       );
     }
     const total = (row?.total as number) || 0;
     const core = (row?.core as number) || 0;
+    const working = (row?.working as number) || 0;
     const peripheral = (row?.peripheral as number) || 0;
     const general = (row?.general as number) || 0;
-    return { total, core, working: total - core - peripheral, peripheral, general, metrics: this.metrics };
+    return { total, core, working, peripheral, general, metrics: this.metrics };
   }
 
   getMemory(AgentId: string, memoryId: string): any {
@@ -378,31 +388,39 @@ class MemoryPlugin {
    * @param correction 自然语言修正描述，如 "我住上海不是北京"
    * @returns 修正建议列表，包含原记忆ID、新内容、匹配理由
    */
-  async feedback(AgentId: string, correction: string): Promise<Array<{
-    memoryId: string;
-    original: string;
-    updated: string;
-    reason: string;
-    confidence: number;
-  }>> {
-    if (!this.config.feedback.enabled) return [];
-    if (!correction.trim()) return [];
+  async feedback(AgentId: string, correction: string): Promise<{
+    found: boolean;
+    candidates: any[];
+    suggestions: Array<{
+      memoryId: string;
+      original: string;
+      updated: string;
+      reason: string;
+      confidence: number;
+    }>;
+  }> {
+    if (!this.config.feedback.enabled) return { found: false, candidates: [], suggestions: [] };
+    if (!correction.trim()) return { found: false, candidates: [], suggestions: [] };
 
     // 1. 召回相关记忆
     const { hasMemory, memories } = await this.recall(AgentId, correction, 1500);
-    if (!hasMemory || memories.length === 0) return [];
+    if (!hasMemory || memories.length === 0) return { found: false, candidates: [], suggestions: [] };
 
     const candidates = memories.slice(0, this.config.feedback.maxMemories);
 
-    // 2. 如果没有 LLM，逐条生成修正（基于规则）
+    // 2. 如果没有 LLM，返回候选但无建议（AI 可以看到有哪些候选记忆）
     if (!this.llmClient || !this.config.llm.enabled || !this.config.llm.apiKey) {
-      return candidates.map(m => ({
-        memoryId: m.id,
-        original: m.content,
-        updated: m.content, // 规则模式下不修改
-        reason: 'LLM 未启用，无法生成修正建议',
-        confidence: 0,
-      }));
+      return {
+        found: true,
+        candidates,
+        suggestions: candidates.map(m => ({
+          memoryId: m.id,
+          original: m.content,
+          updated: m.content,
+          reason: 'LLM 未启用，无法生成修正建议',
+          confidence: 0,
+        })),
+      };
     }
 
     // 3. 用 LLM 判断哪条需要修正，并生成修正内容
@@ -440,7 +458,7 @@ confidence 是 0-1 的置信度。
 
       if (!response.ok) {
         this.log.error('[algo-memory] feedback LLM 调用失败:', response.status);
-        return [];
+        return { found: false, candidates: [], suggestions: [] };
       }
 
       const json = await response.json() as any;
@@ -452,7 +470,7 @@ confidence 是 0-1 的置信度。
       const suggestions: Array<{ memoryId: string; updated: string; reason: string; confidence: number }> = JSON.parse(jsonStr);
 
       // 过滤低于阈值的建议
-      return suggestions
+      const filtered = suggestions
         .filter(s => s.confidence >= this.config.feedback.matchThreshold)
         .map(s => {
           const orig = candidates.find(c => c.id === s.memoryId);
@@ -464,9 +482,10 @@ confidence 是 0-1 的置信度。
             confidence: s.confidence,
           };
         });
+      return { found: true, candidates, suggestions: filtered };
     } catch (err) {
       this.log.error('[algo-memory] feedback 失败:', err);
-      return [];
+      return { found: false, candidates: [], suggestions: [] };
     }
   }
 
@@ -548,23 +567,35 @@ confidence 是 0-1 的置信度。
     if (!this.db) return;
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
     const BATCH = 5000;
-    // better-sqlite3 supports DELETE...LIMIT natively
     let total = 0;
     let deleted = 0;
     do {
-      const rows = queryAll(this._db(),
-        `SELECT rowid FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
-        [cutoff, BATCH]
-      );
+      let rows: any[] = [];
+      try {
+        rows = queryAll(this._db(),
+          `SELECT rowid FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
+          [cutoff, BATCH]
+        );
+      } catch (err) {
+        this.log.error('[algo-memory] cleanup 查询失败:', err);
+        break;
+      }
       if (rows.length === 0) break;
       const rowids = rows.map((r: any) => r.rowid);
-      deleted = run(this._db(),
-        `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
-        rowids
-      );
+      try {
+        deleted = run(this._db(),
+          `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
+          rowids
+        );
+      } catch (err) {
+        this.log.error('[algo-memory] cleanup 删除失败:', err);
+        break;
+      }
       total += deleted;
     } while (deleted === BATCH);
-    this.log.info('[algo-memory] 清理了', total, '条过期记忆');
+    if (total > 0) {
+      this.log.info('[algo-memory] 清理了', total, '条过期记忆');
+    }
   }
 
   // ===== CLI 增强工具 =====
@@ -614,19 +645,19 @@ confidence 是 0-1 的置信度。
       const filePath = path.join(summaryDir, `${today}.md`);
       const markerPath = path.join(summaryDir, `.${today}.lastids`); // tracks last written IDs
 
-      // 读取最近 N 条记忆的 ID 作为指纹
+      // 读取最近 N 条记忆的 content_hash 作为指纹（内容变了就重写）
       const recentMemories = queryAll(this._db(),
-        `SELECT id FROM memories ORDER BY created_at DESC LIMIT ?`,
+        `SELECT content_hash FROM memories ORDER BY created_at DESC LIMIT ?`,
         [this.config.sessionSummary.maxItems]
-      ) as unknown as Array<{ id: string }>;
+      ) as unknown as Array<{ content_hash: string }>;
       if (recentMemories.length === 0) return;
 
-      const currentIds = recentMemories.map(m => m.id).join(',');
+      const currentHashes = recentMemories.map(m => m.content_hash).join(',');
 
-      // 读取上次写入的 ID 指纹，避免无变化重复写入
-      let lastIds = '';
-      if (fs.existsSync(markerPath)) lastIds = fs.readFileSync(markerPath, 'utf-8').trim();
-      if (lastIds === currentIds) return; // 无新内容，跳过
+      // 读取上次写入的指纹，避免无变化重复写入
+      let lastHashes = '';
+      if (fs.existsSync(markerPath)) lastHashes = fs.readFileSync(markerPath, 'utf-8').trim();
+      if (lastHashes === currentHashes) return; // 无新内容，跳过
 
       // 读取现有 Markdown 内容
       let existing = '';
@@ -656,7 +687,7 @@ confidence 是 0-1 的置信度。
       output = output.replace(/\n+$/, '\n') + lines.join('\n') + '\n';
 
       fs.writeFileSync(filePath, output, 'utf-8');
-      fs.writeFileSync(markerPath, currentIds, 'utf-8'); // 保存本次 ID 指纹
+      fs.writeFileSync(markerPath, currentHashes, 'utf-8'); // 保存本次 hash 指纹
       this.log.info(`[algo-memory] Session 摘要已写入: ${filePath}`);
     } catch (err) {
       this.log.error('[algo-memory] Session 摘要写入失败:', err);
