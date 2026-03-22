@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.2.3 - Storage Engine
+ * algo-memory v2.3.0 - Storage Engine
  */
 
 import type { Config, Memory } from '../types.js';

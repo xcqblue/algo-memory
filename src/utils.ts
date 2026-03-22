@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.2.3 - Utility Functions
+ * algo-memory v2.3.0 - Utility Functions
  */
 
 import * as crypto from 'crypto';

@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.2.3 - Types & Default Config
+ * algo-memory v2.3.0 - Types & Default Config
  */
 
 // ============= Config Interface =============

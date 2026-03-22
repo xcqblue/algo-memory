@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.2.3 - Recall Engine
+ * algo-memory v2.3.0 - Recall Engine
  */
 
 import type { Config, Memory } from '../types.js';
