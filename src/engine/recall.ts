@@ -32,8 +32,6 @@ export interface RecallDeps {
 export interface RecallResult {
   hasMemory: boolean;
   memories: Memory[];
-  /** True if context was already injected via buildInjectCtx (cache hit path) */
-  injected?: boolean;
 }
 
 /**
@@ -48,13 +46,13 @@ export async function recall(
 
   if (!db) {
     log.warn('[algo-memory] recall 失败: 数据库未初始化');
-    return { hasMemory: false, memories: [], injected: false };
+    return { hasMemory: false, memories: [] };
   }
 
   const recallStartTime = Date.now();
 
   if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: lastRecallQuery ?? '', lastRecallTime: lastRecallTime ?? 0 })) {
-    return { hasMemory: false, memories: [], injected: false };
+    return { hasMemory: false, memories: [] };
   }
 
   const visibleAgentIds = getVisibleAgentIds(AgentId);

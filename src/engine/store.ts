@@ -128,8 +128,9 @@ export async function store(
         [AgentId, contentHash]
       ) as IdRow | null;
       if (existing) {
+        // Dedup hit: bump importance (max 1.0) to reflect repeated relevance, then re-tier
         run(db,
-          'UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?',
+          `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
           [Date.now(), existing.id]
         );
         tierCandidates.push(existing.id);
@@ -158,8 +159,8 @@ export async function store(
 
           if (isDuplicate) {
             run(db,
-              'UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?',
-              [Date.now(), s.id]
+              `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
+              [Date.now(), s.id as string]
             );
             tierCandidates.push(s.id as string);
             break;
@@ -237,10 +238,14 @@ export async function store(
         `SELECT id, importance, access_count, created_at FROM memories WHERE id IN (${uniqueIds.map(() => '?').join(',')})`,
         uniqueIds
       ) as TierRow[];
-      for (const row of rows) {
-        const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
-        const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
-        run(db, 'UPDATE memories SET tier = ? WHERE id = ?', [newTier, row.id]);
+      // Build one CASE WHEN statement for all tier updates in a single SQL round-trip
+      if (rows.length > 0) {
+        const cases = rows.map(row => {
+          const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
+          const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
+          return `WHEN id = '${row.id}' THEN '${newTier}'`;
+        }).join(' ');
+        run(db, `UPDATE memories SET tier = CASE ${cases} ELSE tier END WHERE id IN (${rows.map(() => '?').join(',')})`, rows.map(r => r.id));
       }
     }
 

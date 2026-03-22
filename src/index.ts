@@ -187,7 +187,7 @@ class MemoryPlugin {
     await doStore(deps, AgentId, messages);
   }
 
-  async recall(AgentId: string, query: string, maxInjectTokens?: number): Promise<{ hasMemory: boolean; memories: any[] }> {
+  async recall(AgentId: string, query: string): Promise<{ hasMemory: boolean; memories: any[] }> {
     const deps = {
       db: this._db(),
       config: this.config,
@@ -403,7 +403,7 @@ class MemoryPlugin {
     if (!correction.trim()) return { found: false, candidates: [], suggestions: [] };
 
     // 1. 召回相关记忆
-    const { hasMemory, memories } = await this.recall(AgentId, correction, 1500);
+    const { hasMemory, memories } = await this.recall(AgentId, correction);
     if (!hasMemory || memories.length === 0) return { found: false, candidates: [], suggestions: [] };
 
     const candidates = memories.slice(0, this.config.feedback.maxMemories);
@@ -503,17 +503,18 @@ confidence 是 0-1 的置信度。
       runOrThrow(this._db(), 'BEGIN IMMEDIATE');
       for (const m of memories) {
         try {
+          const safe = safeContent(m.content || '');
           const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
           run(this._db(),
             `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               m.id || generateId(), AgentId, m.scope || 'global',
-              m.content, m.type || 'other', tier, m.layer || 'general',
+              safe, m.type || 'other', tier, m.layer || 'general',
               m.keywords || '', m.importance || 0.5, m.access_count || 1,
               m.cited_count || 0, m.urgency ?? 1.0,
               m.created_at || Date.now(), m.last_accessed || Date.now(),
-              m.content_hash || hashContent(m.content), m.metadata || null
+              m.content_hash || hashContent(safe), m.metadata || null
             ]
           );
           imported++;
