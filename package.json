@@ -3,7 +3,7 @@
   "version": "2.3.0",
   "description": "纯算法长期记忆插件 - 默认启用LLM / 支持多模型",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "files": [
     "src",
     "dist",
@@ -43,7 +43,7 @@
   "openclaw": {
     "id": "algo-memory",
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ],
     "installDependencies": true
   }

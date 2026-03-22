@@ -80,7 +80,19 @@ openclaw config set "plugins.slots.memory" "algo-memory"
 }
 ```
 
-### 4. 重启 OpenClaw
+### 4. 启用插件（关键步骤）
+
+algo-memory 与内置 memory-core 共用同一内存插槽，必须显式切换：
+
+```bash
+openclaw plugins enable algo-memory
+```
+
+此命令会自动将 memory 插槽切换到 algo-memory，并禁用其他同类插件（memory-core、memory-lancedb）。
+
+> ⚠️ **每次 OpenClaw 重启后都需要执行此命令**。目前 OpenClaw 尚未提供绕过独占插槽限制的机制，请留意后续版本更新。
+
+### 5. 重启 OpenClaw
 
 ```bash
 openclaw gateway restart
@@ -158,4 +170,6 @@ openclaw logs | grep "数据库初始化"
 
 ### Q: 两个 memory 插件同时安装会怎样？
 
-algo-memory 和内置 `memory-core` 使用相同的 slot（`memory`），同时只可启用一个。必须先 `openclaw plugins disable memory-core`，再将 `plugins.slots.memory` 指向 `algo-memory`，否则 algo-memory 无法加载。
+algo-memory 和内置 `memory-core` 共用同一内存插槽（`memory`），同时只可启用一个。
+
+**解决方法：** 执行 `openclaw plugins enable algo-memory` 即可自动完成切换（禁用 memory-core、将插槽指向 algo-memory）。每次重启 OpenClaw 后均需重新执行此命令。
