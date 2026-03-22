@@ -27,6 +27,26 @@ export interface Config {
   llm: LLMConfig;
   threshold: ThresholdConfig;
   sessionSummary: SessionSummaryConfig;
+  feedback: FeedbackConfig;
+  mcp: MCPConfig;
+}
+
+export interface FeedbackConfig {
+  /** 是否启用自然语言修正功能 */
+  enabled: boolean;
+  /** 修正时召回的记忆数量上限 */
+  maxMemories: number;
+  /** LLM 判断匹配度阈值，超过才视为相关 */
+  matchThreshold: number;
+}
+
+export interface MCPConfig {
+  /** 是否启用 MCP 工具暴露 */
+  enabled: boolean;
+  /** MCP 传输方式：stdio | http */
+  transport: 'stdio' | 'http';
+  /** HTTP 模式下监听端口（仅 transport=http 时有效） */
+  port: number;
 }
 
 export interface NoiseFilterConfig {
@@ -175,4 +195,6 @@ export const DEFAULT_CONFIG: Config = {
   llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
   threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
   sessionSummary: { enabled: false, dir: 'memory', maxItems: 50 },
+  feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },
+  mcp: { enabled: false, transport: 'stdio', port: 8181 },
 };

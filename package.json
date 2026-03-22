@@ -1,6 +1,6 @@
 {
   "name": "algo-memory",
-  "version": "2.2.3",
+  "version": "2.3.0",
   "description": "纯算法长期记忆插件 - 默认启用LLM / 支持多模型",
   "type": "module",
   "main": "src/index.ts",
@@ -29,6 +29,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@sinclair/typebox": "^0.32.0",
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^11.10.0",

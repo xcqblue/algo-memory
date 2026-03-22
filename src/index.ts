@@ -68,6 +68,9 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     smartDedup: scalar('smartDedup', DEFAULT_CONFIG.smartDedup),
     dedupThreshold: scalar('dedupThreshold', DEFAULT_CONFIG.dedupThreshold),
     capturePerTurn: scalar('capturePerTurn', DEFAULT_CONFIG.capturePerTurn),
+    sessionSummary: { ...DEFAULT_CONFIG.sessionSummary, ...userConfig.sessionSummary },
+    feedback: { ...DEFAULT_CONFIG.feedback, ...userConfig.feedback },
+    mcp: { ...DEFAULT_CONFIG.mcp, ...userConfig.mcp },
   };
 }
 
@@ -370,6 +373,111 @@ class MemoryPlugin {
     return changes > 0;
   }
 
+  /**
+   * 自然语言记忆修正
+   * @param AgentId Agent ID
+   * @param correction 自然语言修正描述，如 "我住上海不是北京"
+   * @returns 修正建议列表，包含原记忆ID、新内容、匹配理由
+   */
+  async feedback(AgentId: string, correction: string): Promise<Array<{
+    memoryId: string;
+    original: string;
+    updated: string;
+    reason: string;
+    confidence: number;
+  }>> {
+    if (!this.config.feedback.enabled) return [];
+    if (!correction.trim()) return [];
+
+    // 1. 召回相关记忆
+    const { hasMemory, memories } = await this.recall(AgentId, correction, 1500);
+    if (!hasMemory || memories.length === 0) return [];
+
+    const candidates = memories.slice(0, this.config.feedback.maxMemories);
+
+    // 2. 如果没有 LLM，逐条生成修正（基于规则）
+    if (!this.llmClient || !this.config.llm.enabled || !this.config.llm.apiKey) {
+      return candidates.map(m => ({
+        memoryId: m.id,
+        original: m.content,
+        updated: m.content, // 规则模式下不修改
+        reason: 'LLM 未启用，无法生成修正建议',
+        confidence: 0,
+      }));
+    }
+
+    // 3. 用 LLM 判断哪条需要修正，并生成修正内容
+    const memoriesText = candidates.map((m, i) =>
+      `[${i}] ID:${m.id}\n内容: ${m.content}`).join('\n\n');
+
+    const systemPrompt = `你是一个记忆修正助手。用户会给出一条"修正描述"，以及多条候选记忆。
+你的任务是：
+1. 判断哪条记忆需要被修正（可能多条）
+2. 根据修正描述生成新的记忆内容
+
+回复 JSON 数组（如果没有需要修正的，返回空数组 []）：
+[{"memoryId": "ID", "updated": "修正后的内容", "reason": "修正理由", "confidence": 0.9}]
+confidence 是 0-1 的置信度。
+
+注意：只修改明确需要修改的记忆，不要过度修正。`;
+
+    try {
+      const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.llm.apiKey}`
+        },
+        body: JSON.stringify({
+          model: this.config.llm.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `修正描述: "${correction}"\n\n候选记忆:\n${memoriesText}` }
+          ],
+          max_tokens: 1024,
+          temperature: 0.3
+        })
+      });
+
+      if (!response.ok) {
+        this.log.error('[algo-memory] feedback LLM 调用失败:', response.status);
+        return [];
+      }
+
+      const json = await response.json() as any;
+      const raw = json?.choices?.[0]?.message?.content || '[]';
+
+      // 提取 JSON（可能带有 markdown 代码块）
+      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```|^\s*(\[[\s\S]*?\])\s*$/m);
+      const jsonStr = jsonMatch ? (jsonMatch[1] || jsonMatch[2]) : raw;
+      const suggestions: Array<{ memoryId: string; updated: string; reason: string; confidence: number }> = JSON.parse(jsonStr);
+
+      // 过滤低于阈值的建议
+      return suggestions
+        .filter(s => s.confidence >= this.config.feedback.matchThreshold)
+        .map(s => {
+          const orig = candidates.find(c => c.id === s.memoryId);
+          return {
+            memoryId: s.memoryId,
+            original: orig?.content || '',
+            updated: s.updated,
+            reason: s.reason,
+            confidence: s.confidence,
+          };
+        });
+    } catch (err) {
+      this.log.error('[algo-memory] feedback 失败:', err);
+      return [];
+    }
+  }
+
+  /**
+   * 应用确认后的修正
+   */
+  applyFeedback(AgentId: string, memoryId: string, updatedContent: string): boolean {
+    return this.updateMemory(AgentId, memoryId, updatedContent);
+  }
+
   importMemories(AgentId: string, memories: any[]): number {
     if (!this.db) return 0;
     let imported = 0;
@@ -575,7 +683,7 @@ class MemoryPlugin {
 export default {
   id: 'algo-memory',
   name: 'algo-memory',
-  version: '2.2.3',
+  version: '2.3.0',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
@@ -662,6 +770,8 @@ export default {
       { name: 'algo_memory_recall_stats', description: '召回统计（含 MMR、会话去重状态、DB 信息）', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_recall_info', description: '查看最近召回记录（上一个查询和时间）', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_recall_reset', description: '清除会话去重状态，允许相同查询再次召回', parameters: Type.Object({ agentId: Type.String() }) },
+      { name: 'algo_memory_feedback', description: '自然语言修正记忆：输入修正描述，自动找到相关记忆并生成修正建议（需确认后 apply）', parameters: Type.Object({ agentId: Type.String(), correction: Type.String() }) },
+      { name: 'algo_memory_apply_feedback', description: '应用确认后的记忆修正', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String(), updatedContent: Type.String() }) },
     ];
 
     for (const tool of tools) {
@@ -687,6 +797,8 @@ export default {
               case 'algo_memory_recall_stats': result = plugin.getRecallStats(params.agentId); break;
               case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(params.agentId); break;
               case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
+              case 'algo_memory_feedback': result = await plugin.feedback(params.agentId, params.correction); break;
+              case 'algo_memory_apply_feedback': result = { success: plugin.applyFeedback(params.agentId, params.memoryId, params.updatedContent) }; break;
               default: result = { error: 'Unknown tool' };
             }
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -699,7 +811,121 @@ export default {
     }
 
     api.registerService(plugin);
+
+    // === MCP Tool Exposure ===
+    if (config.mcp.enabled) {
+      setupMCPServer(plugin, config, log).catch(err => {
+        log.error('[algo-memory] MCP 启动失败:', err);
+      });
+    }
   }
 };
+
+async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
+  try {
+    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+    const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
+    const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    const { CallToolRequestSchema, ListToolsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
+
+      const server = new Server({
+        name: 'algo-memory',
+        version: '2.3.0',
+      }, {
+        capabilities: { tools: {} },
+      });
+
+      // 注册所有工具到 MCP
+      server.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: [
+          {
+            name: 'algo_memory_list',
+            description: '列出记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, limit: { type: 'number' }, offset: { type: 'number' } } },
+          },
+          {
+            name: 'algo_memory_search',
+            description: '全文搜索记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, query: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_stats',
+            description: '查看统计',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_get',
+            description: '获取单条记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_delete',
+            description: '删除记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_update',
+            description: '更新记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, content: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_feedback',
+            description: '自然语言修正记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, correction: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_apply_feedback',
+            description: '应用确认后的修正',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, updatedContent: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_export',
+            description: '导出记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, maxExport: { type: 'number' } } },
+          },
+          {
+            name: 'algo_memory_import',
+            description: '导入记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memories: { type: 'array' } } },
+          },
+          {
+            name: 'algo_memory_metrics',
+            description: '运行时指标',
+            inputSchema: { type: 'object', properties: {} },
+          },
+        ],
+      }));
+
+      server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
+        const { name, arguments: args } = request.params;
+        try {
+          let result: any;
+          switch (name) {
+            case 'algo_memory_list': result = plugin.listMemories(args.agentId, args.limit || 20, args.offset || 0); break;
+            case 'algo_memory_search': result = plugin.searchMemories(args.agentId, args.query); break;
+            case 'algo_memory_stats': result = plugin.getStats(args.agentId); break;
+            case 'algo_memory_get': result = plugin.getMemory(args.agentId, args.memoryId); break;
+            case 'algo_memory_delete': result = { success: plugin.deleteMemory(args.agentId, args.memoryId) }; break;
+            case 'algo_memory_update': result = { success: plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
+            case 'algo_memory_feedback': result = await plugin.feedback(args.agentId, args.correction); break;
+            case 'algo_memory_apply_feedback': result = { success: plugin.applyFeedback(args.agentId, args.memoryId, args.updatedContent) }; break;
+            case 'algo_memory_export': result = plugin.exportMemories(args.agentId, args.maxExport || 1000); break;
+            case 'algo_memory_import': result = { imported: plugin.importMemories(args.agentId, args.memories) }; break;
+            case 'algo_memory_metrics': result = plugin.getMetrics(); break;
+            default: result = { error: 'Unknown tool' };
+          }
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        } catch (err: any) {
+          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+        }
+      });
+
+      const transport = new StdioServerTransport();
+      await server.connect(transport);
+      log.info('[algo-memory] MCP stdio server 已启动（stdio 模式）');
+    } catch (err) {
+      log.error('[algo-memory] MCP 初始化失败:', err);
+    }
+  }
 
 
