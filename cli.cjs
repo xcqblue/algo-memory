@@ -65,9 +65,9 @@ switch (command) {
     const db = getDb();
     const agentId = args.find(a => a.startsWith('--agent='))?.split('=')[1] || 'default';
     const total = db.prepare('SELECT COUNT(*) as c FROM memories WHERE agent_id = ?').get(agentId).c;
-    const core = db.prepare('SELECT COUNT(*) as c FROM memories WHERE agent_id = ? AND tier = "core"').get(agentId).c;
-    const working = db.prepare('SELECT COUNT(*) as c FROM memories WHERE agent_id = ? AND tier = "working"').get(agentId).c;
-    const peripheral = db.prepare('SELECT COUNT(*) as c FROM memories WHERE agent_id = ? AND tier = "peripheral"').get(agentId).c;
+    const core = db.prepare("SELECT COUNT(*) as c FROM memories WHERE agent_id = ? AND tier = 'core'").get(agentId).c;
+    const working = db.prepare("SELECT COUNT(*) as c FROM memories WHERE agent_id = ? AND tier = 'working'").get(agentId).c;
+    const peripheral = db.prepare("SELECT COUNT(*) as c FROM memories WHERE agent_id = ? AND tier = 'peripheral'").get(agentId).c;
     console.log(JSON.stringify({ total, core, working, peripheral }, null, 2));
     db.close();
     break;
@@ -88,7 +88,7 @@ switch (command) {
     const agentId = args.find(a => a.startsWith('--agent='))?.split('=')[1] || 'default';
     const keepCore = !args.includes('--no-keep-core');
     const result = keepCore 
-      ? db.prepare('DELETE FROM memories WHERE agent_id = ? AND tier != "core"').run(agentId)
+      ? db.prepare("DELETE FROM memories WHERE agent_id = ? AND tier != 'core'").run(agentId)
       : db.prepare('DELETE FROM memories WHERE agent_id = ?').run(agentId);
     console.log(JSON.stringify({ deleted: result.changes, keepCore }));
     db.close();
