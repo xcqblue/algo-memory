@@ -266,7 +266,7 @@ class MemoryPlugin {
     );
   }
 
-  private ftsQuery(AgentId: string, query: string, visibleAgentIds: string[] | null, safeLimit: number): any[] {
+  private ftsQuery(AgentId: string, query: string, visibleAgentIds: string[] | null): any[] {
     try {
       if (!this.ftsAvailable) throw new Error('FTS5 unavailable');
       const terms = query.replace(/[^\w\s\u4e00-\u9fa5]/g, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 20);
@@ -326,7 +326,7 @@ class MemoryPlugin {
 
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
     const safeLimit = Math.min(this.config.maxResults * 3, 100);
-    let results = this.ftsQuery(AgentId, cleanQuery, visibleAgentIds, safeLimit);
+    let results = this.ftsQuery(AgentId, cleanQuery, visibleAgentIds);
     if (results.length === 0) results = this.likeFallback(AgentId, cleanQuery, visibleAgentIds);
 
     return results;
@@ -540,7 +540,7 @@ confidence 是 0-1 的置信度。
           const safe = safeContent(m.content || '');
           const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
           run(this._db(),
-            `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
+            `INSERT OR REPLACE INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               m.id || generateId(), AgentId, m.scope || 'global',
