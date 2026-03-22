@@ -21,6 +21,7 @@ import { LLMClient, resolveLLMConfig } from './engine/llm.js';
 import type { Config } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
 import {
+  normalizeText,
   isNoise,
   isCoreKeyword,
   extractKeywords,
@@ -210,18 +211,20 @@ class MemoryPlugin {
   }
 
   listMemories(AgentId: string, limit: number = 20, offset: number = 0): any[] {
+    const safeLimit = Math.min(limit, (this.config.maxResults || 5) * 10);
+    const safeOffset = Math.max(0, offset);
     if (!this.db) return [];
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
     if (visibleAgentIds === null) {
       return queryAll(this._db(),
         'SELECT * FROM memories ORDER BY CASE tier WHEN \'core\' THEN 0 WHEN \'working\' THEN 1 ELSE 2 END, importance DESC, created_at DESC LIMIT ? OFFSET ?',
-        [limit, offset]
+        [safeLimit, safeOffset]
       );
     }
     const placeholders = visibleAgentIds.map(() => '?').join(',');
     return queryAll(this._db(),
       `SELECT * FROM memories WHERE agent_id IN (${placeholders}) ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'working' THEN 1 ELSE 2 END, importance DESC, created_at DESC LIMIT ? OFFSET ?`,
-      [...visibleAgentIds, limit, offset]
+      [...visibleAgentIds, safeLimit, safeOffset]
     );
   }
 
@@ -280,10 +283,7 @@ class MemoryPlugin {
 
   searchMemories(AgentId: string, query: string): any[] {
     if (!this.db || !query?.trim()) return [];
-    // Extract tag:xxx filters
-    const tagMatch = query.matchAll(/(?:^|\s)tag:(\S+)/g);
-    const tags = [...tagMatch].map(m => m[1]);
-    const cleanQuery = query.replace(/(?:^|\s)tag:\S+/g, '').trim();
+    const cleanQuery = query.trim();
     if (!cleanQuery) return [];
 
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
@@ -291,13 +291,6 @@ class MemoryPlugin {
     let results = this.ftsQuery(AgentId, cleanQuery, visibleAgentIds, safeLimit);
     if (results.length === 0) results = this.likeFallback(AgentId, cleanQuery, visibleAgentIds);
 
-    // Apply tag filters
-    if (tags.length > 0) {
-      results = results.filter(m => {
-        const meta = m.metadata || '';
-        return tags.some(tag => meta.includes(`"${tag}"`));
-      });
-    }
     return results;
   }
 
@@ -748,7 +741,7 @@ export default {
           const messages = event?.messages || [];
           const userMessages = (messages as any[])
             .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
-            .map((m: any) => m.content.trim()).filter(Boolean);
+            .map((m: any) => normalizeText(m.content)).filter(Boolean);
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
           // Session dedup is handled inside shouldRetrieve via per-agent dedup state
