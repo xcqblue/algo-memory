@@ -55,15 +55,15 @@ openclaw config set "plugins.slots.memory" "algo-memory"
         "sessionSummary": { "enabled": true },
         "feedback": { "enabled": true },
 
-        // === 按需开启（默认关闭）===
-        // "weibullDecay": { "enabled": false },
-        // "reinforcement": { "enabled": false },
-        // "mmr": { "enabled": false },
-        // "lengthNorm": { "enabled": false },
-        // "hardMinScore": { "enabled": false },
-        // "tier": { "enabled": false },
+        // === 以下功能默认开启（可按需关闭）===
+        // "mmr": { "enabled": false },           // 关闭 MMR 多样性
+        // "weibullDecay": { "enabled": false },  // 关闭 Weibull 衰减
+        // "reinforcement": { "enabled": false }, // 关闭访问强化
+        // "lengthNorm": { "enabled": false },    // 关闭长度归一化
+        // "hardMinScore": { "enabled": false },  // 关闭硬阈值
+        // "tier": { "enabled": false },          // 关闭三层晋升
 
-        // === LLM 相关（默认关闭，无 API Key 时请保持关闭）===
+        // === LLM/MCP 相关（默认关闭，需配置 API Key）===
         // ⚠️ 如需开启，请先配置 llm.apiKey。首次启动时若未配置，会输出警告。
         "llm": { "enabled": false, "apiKey": "", "provider": "auto" },
         "useLlmForCore": false,

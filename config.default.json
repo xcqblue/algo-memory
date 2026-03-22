@@ -33,30 +33,30 @@
     "matchThreshold": 0.6
   },
   "weibullDecay": {
-    "enabled": false,
+    "enabled": true,
     "shape": 1.5,
     "scale": 90
   },
   "reinforcement": {
-    "enabled": false,
+    "enabled": true,
     "factor": 0.5,
     "maxMultiplier": 3
   },
   "mmr": {
-    "enabled": false,
+    "enabled": true,
     "threshold": 0.85
   },
   "lengthNorm": {
-    "enabled": false,
+    "enabled": true,
     "anchor": 500
   },
   "hardMinScore": {
-    "enabled": false,
+    "enabled": true,
     "threshold": 0.35
   },
   "capturePerTurn": 3,
   "tier": {
-    "enabled": false,
+    "enabled": true,
     "coreThreshold": 10,
     "peripheralThreshold": 0.15,
     "ageDays": 60,
@@ -77,6 +77,11 @@
     "apiKey": "",
     "model": "",
     "baseURL": ""
+  },
+  "mcp": {
+    "enabled": false,
+    "transport": "stdio",
+    "port": 8181
   },
   "threshold": {
     "useLlmForCore": false,
