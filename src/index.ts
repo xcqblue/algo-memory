@@ -413,21 +413,16 @@ class MemoryPlugin {
     if (!row) return false;
 
     const safe = safeContent(content);
-    let isCore = isCoreKeyword(safe, this.config.coreKeywords);
-    let importance = isCore ? 1.0 : 0.5;
-
-    // Core determination: prefer local keyword check; LLM if enabled and still uncertain
-    if (!isCore && this.llmClient && this.config.threshold.useLlmForCore &&
-        safe.length >= this.config.threshold.lengthForCore) {
-      const r = await this.llmClient.isCoreMemory(safe);
-      isCore = r.isCore;
-      importance = r.confidence;
+    const keywords = extractKeywords(safe);
+    // Importance: preserve existing unless coreKeyword hit on new content
+    let importance = row.importance || 0.5;
+    if (isCoreKeyword(safe, this.config.coreKeywords)) {
+      importance = 1.0;
     }
-
-    const tier = getTier(importance, row.access_count || 1, 0, this.config.tier);
+    // Tier and access_count: preserve exactly as-is (update should not trigger demotion/reinforcement)
     const changes = run(this._db(),
-      'UPDATE memories SET content = ?, tier = ?, layer = ?, keywords = ?, importance = ?, last_accessed = ?, content_hash = ? WHERE id = ? AND agent_id = ?',
-      [safe, tier, isCore ? 'core' : 'general', extractKeywords(safe), importance, Date.now(), hashContent(safe), memoryId, AgentId]
+      'UPDATE memories SET content = ?, keywords = ?, importance = ?, last_accessed = ?, content_hash = ? WHERE id = ? AND agent_id = ?',
+      [safe, keywords, importance, Date.now(), hashContent(safe), memoryId, AgentId]
     );
     this.clearRecallCache(AgentId);
     return changes > 0;
@@ -439,27 +434,51 @@ class MemoryPlugin {
    * @param correction 自然语言修正描述，如 "我住上海不是北京"
    * @returns 修正建议列表，包含原记忆ID、新内容、匹配理由
    */
-  async feedback(AgentId: string, correction: string): Promise<{
-    found: boolean;
-    candidates: any[];
-    suggestions: Array<{
-      memoryId: string;
-      original: string;
-      updated: string;
-      reason: string;
-      confidence: number;
-    }>;
-  }> {
-    if (!this.config.feedback.enabled) return { found: false, candidates: [], suggestions: [] };
-    if (!correction.trim()) return { found: false, candidates: [], suggestions: [] };
+  /**
+   * 记忆修正
+   *
+   * 用法一（已知 memoryId，直接修正）：
+   *   correct(agentId, null, memoryId, newContent)
+   *   → 直接更新该记忆，返回 success
+   *
+   * 用法二（自然语言修正，AI 帮助定位 + 生成建议）：
+   *   correct(agentId, correctionText)
+   *   → 召回相关记忆 → LLM 生成修正建议 → 高置信度(>0.8)自动应用，低置信度返回建议待确认
+   *
+   * 返回结构（两种用法不同）：
+   *   { applied: true, memoryId, content }           — 用法一，或用法二高置信度自动应用
+   *   { found: true, candidates, suggestions }      — 用法二低置信度，返回建议供确认
+   *   { found: false }                             — 用法二找不到相关记忆
+   */
+  async correct(
+    AgentId: string,
+    correction: string,
+    memoryId?: string,
+    newContent?: string
+  ): Promise<
+    | { applied: true; memoryId: string; content: string }
+    | { found: true; candidates: any[]; suggestions: Array<{ memoryId: string; original: string; updated: string; reason: string; confidence: number }> }
+    | { found: false }
+  > {
+    // === 用法一：直接修正（已知 memoryId） ===
+    if (memoryId && newContent !== undefined) {
+      const success = await this.updateMemory(AgentId, memoryId, newContent);
+      if (!success) return { found: false }; // memoryId 不存在
+      const row = queryOne(this._db(), 'SELECT content FROM memories WHERE id = ?', [memoryId]) as any;
+      return { applied: true, memoryId, content: row?.content || newContent };
+    }
 
-    // 1. 召回相关记忆
+    // === 用法二：自然语言修正（AI 辅助） ===
+    if (!this.config.feedback.enabled) return { found: false };
+    if (!correction.trim()) return { found: false };
+
+    // 召回相关记忆作为候选
     const { hasMemory, memories } = await this.recall(AgentId, correction);
-    if (!hasMemory || memories.length === 0) return { found: false, candidates: [], suggestions: [] };
+    if (!hasMemory || memories.length === 0) return { found: false };
 
     const candidates = memories.slice(0, this.config.feedback.maxMemories);
 
-    // 2. 如果没有 LLM，返回候选但无建议（AI 可以看到有哪些候选记忆）
+    // 无 LLM 时返回候选（用户可自行选择 memoryId 调用用法一）
     if (!this.llmClient || !this.config.llm.enabled || !this.config.llm.apiKey) {
       return {
         found: true,
@@ -468,13 +487,13 @@ class MemoryPlugin {
           memoryId: m.id,
           original: m.content,
           updated: m.content,
-          reason: 'LLM 未启用，无法生成修正建议',
+          reason: 'LLM 未启用，无法生成修正建议。请先搜索确认 memoryId 后用 memoryId+newContent 方式调用',
           confidence: 0,
         })),
       };
     }
 
-    // 3. 用 LLM 判断哪条需要修正，并生成修正内容
+    // LLM 生成修正建议
     const memoriesText = candidates.map((m, i) =>
       `[${i}] ID:${m.id}\n内容: ${m.content}`).join('\n\n');
 
@@ -505,19 +524,16 @@ confidence 是 0-1 的置信度。
       });
 
       if (!response.ok) {
-        this.log.error('[algo-memory] feedback LLM 调用失败:', response.status);
-        return { found: false, candidates: [], suggestions: [] };
+        this.log.error('[algo-memory] correct LLM 调用失败:', response.status);
+        return { found: false };
       }
 
       const json = await response.json() as any;
       const raw = json?.choices?.[0]?.message?.content || '[]';
-
-      // 提取 JSON（可能带有 markdown 代码块）
       const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```|^\s*(\[[\s\S]*?\])\s*$/m);
       const jsonStr = jsonMatch ? (jsonMatch[1] || jsonMatch[2]) : raw;
       const suggestions: Array<{ memoryId: string; updated: string; reason: string; confidence: number }> = JSON.parse(jsonStr);
 
-      // 过滤低于阈值的建议
       const filtered = suggestions
         .filter(s => s.confidence >= this.config.feedback.matchThreshold)
         .map(s => {
@@ -530,18 +546,25 @@ confidence 是 0-1 的置信度。
             confidence: s.confidence,
           };
         });
-      return { found: true, candidates, suggestions: filtered };
-    } catch (err) {
-      this.log.error('[algo-memory] feedback 失败:', err);
-      return { found: false, candidates: [], suggestions: [] };
-    }
-  }
 
-  /**
-   * 应用确认后的修正
-   */
-  async applyFeedback(AgentId: string, memoryId: string, updatedContent: string): Promise<boolean> {
-    return this.updateMemory(AgentId, memoryId, updatedContent);
+      // 高置信度建议自动应用（confidence > 0.8），低置信度返回建议待确认
+      const toApply = filtered.filter(s => s.confidence > 0.8);
+      for (const s of toApply) {
+        await this.updateMemory(AgentId, s.memoryId, s.updated);
+      }
+
+      return {
+        found: true,
+        candidates,
+        suggestions: filtered.map(s => ({
+          ...s,
+          autoApplied: s.confidence > 0.8,
+        })),
+      };
+    } catch (err) {
+      this.log.error('[algo-memory] correct 失败:', err);
+      return { found: false };
+    }
   }
 
   importMemories(AgentId: string, memories: any[]): number {
@@ -864,11 +887,14 @@ export default {
       { name: 'algo_memory_import', description: '批量导入记忆', parameters: Type.Object({ agentId: Type.String(), memories: Type.Array(Type.Any()) }) },
       { name: 'algo_memory_export', description: '导出记忆为 JSON（默认最多 1000 条）', parameters: Type.Object({ agentId: Type.String(), maxExport: Type.Optional(Type.Number()) }) },
       { name: 'algo_memory_metrics', description: '查看运行时指标', parameters: Type.Object({}) },
-      { name: 'algo_memory_recall_stats', description: '召回统计（含 MMR、会话去重状态、DB 信息）', parameters: Type.Object({ agentId: Type.String() }) },
-      { name: 'algo_memory_recall_info', description: '查看最近召回记录（上一个查询和时间）', parameters: Type.Object({ agentId: Type.String() }) },
+      { name: 'algo_memory_diagnostics', description: '召回诊断信息：DB 状态 + 缓存命中率 + MMR 配置 + 最近一次召回详情', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_recall_reset', description: '清除会话去重状态，允许相同查询再次召回', parameters: Type.Object({ agentId: Type.String() }) },
-      { name: 'algo_memory_feedback', description: '自然语言修正记忆：输入修正描述，自动找到相关记忆并生成修正建议（需确认后 apply）', parameters: Type.Object({ agentId: Type.String(), correction: Type.String() }) },
-      { name: 'algo_memory_apply_feedback', description: '应用确认后的记忆修正', parameters: Type.Object({ agentId: Type.String(), memoryId: Type.String(), updatedContent: Type.String() }) },
+      { name: 'algo_memory_correct', description: '记忆修正。用法一（已知 memoryId）：直接更新内容；用法二（自然语言）：AI 定位相关记忆并生成修正建议，置信度>0.8 自动应用，否则返回建议待确认', parameters: Type.Object({
+        agentId: Type.String(),
+        correction: Type.String(),
+        memoryId: Type.Optional(Type.String()),
+        newContent: Type.Optional(Type.String()),
+      }) },
     ];
 
     for (const tool of tools) {
@@ -891,11 +917,14 @@ export default {
               case 'algo_memory_import': result = { imported: plugin.importMemories(params.agentId, params.memories) }; break;
               case 'algo_memory_export': result = plugin.exportMemories(params.agentId, params.maxExport || 1000); break;
               case 'algo_memory_metrics': result = plugin.getMetrics(); break;
-              case 'algo_memory_recall_stats': result = plugin.getRecallStats(params.agentId); break;
-              case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(params.agentId); break;
+              case 'algo_memory_diagnostics': {
+                const stats = plugin.getRecallStats(params.agentId);
+                const info = plugin.getLastRecallInfo(params.agentId);
+                result = { ...stats, lastRecall: info };
+                break;
+              }
               case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
-              case 'algo_memory_feedback': result = await plugin.feedback(params.agentId, params.correction); break;
-              case 'algo_memory_apply_feedback': result = { success: await plugin.applyFeedback(params.agentId, params.memoryId, params.updatedContent) }; break;
+              case 'algo_memory_correct': result = await plugin.correct(params.agentId, params.correction, params.memoryId, params.newContent); break;
               default: result = { error: 'Unknown tool' };
             }
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -972,14 +1001,9 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, content: { type: 'string' } } },
           },
           {
-            name: 'algo_memory_feedback',
-            description: '自然语言修正记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, correction: { type: 'string' } } },
-          },
-          {
-            name: 'algo_memory_apply_feedback',
-            description: '应用确认后的修正',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, updatedContent: { type: 'string' } } },
+            name: 'algo_memory_correct',
+            description: '记忆修正。用法一（已知 memoryId）：correct(agentId, "", memoryId, newContent)；用法二（自然语言）：correct(agentId, correctionText)',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, correction: { type: 'string' }, memoryId: { type: 'string' }, newContent: { type: 'string' } } },
           },
           {
             name: 'algo_memory_export',
@@ -997,13 +1021,8 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             inputSchema: { type: 'object', properties: {} },
           },
           {
-            name: 'algo_memory_recall_stats',
-            description: '召回统计',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
-          },
-          {
-            name: 'algo_memory_recall_info',
-            description: '查看最近召回记录',
+            name: 'algo_memory_diagnostics',
+            description: '召回诊断：DB状态 + 缓存命中率 + MMR配置 + 最近召回详情',
             inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
           },
           {
@@ -1037,13 +1056,16 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(args.agentId, args.memoryIds) }; break;
             case 'algo_memory_clear': result = { deleted: plugin.clearMemories(args.agentId, args.keepCore !== false) }; break;
             case 'algo_memory_update': result = { success: await plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
-            case 'algo_memory_feedback': result = await plugin.feedback(args.agentId, args.correction); break;
-            case 'algo_memory_apply_feedback': result = { success: await plugin.applyFeedback(args.agentId, args.memoryId, args.updatedContent) }; break;
+            case 'algo_memory_correct': result = await plugin.correct(args.agentId, args.correction, args.memoryId, args.newContent); break;
             case 'algo_memory_export': result = plugin.exportMemories(args.agentId, args.maxExport || 1000); break;
             case 'algo_memory_import': result = { imported: plugin.importMemories(args.agentId, args.memories) }; break;
             case 'algo_memory_metrics': result = plugin.getMetrics(); break;
-            case 'algo_memory_recall_stats': result = plugin.getRecallStats(args.agentId); break;
-            case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(args.agentId); break;
+            case 'algo_memory_diagnostics': {
+              const stats = plugin.getRecallStats(args.agentId);
+              const info = plugin.getLastRecallInfo(args.agentId);
+              result = { ...stats, lastRecall: info };
+              break;
+            }
             case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(args.agentId); break;
             default: result = { error: 'Unknown tool' };
           }
