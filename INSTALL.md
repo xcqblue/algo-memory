@@ -66,9 +66,11 @@ openclaw config set "plugins.slots.memory" "algo-memory"
         // === LLM/MCP 相关（默认关闭，需配置 API Key）===
         // ⚠️ 如需开启，请先配置 llm.apiKey。首次启动时若未配置，会输出警告。
         "llm": { "enabled": false, "apiKey": "", "provider": "auto" },
-        "useLlmForCore": false,
-        "useLlmForExtract": false,
-        "useLlmForDedup": false,
+        "threshold": {
+          "useLlmForCore": false,
+          "useLlmForExtract": false,
+          "useLlmForDedup": false
+        },
 
         // === 以下默认关闭 ===
         "mcp": { "enabled": false }

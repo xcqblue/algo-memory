@@ -16,8 +16,8 @@
 │  │  └─────────────┘  └─────────────┘  └─────────────┘ │  │
 │  │                        │                              │  │
 │  │  ┌─────────────────────▼─────────────────────────┐  │  │
-│  │  │            SQLite 数据库（better-sqlite3）        │  │  │
-│  │  │  memories 表 + FTS5 虚拟表 + 7 个索引           │  │  │
+│  │  │        SQLite 数据库（better-sqlite3）          │  │  │
+│  │  │    memories 表 + FTS5 虚拟表 + 6 个索引        │  │  │
 │  │  └───────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                              │
@@ -34,12 +34,13 @@ src/
 ├── types.ts             # Config、Memory 类型接口 + DEFAULT_CONFIG
 ├── utils.ts              # 纯算法函数（分词/衰减/去重/评分/MMR）
 ├── db/
-│   ├── schema.ts         # 建表 + FTS5 虚拟表 + 3 个触发器
+│   ├── schema.ts         # 建表 + FTS5 虚拟表 + 1 个触发器 + 迁移
 │   └── queries.ts        # queryAll / queryOne / run / runOrThrow
 └── engine/
     ├── store.ts          # 存储流程（normalize → 去重 → 写入）
-    ├── recall.ts         # 召回流程（评分 → MMR → 截断 → 缓存）
-    └── llm.ts            # LLM 客户端（8 家提供商 + retry）
+    ├── recall.ts         # 召回流程（评分 → MMR → cited_count更新 → 截断 → 缓存）
+    ├── retrieve.ts       # 统一检索引擎（FTS5/BM25 → 评分 → MMR → 过滤）
+    └── llm.ts           # LLM 客户端（10 家提供商 + retry + 动态端点/请求头）
 ```
 
 ---
@@ -53,7 +54,7 @@ src/
 | `id` | TEXT | 主键，`mem_` + 16 位十六进制 |
 | `agent_id` | TEXT | Agent ID（隔离粒度） |
 | `scope` | TEXT | 作用域，`agent:{agentId}` 或 `global` |
-| `content` | TEXT | 内容（已 XSS 转义） |
+| `content` | TEXT | 内容（原文，无转义） |
 | `type` | TEXT | 类型，默认 `other` |
 | `tier` | TEXT | 层级：`peripheral` / `working` / `core` |
 | `layer` | TEXT | 层：`core` / `general` |
@@ -61,7 +62,6 @@ src/
 | `importance` | REAL | 重要性 0~1 |
 | `access_count` | INTEGER | 访问次数（强化因子） |
 | `cited_count` | INTEGER | 被引用次数（每次召回后 +1，log 曲线评分加成） |
-| `urgency` | REAL | 紧急度，初始 1.0（字段保留，暂无评分接入） |
 | `created_at` | INTEGER | 创建时间（Unix ms） |
 | `last_accessed` | INTEGER | 最后访问时间（Unix ms） |
 | `content_hash` | TEXT | SHA256 精确去重哈希 |
@@ -77,22 +77,8 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
   content_rowid='rowid'
 );
 
--- 插入触发器
+-- 插入触发器（唯一触发器，软删除移除后仅保留此一个）
 CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
-  INSERT INTO memories_fts(rowid, id, content, keywords)
-    VALUES (new.rowid, new.id, new.content, new.keywords);
-END;
-
--- 删除触发器
-CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
-  INSERT INTO memories_fts(memories_fts, rowid, id, content, keywords)
-    VALUES('delete', old.rowid, old.id, old.content, old.keywords);
-END;
-
--- 更新触发器
-CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
-  INSERT INTO memories_fts(memories_fts, rowid, id, content, keywords)
-    VALUES('delete', old.rowid, old.id, old.content, old.keywords);
   INSERT INTO memories_fts(rowid, id, content, keywords)
     VALUES (new.rowid, new.id, new.content, new.keywords);
 END;
@@ -112,6 +98,7 @@ recall_score =
 ```
 
 MMR（可选）：`λ × relevance − (1−λ) × max_sim_to_selected`
+MMR 早停：`λ × max(remaining_relevance) < threshold` 时停止选择
 
 ---
 
@@ -127,6 +114,8 @@ Config
 ├── 评分增强          weibullDecay / reinforcement / mmr / lengthNorm / hardMinScore
 ├── 三层晋升          tier (coreThreshold / peripheralThreshold / ageDays / weights)
 ├── Session 摘要       sessionSummary (enabled / dir / maxItems)
+├── 记忆修正           feedback (enabled / maxMemories / matchThreshold)
 ├── 隔离              scopes (enabled / visibleAgents)
-└── LLM（可选）       llm / threshold
+├── LLM（可选）       llm / threshold (useLlmForCore / useLlmForExtract / useLlmForDedup)
+└── MCP（可选）       mcp (enabled / transport / port)
 ```

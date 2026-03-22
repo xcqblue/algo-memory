@@ -60,8 +60,10 @@
 | `adaptiveRetrieval.sessionDedup.windowMs` | `30000` | 去重时间窗口（毫秒） |
 | `adaptiveRetrieval.sessionDedup.similarityThreshold` | `0.6` | Jaccard 相似度阈值 |
 
-> **forceKeywords 默认值**
-> `['记住', '之前', '上次', '记得', 'remember', 'before', 'last', 'what', 'why', 'how', '什么', '为什么', '怎么']`
+> **forceKeywords 默认值**（语言感知，从 `RETRIEVE_KEYWORDS_MAP` 动态加载）
+> 中文：`['记住', '之前', '上次', '记得']`
+> 英文：`['remember', 'before', 'last', 'previously', 'earlier']`
+> 日/韩/西/法/德亦有对应词表。配置中的 `forceKeywords` 会与语言默认值合并。
 
 ### 评分增强（默认均开启）
 

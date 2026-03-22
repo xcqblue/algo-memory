@@ -42,39 +42,39 @@
 └─────────────────────────────────────────────────┘
     │
     ▼
-遍历每条消息
+遍历每条消息（按 coreKeyword 命中数排序，最多 capturePerTurn=3 条）
     │
     ├──▶ 跳过非 user 消息
     │
     ▼
 ┌─────────────────────────────────────────────────┐
 │ 3. 文本归一化                                    │
-│    - normalizeText()                             │
-│    - 去除 @前缀、多余空白、OpenClaw 注入前缀    │
+│    - normalizeText()                            │
+│    - 去除所有 @mention / 多余空白 / 引导前缀   │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
 │ 4. 噪声过滤                                      │
 │    - isNoise()                                  │
-│    - 问候语、命令（/ ! -）、确认语过滤         │
+│    - 问候语 / 命令（/ ! -）/ 确认语过滤        │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
 │ 5. 精确查重                                      │
 │    - content_hash SHA256 比对                   │
-│    - 存在则 UPDATE access_count + last_accessed │
+│    - 存在则 UPDATE access_count + importance    │
 └─────────────────────────────────────────────────┘
     │                        ▲
     │ 重复                  │
     ▼                        │
 ┌─────────────────────────────────────────────────┐
 │ 6. 智能去重                                      │
-│    - 拉取最近 MAX_SIMILAR_CHECK (10) 条        │
+│    - 拉取最近 MAX_SIMILAR_CHECK (10) 条         │
 │    - Jaccard 相似度计算（CJK 单字分词）         │
-│    - 相似度 >= dedupThreshold → 重复            │
-│    - 相似度在 [dedupUncertaintyMin, dedupUncertaintyMax] → LLM 判断
+│    - 相似度 >= dedupThreshold → 重复             │
+│    - 相似度 in 不确定区间 → LLM 判断（可选）    │
 └─────────────────────────────────────────────────┘
     │                        ▲
     │ 重复                  │
@@ -83,7 +83,7 @@
 │ 7. 核心判断                                      │
 │    - isCoreKeyword() 关键词匹配（大小写不敏感）│
 │    - 超过 lengthForCore (100) 触发 LLM 判断     │
-│    - 设定 importance（0.5~1.0）                 │
+│    - 设定 importance（0.5~1.0）                │
 └─────────────────────────────────────────────────┘
     │
     ▼
@@ -104,15 +104,16 @@
     ▼
 ┌─────────────────────────────────────────────────┐
 │ 10. 写入数据库                                   │
-│     - INSERT INTO memories                      │
-│     - runOrThrow() 失败正常抛出                 │
+│     - INSERT INTO memories（ERROR → 抛异常）    │
 └─────────────────────────────────────────────────┘
     │
     ▼
-批量结束后统一 persist
+批量结束后批量更新 tier（一次 SQL 完成所有晋升判断）
+    │
+    ▼
 ┌─────────────────────────────────────────────────┐
-│ 11. 统一写入 + 缓存清理                          │
-│     - clearRecallCache() 清除相关缓存           │
+│ 11. 缓存清理                                     │
+│     - clearRecallCache(AgentId)                 │
 └─────────────────────────────────────────────────┘
     │
     ▼
@@ -136,8 +137,9 @@
 ┌─────────────────────────────────────────────────┐
 │ 2. 自适应检索判断                                │
 │    - shouldRetrieve()                           │
-│    - query.length >= minQueryLength (2)         │
-│    - 包含 forceKeywords 强制触发                │
+│    - emoji / 招呼 / 反问句 / 纯定义查询过滤     │
+│    - 语言感知 forceKeywords（中/英/日/韩等）   │
+│    - 长度门槛（CJK ≥6 / 英文 ≥15）             │
 └─────────────────────────────────────────────────┘
     │                        ▲
     │ 不需要召回            │
@@ -154,18 +156,19 @@
 │ 4. 数据库查询                                    │
 │    - SELECT * FROM memories                     │
 │    - 按 tier / importance / access_count 排序   │
-│    - 预取 safeLimit = max(20, maxResults*3)    │
+│    - 预取 safeLimit = max(20, maxResults*3)   │
 │    - FTS5 MATCH 或 LIKE fallback               │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
 │ 5. 时间衰减评分                                  │
-│    - tier权重（可配置，core×1.5 / working×1.0）│
-│    - recencyDecay 指数衰减                      │
+│    - tier权重（core×1.5 / working×1.0 / periph×0.5）
+│    - recencyDecay 指数衰减（地板 0.5）          │
 │    - weibullDecay Weibull 衰减（可选）         │
-│    - reinforcement 访问次数强化                 │
+│    - reinforcement 访问次数强化（可选）          │
 │    - lengthNorm 长度归一化（可选）              │
+│    - cited_count log 曲线加成（每次召回后更新）│
 └─────────────────────────────────────────────────┘
     │
     ▼
@@ -173,24 +176,33 @@
 │ 6. MMR 去重（可选）                             │
 │    - mmrDeduplicate()                           │
 │    - 保持多样性                                 │
+│    - 早停：λ × max(remaining_relevance) < threshold │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 7. 硬阈值过滤（可选）                           │
-│    - hardMinScore 过滤                          │
+│ 7. cited_count 更新                              │
+│    - 对所有 MMR 输出项执行 +1                   │
+│    - 被 MMR 过滤但仍相关的项同样获得计数        │
+│    - 被 hardMinScore 过滤的项不计入（分数过低）│
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 8. 截断结果                                      │
+│ 8. 硬阈值过滤（可选）                           │
+│    - hardMinScore 过滤低于阈值的项              │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 9. 截断结果                                      │
 │    - 取前 maxResults 条                         │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 9. 写入缓存                                      │
-│    - set(cacheKey, result)                      │
+│ 10. 写入缓存                                     │
+│     - set(cacheKey, result)                     │
 └─────────────────────────────────────────────────┘
     │
     ▼
@@ -230,25 +242,16 @@ event.messages（对话历史）
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 4. cited_count 更新                             │
-│    - 对所有召回的记忆执行                      │
-│      UPDATE memories SET cited_count=cited_count+1│
-│      WHERE id IN (...)                          │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ 5. Token Budget 注入                            │
-│    - estimateTokens() 估算（CKJ 按字符，       │
-│      英文按 chars/4）                           │
+│ 4. Token Budget 注入                            │
+│    - estimateTokens() 估算                      │
 │    - 上限 MAX_INJECT_TOKENS = 1500             │
-│    - 按 importance 从高到低贪心填充            │
+│    - 按 importance 从高到低贪心填充             │
 │    - 超出部分标注 "[...还有 N 条未显示]"       │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 6. 注入上下文                                    │
+│ 5. 注入上下文                                    │
 │    - api.prependSystemContext()                 │
 │    - 格式：\n\n以下是相关记忆：\n[记忆] ...\n │
 └─────────────────────────────────────────────────┘
@@ -259,7 +262,7 @@ event.messages（对话历史）
 
 ---
 
-### 补充存储钩子（supplement，priority 5）
+## 补充存储钩子（supplement，priority 5）
 
 与 recall 钩子独立运行，每次 before_prompt_build 都会执行，解决冷启动漏存问题。
 
@@ -291,7 +294,7 @@ event.messages（对话历史）
 │ 4. 补充存储                                     │
 │    - importance = 0.4（低于普通记忆的 0.5）   │
 │    - tier = peripheral                         │
-│    - cited_count = 0                          │
+│    - cited_count = 0                           │
 │    - metadata.supplementary = true             │
 └─────────────────────────────────────────────────┘
     │
@@ -318,20 +321,20 @@ Agent 调用工具
     │
     ├──▶ algo_memory_list              ──▶ plugin.listMemories(agentId, limit, offset)
     ├──▶ algo_memory_search           ──▶ plugin.searchMemories(agentId, query)
-    ├──▶ algo_memory_stats            ──▶ plugin.getStats(agentId)
-    ├──▶ algo_memory_get              ──▶ plugin.getMemory(agentId, memoryId)
-    ├──▶ algo_memory_delete          ──▶ plugin.deleteMemory(agentId, memoryId)
-    ├──▶ algo_memory_delete_bulk     ──▶ plugin.deleteBulk(agentId, memoryIds)
-    ├──▶ algo_memory_clear           ──▶ plugin.clearMemories(agentId, keepCore)
-    ├──▶ algo_memory_update          ──▶ plugin.updateMemory(agentId, memoryId, content)
-    ├──▶ algo_memory_export          ──▶ plugin.exportMemories(agentId, maxExport)
-    ├──▶ algo_memory_import         ──▶ plugin.importMemories(agentId, memories)
-    ├──▶ algo_memory_recall_stats   ──▶ plugin.getRecallStats(agentId)
-    ├──▶ algo_memory_recall_info    ──▶ plugin.getLastRecallInfo(agentId)
-    ├──▶ algo_memory_recall_reset   ──▶ plugin.clearRecallDedup(agentId)
-    ├──▶ algo_memory_feedback       ──▶ plugin.feedback(agentId, correction)     ← 自然语言修正
-    ├──▶ algo_memory_apply_feedback  ──▶ plugin.applyFeedback(agentId, memoryId, updatedContent)
-    └──▶ algo_memory_metrics         ──▶ plugin.getMetrics()
+    ├──▶ algo_memory_stats             ──▶ plugin.getStats(agentId)
+    ├──▶ algo_memory_get               ──▶ plugin.getMemory(agentId, memoryId)
+    ├──▶ algo_memory_delete            ──▶ plugin.deleteMemory(agentId, memoryId)
+    ├──▶ algo_memory_delete_bulk       ──▶ plugin.deleteBulk(agentId, memoryIds)
+    ├──▶ algo_memory_clear             ──▶ plugin.clearMemories(agentId, keepCore)
+    ├──▶ algo_memory_update            ──▶ plugin.updateMemory(agentId, memoryId, content)
+    ├──▶ algo_memory_export            ──▶ plugin.exportMemories(agentId, maxExport)
+    ├──▶ algo_memory_import            ──▶ plugin.importMemories(agentId, memories)
+    ├──▶ algo_memory_metrics          ──▶ plugin.getMetrics()
+    ├──▶ algo_memory_recall_stats     ──▶ plugin.getRecallStats(agentId)
+    ├──▶ algo_memory_recall_info      ──▶ plugin.getLastRecallInfo(agentId)
+    ├──▶ algo_memory_recall_reset     ──▶ plugin.clearRecallDedup(agentId)
+    ├──▶ algo_memory_feedback          ──▶ plugin.feedback(agentId, correction)
+    ├──▶ algo_memory_apply_feedback   ──▶ plugin.applyFeedback(agentId, memoryId, updatedContent)
     │
     ▼
 ┌─────────────────────────────────────────────────┐
@@ -361,18 +364,18 @@ Agent 调用工具
     │                                                        │
     │  本地 isCoreKeyword() 命中？                          │
     │       │                                               │
-    │   Yes │ No                                            │
+    │   Yes │ No                                           │
     │       ▼                                               │
     │  返回 { isCore: true, confidence: 1.0 }              │
     │                                                        │
-    │  本地未命中 && useLlmForCore && llmClient？            │
+    │  本地未命中 && useLlmForCore && llmClient？           │
     │       │                                               │
-    │   Yes │ No                                            │
+    │   Yes │ No                                           │
     │       ▼                                               │
     │  ┌─────────────────────┐                              │
     │  │ 调用 LLM            │                              │
     │  │ isCoreMemory()     │                              │
-    │  │ (指数退避重试 3 次) │                              │
+    │  │ (退避重试 2 次)    │                              │
     │  └──────────┬──────────┘                              │
     │             │                                          │
     ▼             ▼                                          │
@@ -386,11 +389,12 @@ Agent 调用工具
     │  content.length >= lengthForExtract (200) &&          │
     │  useLlmForExtract && llmClient？                      │
     │       │                                               │
-    │   Yes │ No                                            │
+    │   Yes │ No                                           │
     │       ▼                                               │
     │  ┌─────────────────────┐                              │
     │  │ 调用 LLM            │                              │
-    │  │ extractKeywords()   │                              │
+    │  │ extractKeywords()  │                              │
+    │  │ (退避重试 2 次)    │                              │
     │  └──────────┬──────────┘                              │
     │             │                                          │
     ▼             ▼                                          │
@@ -403,15 +407,16 @@ Agent 调用工具
     │                                                        │
     │  Jaccard 相似度 in [0.5, 0.98]？                      │
     │       │                                               │
-    │   Yes │ No                                            │
+    │   Yes │ No                                           │
     │       ▼                                               │
     │  ┌─────────────────────┐                              │
     │  │ 调用 LLM            │                              │
     │  │ isDuplicateLLM()    │                              │
+    │  │ (退避重试 2 次)    │                              │
     │  └──────────┬──────────┘                              │
     │             │                                          │
     ▼             ▼                                          │
- 返回 { isDuplicate }
+ 返回 { isDuplicate, similarity }
 ```
 
 ---
@@ -442,42 +447,5 @@ Agent 调用工具
 └─────────────────────────────────────────────────┘
     │
     ▼
-    changes > 0 ?
-    │         │
-    Yes       No
-    ▼
- 
-    │
-    ▼
 ✅ 日志记录清理数量
-```
-
----
-
-## 多实例安全检测
-
-```
-插件启动 / CLI 运行
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ 读取 PID 文件                                   │
-│ ~/.openclaw/state/algo-memory/algo-memory.pid   │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-    PID 文件存在？
-    │         │
-    Yes       No
-    ▼         │
- ┌────────┐   │
- │ kill 0 │   │
- │ 检测   │   │
- └────┬───┘   │
-      │ PID 存活？
-      │       │
-      Yes     No
-      ▼
-  警告：可能存在重复实例
-  本次运行继续，但数据可能覆盖
 ```
