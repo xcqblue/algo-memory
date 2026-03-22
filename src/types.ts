@@ -192,7 +192,7 @@ export const DEFAULT_CONFIG: Config = {
   tier: { enabled: true, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
-  llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
+  llm: { enabled: false, provider: 'auto', apiKey: '', model: '', baseURL: '' },
   threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
   sessionSummary: { enabled: true, dir: 'memory', maxItems: 50 },
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },

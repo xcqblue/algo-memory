@@ -894,7 +894,7 @@ export default {
     }
 
     // === LLM 配置警告 ===
-    const llmEnabled = config.threshold?.useLlmForCore || config.threshold?.useLlmForExtract || config.threshold?.useLlmForDedup;
+    const llmEnabled = config.llm?.enabled && (config.threshold?.useLlmForCore || config.threshold?.useLlmForExtract || config.threshold?.useLlmForDedup);
     const hasApiKey = !!(config.llm?.apiKey);
     if (llmEnabled && !hasApiKey) {
       log.warn('[algo-memory] ⚠️ LLM 功能已启用（useLlmForCore/Extract/Dedup），但未配置 llm.apiKey，相关功能将降级为规则判断。如需启用，请配置 llm.apiKey。');
