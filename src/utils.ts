@@ -29,7 +29,7 @@ export function hashContent(content: string): string {
 // ============= Text Normalization =============
 export function normalizeText(text: string): string {
   let normalized = text.trim();
-  normalized = normalized.replace(/^@\w+\s+/, '');
+  normalized = normalized.replace(/@[\w]+/g, ''); // 移除所有 @mention
   normalized = normalized.replace(/\s+/g, ' ').trim();
   normalized = normalized.replace(/^(以下是|根据|按照).*?:?\s*/i, '');
   return normalized;

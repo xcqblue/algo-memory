@@ -17,7 +17,7 @@ import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
 import type { RecallDeps } from './engine/recall.js';
-import { LLMClient, resolveLLMConfig } from './engine/llm.js';
+import { LLMClient, resolveLLMConfig, llmEndpoint, llmHeaders } from './engine/llm.js';
 import type { Config } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
 import {
@@ -473,12 +473,9 @@ confidence 是 0-1 的置信度。
 注意：只修改明确需要修改的记忆，不要过度修正。`;
 
     try {
-      const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+      const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.llm.apiKey}`
-        },
+        headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
         body: JSON.stringify({
           model: this.config.llm.model,
           messages: [

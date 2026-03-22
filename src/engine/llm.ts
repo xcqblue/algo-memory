@@ -73,7 +73,7 @@ const LLM_PROVIDERS = {
     defaultModel: 'gpt-4o-mini'
   },
   anthropic: {
-    baseURL: 'https://api.anthropic.com/v1',
+    baseURL: 'https://api.anthropic.com',
     models: ['claude-3-haiku-20240307'],
     defaultModel: 'claude-3-haiku-20240307'
   },
@@ -125,6 +125,26 @@ async function llmCallWithRetry<T>(
 }
 
 // ============= LLM Client =============
+/** Build the correct endpoint URL for a given provider and baseURL */
+export function llmEndpoint(baseURL: string, provider: string): string {
+  if (provider === 'anthropic') {
+    return `${baseURL.replace(/\/$/, '')}/messages`;
+  }
+  return `${baseURL.replace(/\/$/, '')}/chat/completions`;
+}
+
+/** Build headers for a given provider */
+export function llmHeaders(apiKey: string, provider: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`
+  };
+  if (provider === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01';
+  }
+  return headers;
+}
+
 export class LLMClient {
   private config: Config;
   private log: any;
@@ -145,12 +165,9 @@ export class LLMClient {
 
     try {
       const result = await llmCallWithRetry(async () => {
-        const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+        const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.config.llm.apiKey}`
-          },
+          headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
           body: JSON.stringify({
             model: this.config.llm.model,
             messages: [
@@ -184,12 +201,9 @@ export class LLMClient {
 
     try {
       const result = await llmCallWithRetry(async () => {
-        const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+        const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.config.llm.apiKey}`
-          },
+          headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
           body: JSON.stringify({
             model: this.config.llm.model,
             messages: [
@@ -228,12 +242,9 @@ export class LLMClient {
 
     try {
       const result = await llmCallWithRetry(async () => {
-        const response = await fetch(`${this.config.llm.baseURL}/chat/completions`, {
+        const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.config.llm.apiKey}`
-          },
+          headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
           body: JSON.stringify({
             model: this.config.llm.model,
             messages: [
