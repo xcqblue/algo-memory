@@ -23,14 +23,13 @@ export function initSchema(db: AnyDatabase, log: any): void {
       access_count INTEGER DEFAULT 0, cited_count INTEGER DEFAULT 0,
       urgency REAL DEFAULT 1.0,
       created_at INTEGER, last_accessed INTEGER, content_hash TEXT,
-      metadata TEXT, deleted_at INTEGER DEFAULT NULL
+      metadata TEXT
     )
   `, 'memories 表');
 
   // Add missing columns for existing DBs (migration-safe)
   for (const [col, type, defaultVal] of [
     ['urgency', 'REAL', '1.0'],
-    ['deleted_at', 'INTEGER', 'NULL'],
   ] as [string, string, string][]) {
     try {
       db.prepare(`SELECT ${col} FROM memories LIMIT 0`).run();
@@ -61,8 +60,6 @@ export function initSchema(db: AnyDatabase, log: any): void {
       )
     `).run();
     db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, id, content, keywords) VALUES (new.rowid, new.id, new.content, new.keywords); END`).run();
-    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, id, content, keywords) VALUES('delete', old.rowid, old.id, old.content, old.keywords); END`).run();
-    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, id, content, keywords) VALUES('delete', old.rowid, old.id, old.content, old.keywords); INSERT INTO memories_fts(rowid, id, content, keywords) VALUES (new.rowid, new.id, new.content, new.keywords); END`).run();
     log.info('[algo-memory] FTS5 全文搜索已启用');
   } catch (err: any) {
     log.warn('[algo-memory] FTS5 创建失败，搜索将降级为 LIKE:', err.message);

@@ -60,7 +60,7 @@ export function retrieve(options: RetrievalOptions): Memory[] {
     if (ftsQuery) {
       try {
         const runFts = (q: string): Memory[] => {
-          const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? AND m.deleted_at IS NULL ORDER BY bm25(fts, 1.0, 2.0) DESC, m.importance DESC LIMIT ?`;
+          const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? ORDER BY bm25(fts, 1.0, 2.0) DESC, m.importance DESC LIMIT ?`;
           const params = visibleAgentIds !== null ? [...visibleAgentIds, q, safeLimit] : [q, safeLimit];
           return queryAll(db, baseSql, params) as unknown as Memory[];
         };
@@ -85,7 +85,7 @@ export function retrieve(options: RetrievalOptions): Memory[] {
   if (candidates.length === 0) {
     const likeQuery = query.replace(/'/g, "''").trim();
     if (likeQuery) {
-      const sql = `SELECT ${FIELDS} FROM memories WHERE ${agentFilter} AND deleted_at IS NULL AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC, created_at DESC LIMIT ?`;
+      const sql = `SELECT ${FIELDS} FROM memories WHERE ${agentFilter} AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC, created_at DESC LIMIT ?`;
       const params = visibleAgentIds !== null ? [...visibleAgentIds, `%${likeQuery}%`, `%${likeQuery}%`, safeLimit] : [`%${likeQuery}%`, `%${likeQuery}%`, safeLimit];
       candidates = queryAll(db, sql, params) as unknown as Memory[];
     }
