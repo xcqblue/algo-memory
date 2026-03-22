@@ -7,6 +7,7 @@ export interface Config {
   autoCapture: boolean;
   autoRecall: boolean;
   maxResults: number;
+  maxInjectTokens: number;
   cleanupDays: number;
   language: string;
   coreKeywords: string[];
@@ -169,6 +170,7 @@ export const DEFAULT_CONFIG: Config = {
   autoCapture: true,
   autoRecall: true,
   maxResults: 5,
+  maxInjectTokens: 1500,
   cleanupDays: 180,
   language: 'auto',
   coreKeywords: ['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget'],

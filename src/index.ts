@@ -60,6 +60,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     autoCapture: scalar('autoCapture', DEFAULT_CONFIG.autoCapture),
     autoRecall: scalar('autoRecall', DEFAULT_CONFIG.autoRecall),
     maxResults: scalar('maxResults', DEFAULT_CONFIG.maxResults),
+    maxInjectTokens: scalar('maxInjectTokens', DEFAULT_CONFIG.maxInjectTokens),
     cleanupDays: scalar('cleanupDays', DEFAULT_CONFIG.cleanupDays),
     language: scalar('language', DEFAULT_CONFIG.language),
     coreKeywords: scalar('coreKeywords', DEFAULT_CONFIG.coreKeywords),
@@ -210,44 +211,6 @@ class MemoryPlugin {
     return result;
   }
 
-  /**
-   * 补充存储：存储不重要/新发现的信息，不触发 tier 更新，不走 LLM 判断。
-   * 用于 before_prompt_build 召回成功后，发现用户最新消息有未存储的新内容时补充。
-   */
-  async supplementStore(AgentId: string, rawContent: string): Promise<void> {
-    if (!this.db || !rawContent?.trim()) return;
-    const content = normalizeText(rawContent);
-    if (isNoise(content, this.config.noiseFilter)) return;
-
-    const safe = safeContent(content);
-    const contentHash = hashContent(safe);
-    const now = Date.now();
-
-    // 检查是否已存在（精确去重）
-    const existing = queryOne(this._db(),
-      'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ?',
-      [AgentId, contentHash]
-    );
-    if (existing) return; // 精确命中则不存
-
-    const scope = this.config.scopes.enabled
-      ? `${this.config.scopes.defaultScope}:${AgentId}`
-      : 'global';
-
-    // 补充存储：importance = 0.4（低于普通记忆的 0.5），access_count = 0（不触发 tier 变化）
-    run(this._db(),
-      `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        generateId(), AgentId, scope, safe, 'other', 'peripheral', 'general',
-        extractKeywords(safe), 0.4, 0, 0,
-        now, now, contentHash,
-        JSON.stringify({ memory_category: 'other', confidence: 0.4, source_session: AgentId, supplementary: true })
-      ]
-    );
-    this.clearRecallCache(AgentId);
-  }
-
   listMemories(AgentId: string, limit: number = 20, offset: number = 0): any[] {
     const safeLimit = Math.min(limit, (this.config.maxResults || 5) * 10);
     const safeOffset = Math.max(0, offset);
@@ -328,6 +291,16 @@ class MemoryPlugin {
     const safeLimit = Math.min(this.config.maxResults * 3, 100);
     let results = this.ftsQuery(AgentId, cleanQuery, visibleAgentIds);
     if (results.length === 0) results = this.likeFallback(AgentId, cleanQuery, visibleAgentIds);
+
+    // Update cited_count for searched memories (active use signals relevance)
+    if (results.length > 0) {
+      const ids = results.map(r => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      run(this._db(),
+        `UPDATE memories SET cited_count = cited_count + 1 WHERE id IN (${placeholders})`,
+        ids
+      );
+    }
 
     return results;
   }
@@ -824,7 +797,7 @@ export default {
 
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {
-            const MAX_INJECT_TOKENS = 1500;
+            const MAX_INJECT_TOKENS = config.maxInjectTokens;
             const header = '\n\n以下是相关记忆：\n';
             let tokenCount = estimateTokens(header);
             const selected: string[] = [];
@@ -846,24 +819,7 @@ export default {
         }
       }, { priority: 10 });
 
-    // === 补充存储：每次 before_prompt_build 都检查，不管有没有召回成功 ===
-    // 目的：解决"冷启动"——没有任何历史记忆时，补充存储仍然能沉淀信息
-    api.on('before_prompt_build', async (event: any) => {
-      try {
-        const latestRaw = (event?.messages as any[] || [])
-          .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
-          .map((m: any) => m.content.trim())
-          .filter(Boolean)
-          .at(-1);
-        if (!latestRaw) return;
-        const latestNorm = normalizeText(latestRaw);
-        if (isNoise(latestNorm, config.noiseFilter)) return;
-        await plugin.supplementStore(event?.agentId || 'default', latestRaw);
-      } catch (err) {
-        log.error('[algo-memory] supplement store 错误:', err);
-      }
-    }, { priority: 5 });
-    }
+
 
     // === Session Summary ===
     api.on('session_end', async () => {
@@ -953,7 +909,6 @@ export default {
     }
   }
 };
-
 async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
   try {
     const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
