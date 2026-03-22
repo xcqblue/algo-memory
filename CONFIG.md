@@ -106,6 +106,8 @@
 | `threshold.useLlmForExtract` | `false` | LLM 提取关键词，无 API Key 时请关闭或配置 |
 | `threshold.useLlmForDedup` | `false` | LLM 判断是否重复，无 API Key 时请关闭或配置 |
 
+> ⚠️ 开启 LLM 功能后，首次启动时若未配置 `llm.apiKey`，会输出警告并降级为规则判断。
+
 > 支持提供商：MiniMax / DeepSeek / 智谱 / Kimi / 百炼 / 混元 / SiliconFlow / OpenAI / Anthropic / Ollama
 
 ### MCP（默认关闭）

@@ -64,7 +64,7 @@ openclaw config set "plugins.slots.memory" "algo-memory"
         "sessionSummary": { "enabled": true },
 
         // === LLM 相关（默认关闭，无 API Key 时请保持关闭）===
-        // 如需开启，请先配置 llm.apiKey，否则相关功能会优雅降级为规则判断
+        // ⚠️ 如需开启，请先配置 llm.apiKey。首次启动时若未配置，会输出警告。
         "useLlmForCore": false,
         "useLlmForExtract": false,
         "useLlmForDedup": false,
