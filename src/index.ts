@@ -200,9 +200,12 @@ class MemoryPlugin {
       ftsEnabled: this.ftsAvailable,
     };
     const result = await doRecall(deps, AgentId, query);
-    // 召回执行后更新会话去重状态（skip 的情况不更新，让下次同类查询仍能触发）
-    this.lastRecallQuery.set(AgentId, query);
-    this.lastRecallTime.set(AgentId, Date.now());
+    // 只有真正召回到了记忆才更新会话去重状态
+    // shouldRetrieve 跳过时（query太短/重复）不更新，让下次同类查询仍能触发
+    if (result.hasMemory) {
+      this.lastRecallQuery.set(AgentId, query);
+      this.lastRecallTime.set(AgentId, Date.now());
+    }
     return result;
   }
 

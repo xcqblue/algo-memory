@@ -113,6 +113,15 @@ export async function recall(
 
       return { ...m, _score: score };
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
+  } else {
+    // No recency decay: base score from importance, then cited_count boost
+    memories = memories.map(m => {
+      let score = m.importance;
+      if (m.cited_count > 0) {
+        score *= (1 + Math.log10(m.cited_count + 1) * 0.15);
+      }
+      return { ...m, _score: score };
+    }).sort((a, b) => (b._score || 0) - (a._score || 0));
   }
 
   if (config.mmr.enabled) {
