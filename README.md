@@ -30,7 +30,6 @@
 | `algo_memory_update` | 更新记忆内容 |
 | `algo_memory_delete` | 删除（软删除，可恢复） |
 | `algo_memory_delete_bulk` | 批量删除 |
-| `algo_memory_restore` | 恢复已删除的记忆 |
 | `algo_memory_clear` | 清空（可选保留 core） |
 | `algo_memory_import` | 批量导入（事务保护） |
 | `algo_memory_export` | 导出 JSON（上限 5 万条） |
@@ -50,7 +49,7 @@
 ```
 用户消息
     ↓
-存储优先级打分（核心词 +5 / 代码 +3 / 数字 +2 / 长度）
+存储优先级打分（命中 coreKeywords 的词数越多优先级越高）
     ↓
 噪声过滤 → 精确查重 → 智能去重（Jaccard）
     ↓

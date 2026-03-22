@@ -45,26 +45,27 @@ openclaw config set "plugins.slots.memory" "algo-memory"
     "algo-memory": {
       "enabled": true,
       "config": {
-        // === 默认开启的功能（mcp 除外）===
+        // === 核心功能（默认已开启）===
         "autoCapture": true,
         "autoRecall": true,
         "recencyDecay": true,
         "smartDedup": true,
         "noiseFilter": { "enabled": true, "skipGreetings": true, "skipCommands": true },
         "adaptiveRetrieval": { "enabled": true, "sessionDedup": { "enabled": true } },
-        "cited_count": true,  // 召回后自动更新引用计数（无配置项，始终生效）
-        "supplementStore": true,  // 每次 prompt 构建时自动补充存储（无配置项，始终生效）
-        "feedback": { "enabled": true },
-        "weibullDecay": { "enabled": true },
-        "reinforcement": { "enabled": true },
-        "mmr": { "enabled": true },
-        "lengthNorm": { "enabled": true },
-        "hardMinScore": { "enabled": true },
-        "tier": { "enabled": true },
         "sessionSummary": { "enabled": true },
+        "feedback": { "enabled": true },
+
+        // === 按需开启（默认关闭）===
+        // "weibullDecay": { "enabled": false },
+        // "reinforcement": { "enabled": false },
+        // "mmr": { "enabled": false },
+        // "lengthNorm": { "enabled": false },
+        // "hardMinScore": { "enabled": false },
+        // "tier": { "enabled": false },
 
         // === LLM 相关（默认关闭，无 API Key 时请保持关闭）===
         // ⚠️ 如需开启，请先配置 llm.apiKey。首次启动时若未配置，会输出警告。
+        "llm": { "enabled": false, "apiKey": "", "provider": "auto" },
         "useLlmForCore": false,
         "useLlmForExtract": false,
         "useLlmForDedup": false,

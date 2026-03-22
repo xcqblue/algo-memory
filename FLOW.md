@@ -111,8 +111,7 @@
     ▼
 批量结束后统一 persist
 ┌─────────────────────────────────────────────────┐
-│ 11.                               │
-│     - dirty list 收集所有变更，循环后一次性写入 │
+│ 11. 统一写入 + 缓存清理                          │
 │     - clearRecallCache() 清除相关缓存           │
 └─────────────────────────────────────────────────┘
     │
@@ -325,10 +324,8 @@ Agent 调用工具
     ├──▶ algo_memory_delete_bulk     ──▶ plugin.deleteBulk(agentId, memoryIds)
     ├──▶ algo_memory_clear           ──▶ plugin.clearMemories(agentId, keepCore)
     ├──▶ algo_memory_update          ──▶ plugin.updateMemory(agentId, memoryId, content)
-    ├──▶ algo_memory_export          ──▶ plugin.exportMemories(agentId)
+    ├──▶ algo_memory_export          ──▶ plugin.exportMemories(agentId, maxExport)
     ├──▶ algo_memory_import         ──▶ plugin.importMemories(agentId, memories)
-    ├──▶ algo_memory_session         ──▶ plugin.getSessionMemory(agentId)
-    ├──▶ algo_memory_session_add    ──▶ plugin.addSessionMemory(agentId, content)
     ├──▶ algo_memory_recall_stats   ──▶ plugin.getRecallStats(agentId)
     ├──▶ algo_memory_recall_info    ──▶ plugin.getLastRecallInfo(agentId)
     ├──▶ algo_memory_recall_reset   ──▶ plugin.clearRecallDedup(agentId)
