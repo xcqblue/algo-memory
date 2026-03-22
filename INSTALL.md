@@ -14,16 +14,50 @@ mkdir -p ~/.openclaw/extensions
 git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
 ```
 
-### 2. 安装依赖
+### 2. 安装依赖并构建
 
 ```bash
 cd ~/.openclaw/extensions/algo-memory
 npm install
+npm run build
 ```
 
-> ℹ️ **构建步骤是可选的**：OpenClaw 通过 jiti 直接加载 TypeScript 源码，不需要预编译。如果需要预编译（用于发布或调试），可以执行 `npm run build`。
+> ⚠️ **必须执行 `npm run build`**：OpenClaw 加载插件时要求 `MemoryPlugin` 类包含 `id` 和 `start` 属性，未构建的源码缺少这些，直接启动会报错。
 
-### 3. 重启 OpenClaw
+### 3. 配置插件
+
+algo-memory 需要独占 `memory` slot（与内置 `memory-core` 冲突），需要显式加入 `plugins.allow`：
+
+```bash
+# 禁用内置 memory-core
+openclaw plugins disable memory-core
+
+# 将 memory slot 指向 algo-memory
+openclaw config set "plugins.slots.memory" "algo-memory"
+```
+
+然后编辑 `~/.openclaw/openclaw.json`，在 `plugins` 部分添加 `allow` 列表：
+
+```json
+"plugins": {
+  "allow": ["algo-memory", "feishu", "minimax-portal-auth"],
+  "entries": {
+    "algo-memory": {
+      "enabled": true,
+      "config": {
+        "autoCapture": true,
+        "autoRecall": true,
+        "language": "zh"
+      }
+    },
+    "memory-core": {
+      "enabled": false
+    }
+  }
+}
+```
+
+### 4. 重启 OpenClaw
 
 ```bash
 openclaw gateway restart
@@ -95,6 +129,10 @@ openclaw logs | grep "数据库初始化"
 ```
 确认出现数据库路径和"每轮最多写入"日志。
 
+### Q: 启动时报 `TypeError: Cannot read properties of undefined (reading 'trim')` 或 `service.start is not a function`？
+
+确保执行了 `npm run build`。未构建时源码缺少 OpenClaw  registry 要求的 `id` 和 `start` 属性。
+
 ### Q: 两个 memory 插件同时安装会怎样？
 
-algo-memory 和 memos-local 使用相同的 slot（`memory`），同时只可启用一个，否则后加载的会覆盖先加载的。
+algo-memory 和内置 `memory-core` 使用相同的 slot（`memory`），同时只可启用一个。必须先 `openclaw plugins disable memory-core`，再将 `plugins.slots.memory` 指向 `algo-memory`，否则 algo-memory 无法加载。
