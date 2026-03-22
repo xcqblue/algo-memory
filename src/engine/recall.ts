@@ -124,21 +124,17 @@ export async function recall(
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
   }
 
-  // Save all scored candidates before MMR/tier filtering mutates the reference
+  // Save all scored candidates before MMR mutates the reference (used for cited_count)
   const scoredCandidates = memories;
 
   // Build the final returned set: MMR → hardMinScore → truncate
   if (config.mmr.enabled) {
     memories = mmrDeduplicate(memories, config.mmr);
   }
-  if (config.hardMinScore.enabled) {
-    memories = memories.filter(m => (m._score || m.importance) >= config.hardMinScore.threshold);
-  }
-  const limited = memories.slice(0, config.maxResults);
 
-  // cited_count: update ALL scored candidates (before MMR dedup and truncation).
-  // Items removed by MMR were still scored and relevant (similar to selected ones).
-  // Items that survived MMR but were cut by truncation are also relevant.
+  // cited_count: update all items that went through scoring (pre-MMR scoredCandidates).
+  // This includes items MMR filtered out (still relevant, just not diverse enough).
+  // Items eliminated by hardMinScore had LOW scores — do NOT count those.
   const candidateIds = scoredCandidates.map((m: Memory) => m.id);
   if (candidateIds.length > 0) {
     const placeholders = candidateIds.map(() => '?').join(',');
@@ -147,6 +143,12 @@ export async function recall(
       candidateIds
     );
   }
+
+  // HardMinScore filter (after cited_count update)
+  if (config.hardMinScore.enabled) {
+    memories = memories.filter(m => (m._score || m.importance) >= config.hardMinScore.threshold);
+  }
+  const limited = memories.slice(0, config.maxResults);
 
   const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
 

@@ -55,7 +55,7 @@ export function normalizeForStorage(content: string): string {
 
 // Helper to compute content_hash for storage
 export function safeContent(content: string): string {
-  return normalizeForStorage(content).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return normalizeForStorage(content);
 }
 
 export interface StoreDeps {
