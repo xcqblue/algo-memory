@@ -45,9 +45,31 @@ openclaw config set "plugins.slots.memory" "algo-memory"
     "algo-memory": {
       "enabled": true,
       "config": {
+        // 以下为默认开启的功能（所有功能默认开启，mcp 除外）
+        // 如需关闭某功能，只需设为 false
         "autoCapture": true,
         "autoRecall": true,
-        "language": "zh"
+        "recencyDecay": true,
+        "smartDedup": true,
+        "noiseFilter": { "enabled": true, "skipGreetings": true, "skipCommands": true },
+        "adaptiveRetrieval": { "enabled": true, "sessionDedup": { "enabled": true } },
+        "cited_count": true,  // 召回后自动更新引用计数（无配置项）
+        "supplementStore": true,  // 每次 prompt 构建时自动补充存储新消息（无配置项）
+        "feedback": { "enabled": true },
+        // 以下默认开启但需要 LLM API Key 才生效
+        "useLlmForCore": true,
+        "useLlmForExtract": true,
+        "useLlmForDedup": true,
+        // 以下默认开启（需要时生效）
+        "weibullDecay": { "enabled": true },
+        "reinforcement": { "enabled": true },
+        "mmr": { "enabled": true },
+        "lengthNorm": { "enabled": true },
+        "hardMinScore": { "enabled": true },
+        "tier": { "enabled": true },
+        "sessionSummary": { "enabled": true },
+        // 以下默认关闭
+        "mcp": { "enabled": false }
       }
     },
     "memory-core": {
