@@ -12,7 +12,7 @@
 │  │                                                        │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │  │
 │  │  │   工具层    │  │   钩子层    │  │   核心引擎   │ │  │
-│  │  │ (14 Tools)  │  │ (3 Hooks)   │  │ (Engine)    │ │  │
+│  │  │ (17 Tools)  │  │ (4 Hooks)   │  │ (Engine)    │ │  │
 │  │  └─────────────┘  └─────────────┘  └─────────────┘ │  │
 │  │                        │                              │  │
 │  │  ┌─────────────────────▼─────────────────────────┐  │  │
@@ -60,8 +60,8 @@ src/
 | `keywords` | TEXT | 关键词（逗号分隔） |
 | `importance` | REAL | 重要性 0~1 |
 | `access_count` | INTEGER | 访问次数（强化因子） |
-| `cited_count` | INTEGER | 被引用次数（字段保留，评分逻辑已移除） |
-| `urgency` | REAL | 紧急度，初始 1.0（字段保留，评分逻辑已移除） |
+| `cited_count` | INTEGER | 被引用次数（每次召回后 +1，log 曲线评分加成） |
+| `urgency` | REAL | 紧急度，初始 1.0（字段保留，暂无评分接入） |
 | `created_at` | INTEGER | 创建时间（Unix ms） |
 | `last_accessed` | INTEGER | 最后访问时间（Unix ms） |
 | `content_hash` | TEXT | SHA256 精确去重哈希 |
@@ -108,6 +108,7 @@ recall_score =
   × time_decay(0.5 + 0.5 × 0.5^(daysOld / halfLife))
   × reinforcement(if enabled)
   × length_norm(if enabled)
+  × cited_mult(log10 curve, max ×1.45)
 ```
 
 MMR（可选）：`λ × relevance − (1−λ) × max_sim_to_selected`

@@ -2,7 +2,7 @@
 
 > OpenClaw 记忆管理插件 — 纯算法召回，零 API 费用，零外部依赖
 
-**版本 2.2.5** · [更新日志](#更新日志) · [配置参考](CONFIG.md)
+**版本 2.3.0** · [更新日志](#更新日志) · [配置参考](CONFIG.md)
 
 ---
 
@@ -38,6 +38,8 @@
 | `algo_memory_recall_stats` | 召回统计（MMR / 会话去重 / DB 信息） |
 | `algo_memory_recall_info` | 最近一次召回记录 |
 | `algo_memory_recall_reset` | 清除会话去重状态 |
+| `algo_memory_feedback` | 自然语言修正记忆（AI 生成修正建议） |
+| `algo_memory_apply_feedback` | 应用确认后的记忆修正 |
 
 ---
 
@@ -55,6 +57,8 @@
 核心判断 + 关键词提取
     ↓
 SQLite + FTS5 索引
+    ↓
+补充存储（before_prompt_build 时自动补充漏存的消息）
 ```
 
 ### 召回
@@ -67,6 +71,8 @@ Prompt Gating（过滤 emoji / 招呼 / 反问句）
 会话去重（30s 内相似查询不重复召回）
     ↓
 统一检索引擎（FTS5 → 评分 → MMR → 截断）
+    ↓
+cited_count 更新（被召回的记忆引用次数 +1）
     ↓
 Token 上限注入（自动适应上下文剩余量）
 ```
@@ -137,6 +143,7 @@ openclaw logs | grep algo-memory
 
 | 版本 | 内容 |
 |------|------|
+| **2.3.0** | Memory Feedback 自然语言修正 + MCP 工具暴露 + cited_count 召回计数 + 补充存储修复冷启动死锁 + 全面默认开启（除 MCP） |
 | **2.2.5** | 统一检索引擎（retrieve.ts），recall/search 共用同一管道；recall 保留 agent 权重 1.5×；Bug 修复 |
 | **2.2.4** | 存储优先级打分 / Query Expansion / 动态 Token 上限 / BM25F / 软删除 |
 | **2.2.3** | 删除冗余机制（citedBoost/urgencyDecay/sessionMemory/lexicalOverlap）|

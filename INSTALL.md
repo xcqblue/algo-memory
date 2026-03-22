@@ -45,22 +45,16 @@ openclaw config set "plugins.slots.memory" "algo-memory"
     "algo-memory": {
       "enabled": true,
       "config": {
-        // 以下为默认开启的功能（所有功能默认开启，mcp 除外）
-        // 如需关闭某功能，只需设为 false
+        // === 默认开启的功能（mcp 除外）===
         "autoCapture": true,
         "autoRecall": true,
         "recencyDecay": true,
         "smartDedup": true,
         "noiseFilter": { "enabled": true, "skipGreetings": true, "skipCommands": true },
         "adaptiveRetrieval": { "enabled": true, "sessionDedup": { "enabled": true } },
-        "cited_count": true,  // 召回后自动更新引用计数（无配置项）
-        "supplementStore": true,  // 每次 prompt 构建时自动补充存储新消息（无配置项）
+        "cited_count": true,  // 召回后自动更新引用计数（无配置项，始终生效）
+        "supplementStore": true,  // 每次 prompt 构建时自动补充存储（无配置项，始终生效）
         "feedback": { "enabled": true },
-        // 以下默认开启但需要 LLM API Key 才生效
-        "useLlmForCore": true,
-        "useLlmForExtract": true,
-        "useLlmForDedup": true,
-        // 以下默认开启（需要时生效）
         "weibullDecay": { "enabled": true },
         "reinforcement": { "enabled": true },
         "mmr": { "enabled": true },
@@ -68,7 +62,14 @@ openclaw config set "plugins.slots.memory" "algo-memory"
         "hardMinScore": { "enabled": true },
         "tier": { "enabled": true },
         "sessionSummary": { "enabled": true },
-        // 以下默认关闭
+
+        // === LLM 相关（默认关闭，无 API Key 时请保持关闭）===
+        // 如需开启，请先配置 llm.apiKey，否则相关功能会优雅降级为规则判断
+        "useLlmForCore": false,
+        "useLlmForExtract": false,
+        "useLlmForDedup": false,
+
+        // === 以下默认关闭 ===
         "mcp": { "enabled": false }
       }
     },

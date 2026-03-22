@@ -202,6 +202,8 @@
 
 ## 自动召回注入流程 (before_prompt_build)
 
+有两个独立钩子：**recall 钩子**（priority 10）执行主要召回，**supplement 钩子**（priority 5）独立运行补充存储。
+
 ```
 event.messages（对话历史）
     │
@@ -209,7 +211,7 @@ event.messages（对话历史）
 ┌─────────────────────────────────────────────────┐
 │ 1. 收集 user 消息                               │
 │    - 提取所有 role='user' 的 content           │
-│    - 取最近 3 条拼接为 query                   │
+│    - 取最近 3 条 normalizeText 后拼接为 query  │
 └─────────────────────────────────────────────────┘
     │
     ▼
@@ -229,7 +231,15 @@ event.messages（对话历史）
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 4. Token Budget 注入                            │
+│ 4. cited_count 更新                             │
+│    - 对所有召回的记忆执行                      │
+│      UPDATE memories SET cited_count=cited_count+1│
+│      WHERE id IN (...)                          │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 5. Token Budget 注入                            │
 │    - estimateTokens() 估算（CKJ 按字符，       │
 │      英文按 chars/4）                           │
 │    - 上限 MAX_INJECT_TOKENS = 1500             │
@@ -239,13 +249,55 @@ event.messages（对话历史）
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ 5. 注入上下文                                    │
+│ 6. 注入上下文                                    │
 │    - api.prependSystemContext()                 │
 │    - 格式：\n\n以下是相关记忆：\n[记忆] ...\n │
 └─────────────────────────────────────────────────┘
     │
     ▼
 ✅ 记忆上下文注入完成
+```
+
+---
+
+### 补充存储钩子（supplement，priority 5）
+
+与 recall 钩子独立运行，每次 before_prompt_build 都会执行，解决冷启动漏存问题。
+
+```
+event.messages（对话历史）
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 1. 提取最新一条 user 消息                       │
+│    - normalizeText 处理                        │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 2. 噪声过滤                                     │
+│    - isNoise() 判断是否闲聊/打招呼/命令        │
+│    - 是 → 直接返回，不存储                     │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 3. 精确去重                                     │
+│    - hashContent 比对 content_hash             │
+│    - 命中 → 直接返回，不重复插入               │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 4. 补充存储                                     │
+│    - importance = 0.4（低于普通记忆的 0.5）   │
+│    - tier = peripheral                         │
+│    - cited_count = 0                          │
+│    - metadata.supplementary = true             │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+✅ 补充存储完成（与 recall 结果独立）
 ```
 
 ---
@@ -265,19 +317,24 @@ Agent 调用工具
 │ 2. switch (toolName)                           │
 └─────────────────────────────────────────────────┘
     │
-    ├──▶ algo_memory_list           ──▶ plugin.listMemories(agentId, limit, offset)
-    ├──▶ algo_memory_search          ──▶ plugin.searchMemories(agentId, query)
-    ├──▶ algo_memory_stats           ──▶ plugin.getStats(agentId)
-    ├──▶ algo_memory_get             ──▶ plugin.getMemory(agentId, memoryId)
-    ├──▶ algo_memory_delete         ──▶ plugin.deleteMemory(agentId, memoryId)
-    ├──▶ algo_memory_delete_bulk    ──▶ plugin.deleteBulk(agentId, memoryIds)
-    ├──▶ algo_memory_clear          ──▶ plugin.clearMemories(agentId, keepCore)
-    ├──▶ algo_memory_update         ──▶ plugin.updateMemory(agentId, memoryId, content)
-    ├──▶ algo_memory_export         ──▶ plugin.exportMemories(agentId)
-    ├──▶ algo_memory_import        ──▶ plugin.importMemories(agentId, memories)
-    ├──▶ algo_memory_session        ──▶ plugin.getSessionMemory(agentId)
-    ├──▶ algo_memory_session_add   ──▶ plugin.addSessionMemory(agentId, content)
-    └──▶ algo_memory_metrics        ──▶ plugin.getMetrics()
+    ├──▶ algo_memory_list              ──▶ plugin.listMemories(agentId, limit, offset)
+    ├──▶ algo_memory_search           ──▶ plugin.searchMemories(agentId, query)
+    ├──▶ algo_memory_stats            ──▶ plugin.getStats(agentId)
+    ├──▶ algo_memory_get              ──▶ plugin.getMemory(agentId, memoryId)
+    ├──▶ algo_memory_delete          ──▶ plugin.deleteMemory(agentId, memoryId)
+    ├──▶ algo_memory_delete_bulk     ──▶ plugin.deleteBulk(agentId, memoryIds)
+    ├──▶ algo_memory_clear           ──▶ plugin.clearMemories(agentId, keepCore)
+    ├──▶ algo_memory_update          ──▶ plugin.updateMemory(agentId, memoryId, content)
+    ├──▶ algo_memory_export          ──▶ plugin.exportMemories(agentId)
+    ├──▶ algo_memory_import         ──▶ plugin.importMemories(agentId, memories)
+    ├──▶ algo_memory_session         ──▶ plugin.getSessionMemory(agentId)
+    ├──▶ algo_memory_session_add    ──▶ plugin.addSessionMemory(agentId, content)
+    ├──▶ algo_memory_recall_stats   ──▶ plugin.getRecallStats(agentId)
+    ├──▶ algo_memory_recall_info    ──▶ plugin.getLastRecallInfo(agentId)
+    ├──▶ algo_memory_recall_reset   ──▶ plugin.clearRecallDedup(agentId)
+    ├──▶ algo_memory_feedback       ──▶ plugin.feedback(agentId, correction)     ← 自然语言修正
+    ├──▶ algo_memory_apply_feedback  ──▶ plugin.applyFeedback(agentId, memoryId, updatedContent)
+    └──▶ algo_memory_metrics         ──▶ plugin.getMetrics()
     │
     ▼
 ┌─────────────────────────────────────────────────┐

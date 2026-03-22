@@ -193,7 +193,7 @@ export const DEFAULT_CONFIG: Config = {
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
   llm: { enabled: true, provider: 'auto', apiKey: '', model: '', baseURL: '' },
-  threshold: { useLlmForCore: true, useLlmForExtract: true, useLlmForDedup: true, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
+  threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
   sessionSummary: { enabled: true, dir: 'memory', maxItems: 50 },
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },
   mcp: { enabled: false, transport: 'stdio', port: 8181 },

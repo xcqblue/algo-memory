@@ -63,17 +63,17 @@
 > **forceKeywords 默认值**
 > `['记住', '之前', '上次', '记得', 'remember', 'before', 'last', 'what', 'why', 'how', '什么', '为什么', '怎么']`
 
-### 评分增强
+### 评分增强（默认均开启）
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `weibullDecay.enabled` | `false` | Weibull 分布衰减（替代指数衰减） |
-| `reinforcement.enabled` | `false` | 访问次数强化（访问越多分数越高） |
-| `mmr.enabled` | `false` | 开启 MMR 多样性去重 |
+| `weibullDecay.enabled` | `true` | Weibull 分布衰减（替代指数衰减） |
+| `reinforcement.enabled` | `true` | 访问次数强化（访问越多分数越高） |
+| `mmr.enabled` | `true` | 开启 MMR 多样性去重 |
 | `mmr.lambda` | `0.7` | λ×相关 − (1−λ)×多样，λ=1 只求相关，λ=0 只求多样 |
 | `mmr.threshold` | `0.85` | 早停阈值 |
-| `lengthNorm.enabled` | `false` | 长度归一化（防止长文本霸榜） |
-| `hardMinScore.enabled` | `false` | 硬阈值过滤，分数低于此值的结果丢弃 |
+| `lengthNorm.enabled` | `true` | 长度归一化（防止长文本霸榜） |
+| `hardMinScore.enabled` | `true` | 硬阈值过滤，分数低于此值的结果丢弃 |
 
 **时间衰减公式**：`score × (0.5 + 0.5 × 0.5^(daysOld / halfLife))`
 
@@ -81,7 +81,7 @@
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `tier.enabled` | `false` | 启用三层晋升 |
+| `tier.enabled` | `true` | 启用三层晋升 |
 | `tier.coreThreshold` | `10` | 访问次数达到此值晋升 core |
 | `tier.peripheralThreshold` | `0.15` | 分数低于此值降级 peripheral |
 | `tier.ageDays` | `60` | 超过此天数的记忆不因高 importance 升 core |
@@ -90,7 +90,7 @@
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `sessionSummary.enabled` | `false` | 开启 session 结束时写 Markdown 摘要 |
+| `sessionSummary.enabled` | `true` | 开启 session 结束时写 Markdown 摘要 |
 | `sessionSummary.dir` | `"memory"` | 摘要目录（相对于 stateDir） |
 | `sessionSummary.maxItems` | `50` | 每次写入的最大条数 |
 
@@ -102,5 +102,16 @@
 | `scopes.visibleAgents` | `[]` | 允许查看的 Agent ID（`["*"]` 表示全部） |
 | `llm.enabled` | `true` | `false` = 纯算法零成本模式 |
 | `llm.provider` | `"auto"` | 自动探测可用提供商 |
+| `threshold.useLlmForCore` | `false` | LLM 判断是否为重要记忆，无 API Key 时请关闭或配置 |
+| `threshold.useLlmForExtract` | `false` | LLM 提取关键词，无 API Key 时请关闭或配置 |
+| `threshold.useLlmForDedup` | `false` | LLM 判断是否重复，无 API Key 时请关闭或配置 |
 
 > 支持提供商：MiniMax / DeepSeek / 智谱 / Kimi / 百炼 / 混元 / SiliconFlow / OpenAI / Anthropic / Ollama
+
+### MCP（默认关闭）
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `mcp.enabled` | `false` | 开启后通过 MCP 协议暴露所有工具给外部 AI 调用 |
+| `mcp.transport` | `"stdio"` | 传输模式（`stdio` 或 `http`） |
+| `mcp.port` | `8181` | HTTP 模式监听端口 |
