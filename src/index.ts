@@ -188,7 +188,7 @@ class MemoryPlugin {
     await doStore(deps, AgentId, messages);
   }
 
-  async recall(AgentId: string, query: string, maxInjectTokens?: number, buildInjectCtx?: (memories: any[], maxTokens?: number) => string): Promise<{ hasMemory: boolean; memories: any[] }> {
+  async recall(AgentId: string, query: string, maxInjectTokens?: number): Promise<{ hasMemory: boolean; memories: any[] }> {
     const deps = {
       db: this._db(),
       config: this.config,
@@ -361,7 +361,6 @@ class MemoryPlugin {
   }
 
   updateMemory(AgentId: string, memoryId: string, content: string): boolean {
-    const normalized = normalizeText(content);
     const safe = safeContent(content);
     const isCore = isCoreKeyword(safe, this.config.coreKeywords);
     const tier = getTier(isCore ? 1.0 : 0.5, 1, 0, this.config.tier);
@@ -825,7 +824,6 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
   try {
     const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
     const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
-    const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
     const { CallToolRequestSchema, ListToolsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
       const server = new Server({
@@ -893,6 +891,21 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             description: '运行时指标',
             inputSchema: { type: 'object', properties: {} },
           },
+          {
+            name: 'algo_memory_recall_stats',
+            description: '召回统计',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_recall_info',
+            description: '查看最近召回记录',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
+          },
+          {
+            name: 'algo_memory_recall_reset',
+            description: '清除会话去重状态',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
+          },
         ],
       }));
 
@@ -912,6 +925,9 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             case 'algo_memory_export': result = plugin.exportMemories(args.agentId, args.maxExport || 1000); break;
             case 'algo_memory_import': result = { imported: plugin.importMemories(args.agentId, args.memories) }; break;
             case 'algo_memory_metrics': result = plugin.getMetrics(); break;
+            case 'algo_memory_recall_stats': result = plugin.getRecallStats(args.agentId); break;
+            case 'algo_memory_recall_info': result = plugin.getLastRecallInfo(args.agentId); break;
+            case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(args.agentId); break;
             default: result = { error: 'Unknown tool' };
           }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
