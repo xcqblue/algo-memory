@@ -156,7 +156,6 @@ export interface Memory {
   importance: number;
   access_count: number;
   cited_count: number;
-  urgency: number;       // starts at 1.0 (urgencyDecay feature was removed, field kept for DB compatibility)
   created_at: number;
   last_accessed: number;
   content_hash: string;

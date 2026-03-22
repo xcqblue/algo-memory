@@ -21,22 +21,13 @@ export function initSchema(db: AnyDatabase, log: any): void {
       content TEXT NOT NULL, type TEXT DEFAULT 'other', tier TEXT DEFAULT 'working',
       layer TEXT DEFAULT 'general', keywords TEXT, importance REAL DEFAULT 0.5,
       access_count INTEGER DEFAULT 0, cited_count INTEGER DEFAULT 0,
-      urgency REAL DEFAULT 1.0,
       created_at INTEGER, last_accessed INTEGER, content_hash TEXT,
       metadata TEXT
     )
   `, 'memories 表');
 
-  // Add missing columns for existing DBs (migration-safe)
-  for (const [col, type, defaultVal] of [
-    ['urgency', 'REAL', '1.0'],
-  ] as [string, string, string][]) {
-    try {
-      db.prepare(`SELECT ${col} FROM memories LIMIT 0`).run();
-    } catch (_) {
-      try { db.prepare(`ALTER TABLE memories ADD COLUMN ${col} ${type} DEFAULT ${defaultVal}`).run(); } catch (_2) { /* ignore */ }
-    }
-  }
+  // Migration: drop deprecated urgency column (removed in v2.3.0)
+  try { db.prepare('ALTER TABLE memories DROP COLUMN IF EXISTS urgency').run(); } catch (_) { /* ignore */ }
 
   // Indexes (non-fatal if they fail)
   for (const idx of [

@@ -236,11 +236,11 @@ class MemoryPlugin {
 
     // 补充存储：importance = 0.4（低于普通记忆的 0.5），access_count = 0（不触发 tier 变化）
     run(this._db(),
-      `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         generateId(), AgentId, scope, safe, 'other', 'peripheral', 'general',
-        extractKeywords(safe), 0.4, 0, 0, 1.0,
+        extractKeywords(safe), 0.4, 0, 0,
         now, now, contentHash,
         JSON.stringify({ memory_category: 'other', confidence: 0.4, source_session: AgentId, supplementary: true })
       ]
@@ -554,13 +554,13 @@ confidence 是 0-1 的置信度。
           const safe = safeContent(m.content || '');
           const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
           run(this._db(),
-            `INSERT OR REPLACE INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, urgency, created_at, last_accessed, content_hash, metadata)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR REPLACE INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               m.id || generateId(), AgentId, m.scope || 'global',
               safe, m.type || 'other', tier, m.layer || 'general',
               m.keywords || '', m.importance || 0.5, m.access_count || 1,
-              m.cited_count || 0, m.urgency ?? 1.0,
+              m.cited_count || 0,
               m.created_at || Date.now(), m.last_accessed || Date.now(),
               m.content_hash || hashContent(safe), m.metadata || null
             ]

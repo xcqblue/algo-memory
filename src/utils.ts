@@ -166,8 +166,11 @@ export function shouldRetrieve(
   // Skip meta-questions (反问句 / interrogative about memory itself)
   if (META_PATTERNS.some(p => p.test(trimmed))) return false;
 
-  // Force keywords always trigger retrieval (even after recent recall)
-  if (config.forceKeywords?.some((k: string) => lowerQuery.includes(k))) return true;
+  // Force keywords always trigger retrieval (even after recent recall).
+  // Combine config forceKeywords with the language-aware defaults.
+  const langKeywords = getRetrieveKeywords(detectLanguage(trimmed));
+  const allForceKeywords = [...(config.forceKeywords || []), ...langKeywords];
+  if (allForceKeywords.some((k: string) => lowerQuery.includes(k))) return true;
 
   // Length gate
   const isCJK = /[\u4e00-\u9fa5]/.test(trimmed);
@@ -257,10 +260,14 @@ export function mmrDeduplicate(items: Memory[], config: Config['mmr']): Memory[]
     const picked = candidates.splice(bestIdx, 1)[0];
     selected.push(picked);
 
-    // Early exit: if the best possible MMR score (relevance alone, no diversity cost)
-    // is already below threshold, stop selecting more items
-    const bestPossibleScore = lambda * (picked._score ?? picked.importance);
-    if (bestPossibleScore < threshold) break;
+    // Early exit: track the maximum relevance of all remaining candidates.
+    // If even the best remaining item can't reach threshold, stop selecting.
+    let maxRemainingRelevance = -Infinity;
+    for (const c of candidates) {
+      const rel = c._score ?? c.importance;
+      if (rel > maxRemainingRelevance) maxRemainingRelevance = rel;
+    }
+    if (candidates.length > 0 && lambda * maxRemainingRelevance < threshold) break;
   }
 
   return selected;
