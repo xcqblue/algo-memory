@@ -22,9 +22,15 @@
     "minQueryLength": 2,
     "forceKeywords": ["记住", "之前", "上次", "记得", "remember", "before", "last"]
   },
-  "sessionMemory": {
-    "enabled": false,
-    "maxSessionItems": 10
+  "sessionSummary": {
+    "enabled": true,
+    "dir": "memory",
+    "maxItems": 50
+  },
+  "feedback": {
+    "enabled": true,
+    "maxMemories": 5,
+    "matchThreshold": 0.6
   },
   "weibullDecay": {
     "enabled": false,
