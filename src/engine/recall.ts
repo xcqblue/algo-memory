@@ -11,7 +11,7 @@ import {
   mmrDeduplicate,
   lengthNorm
 } from '../utils.js';
-import { queryAll } from '../db/queries.js';
+import { queryAll, run } from '../db/queries.js';
 import type { DbLike } from '../db/queries.js';
 
 export interface RecallDeps {
@@ -106,6 +106,11 @@ export async function recall(
         score *= lengthNorm(m.content, config.lengthNorm.anchor);
       }
 
+      // cited_count log 曲线加成：被引用次数越多评分越高，但不会无限膨胀
+      if (m.cited_count > 0) {
+        score *= (1 + Math.log10(m.cited_count + 1) * 0.15);
+      }
+
       return { ...m, _score: score };
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
   }
@@ -120,9 +125,17 @@ export async function recall(
 
   const limited = memories.slice(0, config.maxResults);
 
-  const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
+  // 召回完成后更新 cited_count（被实际召回使用说明这条记忆对本次对话有帮助）
+  if (limited.length > 0) {
+    const ids = limited.map(m => m.id);
+    const placeholders = ids.map(() => '?').join(',');
+    run(db,
+      `UPDATE memories SET cited_count = cited_count + 1 WHERE id IN (${placeholders})`,
+      ids
+    );
+  }
 
-  if (useCache) cache.set(cacheKey, result);
+  const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
 
   const recallDuration = Date.now() - recallStartTime;
   log.info(`[algo-memory] 召回完成, agentId: ${AgentId}, 命中: ${limited.length}, 耗时: ${recallDuration}ms`);
