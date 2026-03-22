@@ -240,12 +240,22 @@ export async function store(
       ) as TierRow[];
       // Build one CASE WHEN statement for all tier updates in a single SQL round-trip
       if (rows.length > 0) {
-        const cases = rows.map(row => {
+        // Build parameterized CASE WHEN: 2 params per row (id, tier) + n params for WHERE IN
+        const idParams: string[] = [];
+        const tierParams: string[] = [];
+        const whereParams: string[] = [];
+        for (const row of rows) {
           const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
           const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
-          return `WHEN id = '${row.id}' THEN '${newTier}'`;
-        }).join(' ');
-        run(db, `UPDATE memories SET tier = CASE ${cases} ELSE tier END WHERE id IN (${rows.map(() => '?').join(',')})`, rows.map(r => r.id));
+          idParams.push(row.id);
+          tierParams.push(newTier);
+          whereParams.push(row.id);
+        }
+        const whenClauses = rows.map(() => 'WHEN id = ? THEN ?').join(' ');
+        run(db,
+          `UPDATE memories SET tier = CASE ${whenClauses} ELSE tier END WHERE id IN (${whereParams.map(() => '?').join(',')})`,
+          [...idParams, ...tierParams, ...whereParams]
+        );
       }
     }
 

@@ -994,6 +994,16 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             description: '清除会话去重状态',
             inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
           },
+          {
+            name: 'algo_memory_delete_bulk',
+            description: '批量删除记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryIds: { type: 'array', items: { type: 'string' } } } },
+          },
+          {
+            name: 'algo_memory_clear',
+            description: '清空记忆（keepCore=true 时保留 core 层）',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, keepCore: { type: 'boolean' } } },
+          },
         ],
       }));
 
@@ -1007,6 +1017,8 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             case 'algo_memory_stats': result = plugin.getStats(args.agentId); break;
             case 'algo_memory_get': result = plugin.getMemory(args.agentId, args.memoryId); break;
             case 'algo_memory_delete': result = { success: plugin.deleteMemory(args.agentId, args.memoryId) }; break;
+            case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(args.agentId, args.memoryIds) }; break;
+            case 'algo_memory_clear': result = { deleted: plugin.clearMemories(args.agentId, args.keepCore !== false) }; break;
             case 'algo_memory_update': result = { success: plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
             case 'algo_memory_feedback': result = await plugin.feedback(args.agentId, args.correction); break;
             case 'algo_memory_apply_feedback': result = { success: plugin.applyFeedback(args.agentId, args.memoryId, args.updatedContent) }; break;
