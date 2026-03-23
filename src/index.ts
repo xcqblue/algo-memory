@@ -655,6 +655,39 @@ confidence 是 0-1 的置信度。
     if (total > 0) {
       this.log.info('[algo-memory] 清理了', total, '条过期记忆');
     }
+
+    // 清理过期的会话快照（默认保留 7 天）
+    this.cleanupSnapshots();
+  }
+
+  /**
+   * 清理过期的会话快照
+   */
+  cleanupSnapshots(): void {
+    if (!this.db) return;
+    try {
+      const snapshotRetentionDays = 7; // 快照保留天数
+      const cutoff = Date.now() - snapshotRetentionDays * 24 * 60 * 60 * 1000;
+
+      // 获取要删除的快照数量
+      const countRows = queryAll(this._db(),
+        `SELECT COUNT(*) as cnt FROM session_snapshots WHERE ended_at < ?`,
+        [cutoff]
+      ) as any[];
+      const count = countRows[0]?.cnt || 0;
+
+      if (count === 0) return;
+
+      // 删除过期快照
+      const deleted = run(this._db(),
+        `DELETE FROM session_snapshots WHERE ended_at < ?`,
+        [cutoff]
+      );
+
+      this.log.info(`[algo-memory] 清理了 ${deleted} 条过期会话快照（保留最近 ${snapshotRetentionDays} 天）`);
+    } catch (err) {
+      this.log.error('[algo-memory] 清理会话快照失败:', err);
+    }
   }
 
   // ===== CLI 增强工具 =====
@@ -1012,8 +1045,15 @@ export default {
       // 在 session_start 时检测会话切换并注入上会话上下文
       api.on('session_start', async (event: any, ctx: any) => {
         try {
-          const agentId = ctx?.agentId || 'default';
+          // 尝试从多个来源获取 agentId
+          const agentId = ctx?.agentId || event?.agentId || ctx?.sessionKey?.split(':')[2] || 'default';
           const sessionKey = event?.sessionKey || 'unknown';
+
+          // 记录获取到的 agentId，便于调试多 Agent 问题
+          if (log.info) {
+            const actualAgentId = ctx?.agentId || 'undefined';
+            log.info(`[algo-memory] session_start - agentId=${actualAgentId}, resolved=${agentId}, sessionKey=${sessionKey}`);
+          }
 
           // 检测会话是否切换，获取上会话快照
           const snapshot = plugin.detectSessionChangeAndGetSnapshot(agentId, sessionKey);
@@ -1033,7 +1073,8 @@ export default {
       // 在 agent_end 时保存会话快照
       api.on('agent_end', async (event: any, ctx: any) => {
         try {
-          const agentId = ctx?.agentId || 'default';
+          // 尝试从多个来源获取 agentId
+          const agentId = ctx?.agentId || event?.agentId || ctx?.sessionKey?.split(':')[2] || 'default';
           // 优先从 ctx 获取 sessionKey，也尝试从 event 获取作为兜底
           const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
           const messages = event?.messages || [];
