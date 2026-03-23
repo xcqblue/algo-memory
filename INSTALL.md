@@ -98,6 +98,45 @@ npm test
 
 ---
 
+## 更新插件
+
+### 一键更新（推荐）
+
+```bash
+cd ~/.openclaw/extensions/algo-memory
+./update.sh
+```
+
+脚本会自动：
+1. 备份旧版本
+2. 拉取最新代码
+3. 编译
+4. 重启 OpenClaw
+
+如果编译失败，会自动回滚到旧版本。
+
+详细说明见 [update.sh.md](update.sh.md)
+
+### 手动更新
+
+```bash
+cd ~/.openclaw/extensions/algo-memory
+
+# 备份
+cp -r dist dist.bak
+
+# 更新
+git pull
+
+# 编译
+npm run build
+
+# 重启
+openclaw gateway restart
+```
+
+---
+
 ## 常见问题
 
 ### Q: npm run build 报错？
