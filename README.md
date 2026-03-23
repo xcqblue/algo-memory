@@ -247,14 +247,6 @@ cd ~/.openclaw/extensions/algo-memory
 
 ---
 
-## 📞 支持
-
-- 🐛 问题反馈 → [GitHub Issues](https://github.com/xcqblue/algo-memory/issues)
-- 📖 文档 → [Wiki](https://github.com/xcqblue/algo-memory/wiki)
-- 💬 讨论 → [GitHub Discussions](https://github.com/xcqblue/algo-memory/discussions)
-
----
-
 <p align="center">
   <strong>如果这个项目对你有帮助，请点个 ⭐ 支持一下！</strong>
 </p>
