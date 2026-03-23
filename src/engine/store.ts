@@ -111,6 +111,38 @@ const llmCache = new Map<string, { result: any; ts: number; accessCount: number 
 const LLM_CACHE_TTL = DEFAULT_VALUES.LLM_CACHE_TTL_MS; // 5分钟
 const LLM_CACHE_MAX_SIZE = DEFAULT_VALUES.LLM_CACHE_MAX_SIZE;
 
+// ============= LLM 重试机制（优化3）=============
+const LLM_MAX_RETRIES = 2;
+const LLM_RETRY_BASE_DELAY_MS = 500;
+
+/**
+ * 带重试的 LLM 调用
+ * 临时失败时自动重试，最多 LLM_MAX_RETRIES 次
+ */
+async function llmWithRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = LLM_MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err as Error;
+      
+      // 如果还有重试次数，等待后重试（指数退避）
+      if (attempt < maxRetries - 1) {
+        const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  // 所有重试都失败，抛出最后一个错误
+  throw lastError;
+}
+
 function getCachedResult(key: string): any | null {
   const entry = llmCache.get(key);
   if (!entry) return null;
@@ -184,7 +216,7 @@ async function processLlmQueue(): Promise<void> {
 
     try {
       let result: any;
-      // 带超时的LLM调用（错误边界）
+      // 带超时和重试的LLM调用
       const timeoutPromise = new Promise<never>((_, rej) =>
         setTimeout(() => rej(new Error('LLM timeout')), DEFAULT_VALUES.LLM_TIMEOUT_MS)
       );
@@ -193,7 +225,8 @@ async function processLlmQueue(): Promise<void> {
         case 'isCore':
           if (llmSingleton.llmClient) {
             const llmPromise = llmSingleton.llmClient.isCoreMemory(item.content);
-            result = await Promise.race([llmPromise, timeoutPromise]).catch(() => ({ isCore: false, confidence: 0.5 }));
+            const racePromise = Promise.race([llmPromise, timeoutPromise]);
+            result = await llmWithRetry(() => racePromise).catch(() => ({ isCore: false, confidence: 0.5 }));
           } else {
             result = { isCore: false, confidence: 0.5 };
           }
@@ -201,7 +234,8 @@ async function processLlmQueue(): Promise<void> {
         case 'extractKeywords':
           if (llmSingleton.llmClient) {
             const llmPromise = llmSingleton.llmClient.extractKeywordsFromLLM(item.content);
-            result = await Promise.race([llmPromise, timeoutPromise]).catch(() => '');
+            const racePromise = Promise.race([llmPromise, timeoutPromise]);
+            result = await llmWithRetry(() => racePromise).catch(() => '');
           } else {
             result = '';
           }
@@ -345,6 +379,69 @@ export function flushAllBuffers(db: DbLike, config: Config, log: any): number {
  */
 export function notifyUserActivity(AgentId: string): void {
   userActivity.set(AgentId, Date.now());
+}
+
+// ============= 内存缓冲区清理（优化2）=============
+const BUFFER_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 每小时清理一次
+let bufferCleanupTimer: NodeJS.Timeout | null = null;
+let isCleanupRunning = false;
+
+/**
+ * 清理无用的内存缓冲区
+ * 删除空的、没有活跃定时器的缓冲区，防止内存无限增长
+ */
+export function cleanupEmptyBuffers(log: any): number {
+  if (isCleanupRunning) return 0;
+  isCleanupRunning = true;
+  
+  let cleanedCount = 0;
+  const now = Date.now();
+  
+  for (const [AgentId, buffer] of memoryBuffers.entries()) {
+    // 只有当缓冲区为空且没有活跃定时器时才清理
+    if (buffer.memories.length === 0 && buffer.timer === null) {
+      // 检查是否长时间未使用（超过1小时）
+      const idleTime = now - buffer.lastFlush;
+      if (idleTime > BUFFER_CLEANUP_INTERVAL_MS) {
+        memoryBuffers.delete(AgentId);
+        cleanedCount++;
+      }
+    }
+  }
+  
+  isCleanupRunning = false;
+  
+  if (cleanedCount > 0) {
+    log.info(`[algo-memory] 清理了 ${cleanedCount} 个无用内存缓冲区`);
+  }
+  
+  return cleanedCount;
+}
+
+/**
+ * 启动定期清理定时器
+ * 应该在插件初始化时调用一次
+ */
+export function startBufferCleanup(log: any): void {
+  if (bufferCleanupTimer !== null) return; // 防止重复启动
+  
+  bufferCleanupTimer = setInterval(() => {
+    cleanupEmptyBuffers(log);
+  }, BUFFER_CLEANUP_INTERVAL_MS);
+  
+  // 标记为不阻止进程退出
+  bufferCleanupTimer.unref();
+}
+
+/**
+ * 停止定期清理定时器
+ * 应该在插件销毁时调用
+ */
+export function stopBufferCleanup(): void {
+  if (bufferCleanupTimer !== null) {
+    clearInterval(bufferCleanupTimer);
+    bufferCleanupTimer = null;
+  }
 }
 
 /**
