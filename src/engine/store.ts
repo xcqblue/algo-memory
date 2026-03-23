@@ -21,11 +21,13 @@ import { queryAll, queryOne, run, runOrThrow } from '../db/queries.js';
 import { LLMClient } from './llm.js';
 import type { DbLike } from '../db/queries.js';
 
-// ============= Batch Write Buffer =============
+// ============= Batch Write Buffer（动态调整优化）=============
 interface MemoryBuffer {
   memories: Memory[];
   timer: NodeJS.Timeout | null;
   lastFlush: number; // 上次刷新时间
+  baseBufferMs: number; // 基础buffer时间
+  messageCount: number; // 消息计数（用于动态调整）
 }
 
 const memoryBuffers: Map<string, MemoryBuffer> = new Map();
@@ -35,9 +37,41 @@ const userActivity: Map<string, number> = new Map();
 
 function getBuffer(AgentId: string, config: Config): MemoryBuffer {
   if (!memoryBuffers.has(AgentId)) {
-    memoryBuffers.set(AgentId, { memories: [], timer: null, lastFlush: Date.now() });
+    memoryBuffers.set(AgentId, {
+      memories: [],
+      timer: null,
+      lastFlush: Date.now(),
+      baseBufferMs: config.batchWrite?.bufferMs || 500,
+      messageCount: 0
+    });
   }
   return memoryBuffers.get(AgentId)!;
+}
+
+// 动态计算bufferMs（根据消息频率调整）
+function getDynamicBufferMs(buffer: MemoryBuffer): number {
+  const base = buffer.baseBufferMs;
+  const count = buffer.messageCount;
+
+  // 快速消息流（高频率）：减少等待时间
+  if (count > 20) return Math.max(100, base * 0.3);
+  if (count > 10) return Math.max(200, base * 0.5);
+  if (count > 5) return Math.max(300, base * 0.7);
+
+  // 慢速消息流：使用正常等待时间
+  return base;
+}
+
+// 增加消息计数并重置（用于动态调整）
+function incrementMessageCount(AgentId: string): void {
+  const buffer = memoryBuffers.get(AgentId);
+  if (buffer) {
+    buffer.messageCount++;
+    // 每分钟重置计数
+    setTimeout(() => {
+      if (buffer) buffer.messageCount = 0;
+    }, 60000);
+  }
 }
 
 // ============= LLM 异步队列 =============
@@ -54,85 +88,142 @@ interface LlmRequest {
   content: string;
 }
 
-let llmQueue: LlmQueueItem[] = [];
-let llmProcessing = false;
-let llmProcessTimer: NodeJS.Timeout | null = null;
-let llmBatchWindowMs = 200;
-let llmClientRef: LLMClient | null = null;
+// ============= LLM 队列单例（优化2）=============
+interface LlmQueueSingleton {
+  queue: LlmQueueItem[];
+  processing: boolean;
+  processTimer: NodeJS.Timeout | null;
+  batchWindowMs: number;
+  llmClient: LLMClient | null;
+}
 
-function initLlmQueue(batchWindowMs: number, llmClient: LLMClient | null) {
-  llmBatchWindowMs = batchWindowMs;
-  llmClientRef = llmClient;
-  llmQueue = [];
-  llmProcessing = false;
+const llmSingleton: LlmQueueSingleton = {
+  queue: [],
+  processing: false,
+  processTimer: null,
+  batchWindowMs: 200,
+  llmClient: null,
+};
+
+// LLM 结果缓存（带LRU优化）
+const llmCache = new Map<string, { result: any; ts: number; accessCount: number }>();
+const LLM_CACHE_TTL = 5 * 60 * 1000; // 5分钟
+const LLM_CACHE_MAX_SIZE = 1000;
+
+function getCachedResult(key: string): any | null {
+  const entry = llmCache.get(key);
+  if (!entry) return null;
+  // LRU: 更新访问时间
+  entry.accessCount++;
+  entry.ts = Date.now();
+  if (Date.now() - entry.ts > LLM_CACHE_TTL) {
+    llmCache.delete(key);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCachedResult(key: string, result: any): void {
+  // LRU淘汰：超过最大容量时删除最少使用的
+  if (llmCache.size >= LLM_CACHE_MAX_SIZE) {
+    let oldest: string | null = null;
+    let minAccess = Infinity;
+    for (const [k, v] of llmCache.entries()) {
+      if (v.accessCount < minAccess) {
+        minAccess = v.accessCount;
+        oldest = k;
+      }
+    }
+    if (oldest) llmCache.delete(oldest);
+  }
+  llmCache.set(key, { result, ts: Date.now(), accessCount: 0 });
+}
+
+function initLlmQueue(batchWindowMs: number, llmClient: LLMClient | null): void {
+  // 单例模式：只更新配置，不重新初始化队列
+  llmSingleton.batchWindowMs = batchWindowMs || 200;
+  llmSingleton.llmClient = llmClient;
 }
 
 function addToLlmQueue(item: LlmRequest): Promise<any> {
   return new Promise((resolve, reject) => {
-    // 缓存key
     const cacheKey = `${item.type}:${item.content.toLowerCase().trim().substring(0, 100)}`;
-    
-    // 检查缓存（5分钟有效期）
-    const cached = llmCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
-      resolve(cached.result);
+
+    // 检查缓存（带LRU）
+    const cached = getCachedResult(cacheKey);
+    if (cached) {
+      resolve(cached);
       return;
     }
 
-    llmQueue.push({ ...item, addedAt: Date.now(), resolve, reject });
+    llmSingleton.queue.push({ ...item, addedAt: Date.now(), resolve, reject });
 
-    if (!llmProcessTimer) {
-      llmProcessTimer = setTimeout(() => processLlmQueue(), llmBatchWindowMs);
+    if (!llmSingleton.processTimer) {
+      llmSingleton.processTimer = setTimeout(() => processLlmQueue(), llmSingleton.batchWindowMs);
     }
   });
 }
 
-// LLM 结果缓存
-const llmCache = new Map<string, { result: any; ts: number }>();
-
 async function processLlmQueue(): Promise<void> {
-  if (llmProcessing || llmQueue.length === 0) return;
-  llmProcessing = true;
-  llmProcessTimer = null;
+  if (llmSingleton.processing || llmSingleton.queue.length === 0) return;
+  llmSingleton.processing = true;
+  llmSingleton.processTimer = null;
 
-  const batch = llmQueue.splice(0, 10); // 最多10个一批
+  const batch = llmSingleton.queue.splice(0, 10);
 
   for (const item of batch) {
     const cacheKey = `${item.type}:${item.content.toLowerCase().trim().substring(0, 100)}`;
-    
+
     // 再次检查缓存
-    const cached = llmCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
-      item.resolve(cached.result);
+    const cached = getCachedResult(cacheKey);
+    if (cached) {
+      item.resolve(cached);
       continue;
     }
 
     try {
       let result: any;
+      // 带超时的LLM调用（错误边界）
+      const timeoutPromise = new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error('LLM timeout')), 5000)
+      );
+
       switch (item.type) {
         case 'isCore':
-          result = llmClientRef ? await llmClientRef.isCoreMemory(item.content) : { isCore: false, confidence: 0.5 };
+          if (llmSingleton.llmClient) {
+            const llmPromise = llmSingleton.llmClient.isCoreMemory(item.content);
+            result = await Promise.race([llmPromise, timeoutPromise]).catch(() => ({ isCore: false, confidence: 0.5 }));
+          } else {
+            result = { isCore: false, confidence: 0.5 };
+          }
           break;
         case 'extractKeywords':
-          result = llmClientRef ? await llmClientRef.extractKeywordsFromLLM(item.content) : '';
+          if (llmSingleton.llmClient) {
+            const llmPromise = llmSingleton.llmClient.extractKeywordsFromLLM(item.content);
+            result = await Promise.race([llmPromise, timeoutPromise]).catch(() => '');
+          } else {
+            result = '';
+          }
           break;
         case 'isDuplicate':
           result = { isDuplicate: false, similarity: 0.5 };
           break;
       }
       if (result) {
-        llmCache.set(cacheKey, { result, ts: Date.now() });
+        setCachedResult(cacheKey, result);
         item.resolve(result);
       }
     } catch (err) {
-      item.reject(err);
+      // 错误边界：失败时返回默认值，不阻塞流程
+      console.warn(`[algo-memory] LLM调用失败: ${err}`);
+      item.resolve(item.type === 'isCore' ? { isCore: false, confidence: 0.5 } : '');
     }
   }
 
-  llmProcessing = false;
+  llmSingleton.processing = false;
 
-  if (llmQueue.length > 0) {
-    llmProcessTimer = setTimeout(() => processLlmQueue(), 100);
+  if (llmSingleton.queue.length > 0) {
+    llmSingleton.processTimer = setTimeout(() => processLlmQueue(), 100);
   }
 }
 
@@ -145,11 +236,11 @@ function checkIdleAndFlush(db: DbLike, AgentId: string, config: Config, log: any
   if (buffer.memories.length === 0) return;
 
   const idleTime = Date.now() - buffer.lastFlush;
-  const bufferMs = config.batchWrite?.bufferMs || 500;
+  const dynamicBufferMs = getDynamicBufferMs(buffer);
 
-  // 如果空闲时间超过 bufferMs 的 50%，就提前刷新
-  if (idleTime >= bufferMs * 0.5) {
-    log.info(`[algo-memory] 检测到用户空闲 ${idleTime}ms，提前刷新批量缓冲区`);
+  // 如果空闲时间超过动态bufferMs的50%，就提前刷新
+  if (idleTime >= dynamicBufferMs * 0.5) {
+    log.info(`[algo-memory] 检测到用户空闲 ${idleTime}ms，提前刷新批量缓冲区（动态bufferMs: ${dynamicBufferMs}）`);
     flushMemoryBuffer(db, AgentId, config, log);
   }
 }
@@ -226,10 +317,14 @@ function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: an
   // 如果已经有定时器在运行，不重复创建
   if (buffer.timer) return;
 
-  // 计划在 bufferMs 后执行批量写入
+  // 增加消息计数（用于动态调整）
+  incrementMessageCount(AgentId);
+
+  // 计划在动态bufferMs后执行批量写入
+  const dynamicBufferMs = getDynamicBufferMs(buffer);
   buffer.timer = setTimeout(() => {
     flushMemoryBuffer(db, AgentId, config, log);
-  }, config.batchWrite?.bufferMs || 500);
+  }, dynamicBufferMs);
 }
 
 /**

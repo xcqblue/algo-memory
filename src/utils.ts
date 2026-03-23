@@ -39,15 +39,41 @@ export function normalizeText(text: string): string {
 export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   if (!config.enabled) return false;
   const lower = content.toLowerCase().trim();
+
+  // 空内容
+  if (!content || lower.length === 0) return true;
+
+  // 太短且无实义内容（纯英文少于3个字母，或无意义的短文本）
+  if (lower.length <= 2 && !/[a-zA-Z]{3,}/.test(lower)) return true;
+
+  // 纯标点/符号
+  if (/^[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?\s]+$/.test(content)) return true;
+
   if (config.skipGreetings) {
-    const greetings = ['hi', 'hello', 'hey', '你好', '您好', '嗨'];
+    const greetings = ['hi', 'hello', 'hey', '你好', '您好', '嗨', '嗨你好', '你好呀', 'hiya'];
     if (greetings.some(g => lower === g || lower.startsWith(g + ' '))) return true;
   }
+
   if (config.skipCommands) {
     if (lower.startsWith('/') || lower.startsWith('!') || lower.startsWith('-')) return true;
   }
-  const confirms = ['ok', 'okay', '好', '好的', '收到', '了解', '明白', 'yes', 'no', '嗯', '哦', 'yep', 'sure', 'got it', 'gotcha', 'roger', 'copy that', 'tks', 'thanks', 'thx', '👍', '😂', '哈哈哈', '嘿嘿', '哈哈', '哦哦', '啊啊', '这样子', '这样啊', '好吧', '行吧', '算了', '没事', '没关系', '不好意思', '抱歉', '稍等', '等等', '等一下'];
+
+  // 确认词和常用噪音
+  const confirms = [
+    'ok', 'okay', '好', '好的', '收到', '了解', '明白', 'yes', 'no', '嗯', '哦', 'yep', 'sure',
+    'got it', 'gotcha', 'roger', 'copy that', 'tks', 'thanks', 'thx', '👍', '😂', '哈哈哈',
+    '嘿嘿', '哈哈', '哦哦', '啊啊', '这样子', '这样啊', '好吧', '行吧', '算了', '没事', '没关系',
+    '不好意思', '抱歉', '稍等', '等等', '等一下', '稍等一下', '让我想想', '我想想', '等会',
+    '一会儿', '算了算了', '随便', '都可以', '无所谓', '好的好的', '嗯嗯', '哦哦', '对对',
+    '没错', '是的', '确实是', '可能吧', '也许吧', '大概', '差不多', '应该', '好吧好吧'
+  ];
+
+  // 精确匹配
   if (confirms.includes(lower)) return true;
+
+  // 包含关系（处理"好的我知道了"这类）
+  if (confirms.some(c => lower.includes(c) && lower.length <= c.length + 5)) return true;
+
   return false;
 }
 

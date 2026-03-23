@@ -22,8 +22,9 @@ function normalizeText(text) {
 }
 
 function isNoise(text) {
-  const noise = ['你好', 'hi', 'hello', 'ok', '好的', '收到', '嗯', '是的'];
-  return noise.includes(text.toLowerCase()) || text.length < 3;
+  const noise = ['你好', 'hi', 'hello', 'ok', '好的', '收到', '嗯', '是的', 'ok', 'okay', 'yes', 'yep', 'sure', 'got it', 'gotcha', 'roger', 'copy that', 'tks', 'thanks', 'thx', '👍', '😂', '哈哈哈', '嘿嘿', '哈哈', '哦哦', '啊啊', '这样子', '这样啊', '好吧', '行吧', '算了', '没事', '没关系', '不好意思', '抱歉', '稍等', '等等', '等一下'];
+  const lower = text.toLowerCase().trim();
+  return noise.includes(lower) || noise.some(n => lower.includes(n)) || text.length < 3;
 }
 
 function isCoreKeyword(text, coreKeywords = ['记住', '重要', '别忘', 'never forget', '关键']) {
