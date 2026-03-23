@@ -213,6 +213,29 @@ export interface Memory {
 }
 
 // ============= Default Config =============
+// ============= 配置默认值常量（统一管理）=============
+export const DEFAULT_VALUES = {
+  // LLM
+  LLM_BATCH_WINDOW_MS: 200,
+  LLM_TIMEOUT_MS: 5000,
+  LLM_CACHE_TTL_MS: 5 * 60 * 1000,
+  LLM_CACHE_MAX_SIZE: 1000,
+  
+  // 阈值
+  THRESHOLD_LENGTH_FOR_CORE: 100,
+  THRESHOLD_LENGTH_FOR_EXTRACT: 200,
+  
+  // 压缩
+  COMPRESSION_MAX_LENGTH: 200,
+  
+  // 批量写入
+  BATCH_BUFFER_MS: 500,
+  BATCH_MAX_SIZE: 20,
+  
+  // 缓存
+  CACHE_MAX_SIZE: 1000,
+} as const;
+
 export const DEFAULT_CONFIG: Config = {
   autoCapture: true,
   autoRecall: true,

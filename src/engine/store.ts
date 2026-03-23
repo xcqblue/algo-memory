@@ -2,6 +2,7 @@
  * algo-memory v2.3.0 - Storage Engine
  */
 
+import { DEFAULT_VALUES } from '../types.js';
 import type { Config, Memory } from '../types.js';
 import {
   normalizeText,
@@ -41,7 +42,7 @@ function getBuffer(AgentId: string, config: Config): MemoryBuffer {
       memories: [],
       timer: null,
       lastFlush: Date.now(),
-      baseBufferMs: config.batchWrite?.bufferMs || 500,
+      baseBufferMs: config.batchWrite?.bufferMs || DEFAULT_VALUES.BATCH_BUFFER_MS,
       messageCount: 0
     });
   }
@@ -107,8 +108,8 @@ const llmSingleton: LlmQueueSingleton = {
 
 // LLM 结果缓存（带LRU优化）
 const llmCache = new Map<string, { result: any; ts: number; accessCount: number }>();
-const LLM_CACHE_TTL = 5 * 60 * 1000; // 5分钟
-const LLM_CACHE_MAX_SIZE = 1000;
+const LLM_CACHE_TTL = DEFAULT_VALUES.LLM_CACHE_TTL_MS; // 5分钟
+const LLM_CACHE_MAX_SIZE = DEFAULT_VALUES.LLM_CACHE_MAX_SIZE;
 
 function getCachedResult(key: string): any | null {
   const entry = llmCache.get(key);
@@ -185,7 +186,7 @@ async function processLlmQueue(): Promise<void> {
       let result: any;
       // 带超时的LLM调用（错误边界）
       const timeoutPromise = new Promise<never>((_, rej) =>
-        setTimeout(() => rej(new Error('LLM timeout')), 5000)
+        setTimeout(() => rej(new Error('LLM timeout')), DEFAULT_VALUES.LLM_TIMEOUT_MS)
       );
 
       switch (item.type) {
@@ -508,7 +509,7 @@ export async function store(
 
       const needLLMForCore = config.threshold.useLlmForCore &&
                              llmClient &&
-                             (!isCore && safe.length >= (config.threshold.lengthForCore || 50));
+                             (!isCore && safe.length >= (config.threshold.lengthForCore || DEFAULT_VALUES.THRESHOLD_LENGTH_FOR_CORE));
       if (needLLMForCore) {
         const r = await addToLlmQueue({ type: 'isCore', content: safe });
         if (r) {
@@ -519,7 +520,7 @@ export async function store(
 
       const needLLMForExtract = config.threshold.useLlmForExtract &&
                                  llmClient &&
-                                 safe.length >= (config.threshold.lengthForExtract || 150);
+                                 safe.length >= (config.threshold.lengthForExtract || DEFAULT_VALUES.THRESHOLD_LENGTH_FOR_EXTRACT);
       if (needLLMForExtract) {
         const r = await addToLlmQueue({ type: 'extractKeywords', content: safe });
         if (r) keywords = r;
@@ -529,7 +530,7 @@ export async function store(
       let storedContent = safe;
       let wasCompressed = false;
       if (config.compression?.enabled) {
-        const maxLen = config.compression.maxLength || 200;
+        const maxLen = config.compression.maxLength || DEFAULT_VALUES.BATCH_MAX_SIZE;
         const semanticEnhance = config.compression.semanticEnhance || false;
         storedContent = compressContent(safe, maxLen, semanticEnhance);
         wasCompressed = storedContent !== safe;
@@ -587,7 +588,7 @@ export async function store(
         buffer.memories.push(memory);
 
         // 如果缓冲区满了，立即写入
-        if (buffer.memories.length >= (config.batchWrite.maxBatchSize || 20)) {
+        if (buffer.memories.length >= (config.batchWrite.maxBatchSize || DEFAULT_VALUES.BATCH_MAX_SIZE)) {
           flushMemoryBuffer(db, AgentId, config, log);
         } else {
           // 否则计划延迟写入
