@@ -115,6 +115,73 @@ general    ▸ 无层级标签
 
 ---
 
+## 会话续接（Session Continuity）
+
+> 解决"晚上对话后，第二天早上继续时上下文丢失"的问题
+
+### 问题背景
+
+OpenClaw 默认每天凌晨 4 点会重置会话（可配置），这意味着：
+- 18:00-24:00 的对话，到第二天会变成一个新 session
+- 早上继续聊天时，AI 不知道昨晚聊了什么
+
+### 解决方案
+
+algo-memory 会话续接功能会在每次对话结束时自动保存会话快照，当检测到会话切换时，自动注入上会话的上下文。
+
+```
+18:00-24:00  → Session A 对话
+    ↓          → 每次 agent_end 保存会话快照
+24:00 最后一条 → 保存快照 A
+    ↓
+04:00        → Session A 变成 stale
+    ↓
+07:00 发"继续"
+              → 检测到会话切换
+              → 注入快照 A 的上下文
+              → AI 知道昨晚的对话内容 ✅
+```
+
+### 工作原理
+
+| 钩子 | 时机 | 作用 |
+|------|------|------|
+| `agent_end` | 每次对话完成后 | 保存会话快照到数据库 |
+| `before_agent_start` | 新对话开始前 | 检测会话切换，注入上会话上下文 |
+| `session_end` / `session_start` | OpenClaw 内部钩子 | 辅助检测会话切换 |
+
+### 持久化
+
+- `lastSessionKey` 会持久化到数据库，防止 Gateway 重启后丢失
+- 新 Session 启动时会从数据库恢复会话状态
+
+### 配置选项
+
+```json
+{
+  "sessionContinuity": {
+    "enabled": true,
+    "maxInjectTokens": 800,
+    "maxMessagesForSummary": 30
+  }
+}
+```
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | 是否启用会话续接 |
+| `maxInjectTokens` | `800` | 注入上下文的最大 token 数 |
+| `maxMessagesForSummary` | `30` | 生成摘要时最多使用多少条消息 |
+
+### 数据库表
+
+| 表名 | 用途 |
+|------|------|
+| `session_snapshots` | 存储会话快照（摘要 + 上下文） |
+| `session_metadata` | 存储会话状态（lastSessionKey 等） |
+
+---
+
 ## 安装
 
 ```bash

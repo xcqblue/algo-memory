@@ -96,6 +96,18 @@
 | `sessionSummary.dir` | `"memory"` | 摘要目录（相对于 stateDir） |
 | `sessionSummary.maxItems` | `50` | 每次写入的最大条数 |
 
+### 会话续接
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `sessionContinuity.enabled` | `true` | 开启会话续接功能 |
+| `sessionContinuity.maxInjectTokens` | `800` | 注入上会话上下文的最大 token 数 |
+| `sessionContinuity.maxMessagesForSummary` | `30` | 生成摘要时最多使用的消息条数 |
+
+> **会话续接功能**：解决"晚上对话后，第二天早上继续时上下文丢失"的问题。
+> 当检测到会话切换（新 session）时，自动从数据库读取上会话快照并注入上下文。
+> `lastSessionKey` 会持久化到数据库，Gateway 重启后不会丢失。
+
 ### 记忆修正
 
 | 配置 | 默认 | 说明 |

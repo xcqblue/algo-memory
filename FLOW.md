@@ -381,6 +381,161 @@ Agent 调用工具
 
 ---
 
+## 会话续接流程 (Session Continuity)
+
+### 完整时序图
+
+```
+用户A 18:00 ───────────────────────────────────────────────▶
+                    │
+                    │ Session A (活跃)
+                    │ 每次消息处理后
+                    │ agent_end 触发
+                    │ saveSessionSnapshot()
+                    ▼
+用户A 24:00 ───────────────────────────────────────────────▶
+                    │
+                    │ 最后一条消息
+                    │ agent_end 触发
+                    │ saveSessionSnapshot(A)
+                    │ lastSessionKey = A
+                    │ session_metadata 更新
+                    ▼
+04:00              │ Session A 变为 stale (每日重置)
+                    ▼
+用户A 07:00 ───────────────────────────────────────────────▶
+                    │
+                    │ 发"继续"
+                    │ 检测 Session A 是 stale
+                    │ 创建新 Session B
+                    │
+                    │ before_agent_start
+                    │ detectSessionChange()
+                    │ 发现 lastSessionKey(A) ≠ current(B)
+                    │ 从 DB 读取 snapshot A
+                    │ buildContinuityContext()
+                    │ prependSystemContext()
+                    ▼
+                    │
+                    │ AI 看到上会话摘要
+                    │ 知道昨晚在讨论订机票
+                    ▼
+✅ 对话续接成功
+```
+
+### Session 切换检测
+
+```
+用户发消息
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ OpenClaw 检测会话状态                            │
+│                                                   │
+│ - Session 是 fresh？                             │
+│   └── Yes → 继续同一会话                        │
+│   └── No  → 创建新 Session（会话切换）          │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ before_agent_start 钩子                          │
+│                                                   │
+│ detectSessionChangeAndGetSnapshot()               │
+│    │                                            │
+│    ├──▶ lastSessionKey[agentId] 存在？         │
+│    │       │                                    │
+│    │    Yes │ No                               │
+│    │       │                                    │
+│    │    比较 sessionKey 是否变化                 │
+│    │       │                                    │
+│    │    变了 → 从 DB 读取上会话 snapshot        │
+│    │    没变 → 返回 null（同一会话）            │
+│    │                                    │
+│    └──▶ lastSessionKey[agentId] 不存在？       │
+│            │                                    │
+│         首次会话 → 返回 null                    │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 构建续接上下文                                    │
+│                                                   │
+│ buildContinuityContext(snapshot)                  │
+│    │                                            │
+│    ├──▶ 生成摘要部分（最近 10 行）              │
+│    │                                            │
+│    └──▶ 生成详情部分（最近 20 行）             │
+│                                                   │
+│ 格式：                                           │
+│ 【上会话摘要】                                   │
+│ 用户: ...                                        │
+│ 助手: ...                                        │
+│                                                   │
+│ 【上会话详情】                                   │
+│ 用户: ...                                        │
+│ 助手: ...                                        │
+│                                                   │
+│ Token 上限: maxInjectTokens (默认 800)           │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 注入上下文                                        │
+│                                                   │
+│ api.prependSystemContext(context)                 │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+✅ 新会话包含上会话上下文
+```
+
+### Gateway 重启恢复
+
+```
+Gateway 重启
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ init() 执行                                       │
+│                                                   │
+│ for each agentId in session_metadata:             │
+│     restoreLastSessionKey(agentId)                │
+│     从 DB 读取 lastSessionKey                     │
+│     恢复到内存 Map                              │
+└─────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│ 后续钩子正常执行                                  │
+│                                                   │
+│ lastSessionKey 已恢复                             │
+│ 会话续接逻辑正常工作                             │
+└─────────────────────────────────────────────────┘
+```
+
+### 数据库表结构
+
+```
+session_snapshots
+├── id                    (PRIMARY KEY)
+├── agent_id              (索引)
+├── session_key           (会话标识)
+├── ended_at              (结束时间戳)
+├── summary               (会话摘要)
+├── context_snapshot      (上下文快照)
+├── message_count         (消息数量)
+├── total_tokens          (token 估算)
+└── created_at            (创建时间)
+
+session_metadata
+├── agent_id              (PRIMARY KEY)
+├── last_session_key       (最近的会话标识)
+└── updated_at            (更新时间)
+```
+
+---
+
 ## 定时清理
 
 ```
