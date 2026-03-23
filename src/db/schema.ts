@@ -47,6 +47,15 @@ export function initSchema(db: AnyDatabase, log: any): void {
     db.prepare('CREATE INDEX IF NOT EXISTS idx_snapshots_agent_ended ON session_snapshots(agent_id, ended_at DESC)').run();
   } catch (_) { /* index creation is non-fatal */ }
 
+  // Create session_metadata table for persisting session state across restarts
+  required(`
+    CREATE TABLE IF NOT EXISTS session_metadata (
+      agent_id TEXT PRIMARY KEY,
+      last_session_key TEXT,
+      updated_at INTEGER
+    )
+  `, 'session_metadata 表');
+
   // Migration: drop deprecated urgency column (removed in v2.3.0)
   try { db.prepare('ALTER TABLE memories DROP COLUMN IF EXISTS urgency').run(); } catch (_) { /* ignore */ }
 

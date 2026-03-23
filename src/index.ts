@@ -175,6 +175,19 @@ class MemoryPlugin {
     this.log.info(`[algo-memory] 每轮最多写入: ${this.config.capturePerTurn} 条`);
 
     this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
+
+    // 恢复会话状态（防止 Gateway 重启后丢失 lastSessionKey）
+    if (this.config.sessionContinuity?.enabled) {
+      try {
+        const rows = queryAll(this._db(), `SELECT agent_id FROM session_metadata`) as any[];
+        for (const row of rows) {
+          this.restoreLastSessionKey(row.agent_id);
+        }
+        this.log.info(`[algo-memory] 已恢复 ${rows.length} 个 Agent 的会话状态`);
+      } catch (err) {
+        this.log.error('[algo-memory] 恢复会话状态失败:', err);
+      }
+    }
   }
 
   async store(AgentId: string, messages: any[]): Promise<void> {
@@ -766,12 +779,38 @@ confidence 是 0-1 的置信度。
         [id, AgentId, sessionKey, Date.now(), summary, contextSnapshot, messageCount, totalTokens, Date.now()]
       );
 
-      // 重要：同时更新 lastSessionKey，这样下次 detectSessionChange 时能正确识别
+      // 持久化 lastSessionKey 到数据库（防止 Gateway 重启后丢失）
+      run(this._db(),
+        `INSERT OR REPLACE INTO session_metadata (agent_id, last_session_key, updated_at)
+         VALUES (?, ?, ?)`,
+        [AgentId, sessionKey, Date.now()]
+      );
+
+      // 同时更新内存中的 lastSessionKey
       this.lastSessionKey.set(AgentId, sessionKey);
 
       this.log.info(`[algo-memory] 会话快照已保存: ${sessionKey}, ${messageCount} 条消息, ${totalTokens} tokens`);
     } catch (err) {
       this.log.error('[algo-memory] 保存会话快照失败:', err);
+    }
+  }
+
+  /**
+   * 从数据库恢复 lastSessionKey（Gateway 重启后调用）
+   */
+  restoreLastSessionKey(AgentId: string): void {
+    if (!this.db) return;
+    try {
+      const row = queryOne(this._db(),
+        `SELECT last_session_key FROM session_metadata WHERE agent_id = ?`,
+        [AgentId]
+      ) as any;
+      if (row?.last_session_key) {
+        this.lastSessionKey.set(AgentId, row.last_session_key);
+        this.log.info(`[algo-memory] 恢复 lastSessionKey: ${row.last_session_key}`);
+      }
+    } catch (err) {
+      this.log.error('[algo-memory] 恢复 lastSessionKey 失败:', err);
     }
   }
 
