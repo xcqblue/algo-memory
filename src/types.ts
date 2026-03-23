@@ -28,6 +28,7 @@ export interface Config {
   llm: LLMConfig;
   threshold: ThresholdConfig;
   sessionSummary: SessionSummaryConfig;
+  sessionContinuity: SessionContinuityConfig;
   feedback: FeedbackConfig;
   mcp: MCPConfig;
 }
@@ -48,6 +49,27 @@ export interface MCPConfig {
   transport: 'stdio' | 'http';
   /** HTTP 模式下监听端口（仅 transport=http 时有效） */
   port: number;
+}
+
+export interface SessionContinuityConfig {
+  /** 是否启用会话续接功能 */
+  enabled: boolean;
+  /** 注入上下文的最大 tokens 上限 */
+  maxInjectTokens: number;
+  /** 每次会话最多保存的 message 数量（用于生成摘要） */
+  maxMessagesForSummary: number;
+}
+
+export interface SessionSnapshot {
+  id: string;
+  agent_id: string;
+  session_key: string;
+  ended_at: number;
+  summary: string;
+  context_snapshot: string;
+  message_count: number;
+  total_tokens: number;
+  created_at: number;
 }
 
 export interface NoiseFilterConfig {
@@ -198,4 +220,5 @@ export const DEFAULT_CONFIG: Config = {
   sessionSummary: { enabled: true, dir: 'memory', maxItems: 50 },
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },
   mcp: { enabled: false, transport: 'stdio', port: 8181 },
+  sessionContinuity: { enabled: true, maxInjectTokens: 800, maxMessagesForSummary: 30 },
 };

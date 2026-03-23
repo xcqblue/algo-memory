@@ -26,6 +26,27 @@ export function initSchema(db: AnyDatabase, log: any): void {
     )
   `, 'memories 表');
 
+  // Create session_snapshots table for cross-session continuity
+  required(`
+    CREATE TABLE IF NOT EXISTS session_snapshots (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      session_key TEXT NOT NULL,
+      ended_at INTEGER NOT NULL,
+      summary TEXT,
+      context_snapshot TEXT,
+      message_count INTEGER DEFAULT 0,
+      total_tokens INTEGER DEFAULT 0,
+      created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+    )
+  `, 'session_snapshots 表');
+
+  // Index for session_snapshots
+  try {
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_snapshots_agent ON session_snapshots(agent_id)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_snapshots_agent_ended ON session_snapshots(agent_id, ended_at DESC)').run();
+  } catch (_) { /* index creation is non-fatal */ }
+
   // Migration: drop deprecated urgency column (removed in v2.3.0)
   try { db.prepare('ALTER TABLE memories DROP COLUMN IF EXISTS urgency').run(); } catch (_) { /* ignore */ }
 

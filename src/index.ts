@@ -679,6 +679,191 @@ confidence 是 0-1 的置信度。
     return { success: true, message: `Agent ${AgentId} 的会话去重状态已清除` };
   }
 
+  // ============= 会话续接功能 =============
+  /** 上一次会话的 sessionKey（用于检测会话切换） */
+  private lastSessionKey: Map<string, string> = new Map();
+
+  /**
+   * 从消息列表生成会话摘要
+   * 提取关键上下文用于跨会话续接
+   */
+  generateSessionSummary(messages: any[], maxMessages: number = 30): string {
+    if (!messages || messages.length === 0) return '';
+
+    // 取最近 N 条消息
+    const recentMessages = messages.slice(-maxMessages);
+    const lines: string[] = [];
+
+    for (const msg of recentMessages) {
+      if (msg.role === 'user' && typeof msg.content === 'string') {
+        // 截断过长内容
+        const content = msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content;
+        lines.push(`用户: ${content}`);
+      } else if (msg.role === 'assistant' && msg.content && !msg.isError) {
+        const content = typeof msg.content === 'string'
+          ? (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content)
+          : '[助手回复]';
+        lines.push(`助手: ${content}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * 从消息列表提取上下文快照（去重压缩版本）
+   */
+  extractContextSnapshot(messages: any[], maxMessages: number = 30): string {
+    if (!messages || messages.length === 0) return '';
+
+    const recentMessages = messages.slice(-maxMessages);
+    const seen = new Set<string>();
+    const lines: string[] = [];
+
+    for (const msg of recentMessages) {
+      if (msg.role === 'user' && typeof msg.content === 'string') {
+        const normalized = normalizeForStorage(msg.content);
+        if (normalized.length < 3) continue;
+        const key = normalized.substring(0, 50);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const content = normalized.length > 300 ? normalized.substring(0, 300) + '...' : normalized;
+        lines.push(`用户: ${content}`);
+      } else if (msg.role === 'assistant' && msg.content && !msg.isError) {
+        const content = typeof msg.content === 'string'
+          ? normalizeForStorage(msg.content)
+          : '';
+        if (!content || content.length < 3) continue;
+        const key = 'a:' + content.substring(0, 50);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const truncated = content.length > 300 ? content.substring(0, 300) + '...' : content;
+        lines.push(`助手: ${truncated}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * 保存会话快照到数据库
+   */
+  saveSessionSnapshot(AgentId: string, sessionKey: string, messages: any[]): void {
+    if (!this.db || !this.config.sessionContinuity.enabled) return;
+
+    try {
+      const maxMessages = this.config.sessionContinuity.maxMessagesForSummary || 30;
+      const summary = this.generateSessionSummary(messages, maxMessages);
+      const contextSnapshot = this.extractContextSnapshot(messages, maxMessages);
+      const messageCount = messages.length;
+      const totalTokens = estimateTokens(JSON.stringify(messages));
+
+      // 写入数据库
+      const id = 'snap_' + generateId();
+      run(this._db(),
+        `INSERT INTO session_snapshots (id, agent_id, session_key, ended_at, summary, context_snapshot, message_count, total_tokens, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, AgentId, sessionKey, Date.now(), summary, contextSnapshot, messageCount, totalTokens, Date.now()]
+      );
+
+      // 重要：同时更新 lastSessionKey，这样下次 detectSessionChange 时能正确识别
+      this.lastSessionKey.set(AgentId, sessionKey);
+
+      this.log.info(`[algo-memory] 会话快照已保存: ${sessionKey}, ${messageCount} 条消息, ${totalTokens} tokens`);
+    } catch (err) {
+      this.log.error('[algo-memory] 保存会话快照失败:', err);
+    }
+  }
+
+  /**
+   * 获取指定 Agent 的最新会话快照
+   */
+  getLastSessionSnapshot(AgentId: string): any {
+    if (!this.db || !this.config.sessionContinuity.enabled) return null;
+
+    try {
+      const row = queryOne(this._db(),
+        `SELECT * FROM session_snapshots WHERE agent_id = ? ORDER BY ended_at DESC LIMIT 1`,
+        [AgentId]
+      );
+      return row || null;
+    } catch (err) {
+      this.log.error('[algo-memory] 获取会话快照失败:', err);
+      return null;
+    }
+  }
+
+  /**
+   * 检测并处理会话切换
+   * 如果 sessionKey 变了，返回上次会话的快照用于续接
+   */
+  detectSessionChangeAndGetSnapshot(AgentId: string, currentSessionKey: string): any {
+    if (!this.config.sessionContinuity.enabled) return null;
+
+    const lastKey = this.lastSessionKey.get(AgentId);
+
+    // 如果是同一个会话，不需要续接
+    if (lastKey === currentSessionKey) {
+      return null;
+    }
+
+    // 更新记录的 sessionKey
+    this.lastSessionKey.set(AgentId, currentSessionKey);
+
+    // 如果没有上次的 sessionKey，说明是首次，不需要续接
+    if (!lastKey) {
+      return null;
+    }
+
+    // 查找上一个会话的快照
+    const snapshot = this.getLastSessionSnapshot(AgentId);
+    if (snapshot) {
+      this.log.info(`[algo-memory] 检测到会话切换: ${lastKey} -> ${currentSessionKey}`);
+    }
+
+    return snapshot;
+  }
+
+  /**
+   * 构建会话续接的上下文文本
+   */
+  buildSessionContinuityContext(snapshot: any): { text: string; tokens: number } {
+    if (!snapshot) return { text: '', tokens: 0 };
+
+    const maxTokens = this.config.sessionContinuity.maxInjectTokens || 800;
+    const lines: string[] = [];
+
+    // 添加摘要部分
+    if (snapshot.summary) {
+      lines.push('【上会话摘要】');
+      const summaryLines = snapshot.summary.split('\n').slice(-10); // 最近 10 行
+      for (const line of summaryLines) {
+        const lineTokens = estimateTokens(line) + 1;
+        if (estimateTokens(lines.join('\n') + '\n' + line) <= maxTokens) {
+          lines.push(line);
+        }
+      }
+    }
+
+    // 添加上下文快照（如果还有空间）
+    if (snapshot.context_snapshot && lines.join('\n').length < maxTokens * 2) {
+      lines.push('');
+      lines.push('【上会话详情】');
+      const contextLines = snapshot.context_snapshot.split('\n').slice(-20); // 最近 20 行
+      for (const line of contextLines) {
+        const currentTokens = estimateTokens(lines.join('\n') + '\n' + line);
+        if (currentTokens <= maxTokens) {
+          lines.push(line);
+        } else {
+          break;
+        }
+      }
+    }
+
+    const text = lines.join('\n');
+    return { text, tokens: estimateTokens(text) };
+  }
+
   /** 将会话期间新增的记忆写入 Markdown 摘要文件（跨 session 延续） */
   writeSessionSummary(): void {
     if (!this.config.sessionSummary.enabled) return;
@@ -782,6 +967,45 @@ export default {
       });
     }
 
+    // === 会话续接：检测会话切换并注入上会话上下文 ===
+    if (config.sessionContinuity?.enabled) {
+      // 在 agent 开始前检测会话切换
+      api.on('before_agent_start', async (event: any) => {
+        try {
+          const agentId = event?.agentId || 'default';
+          const sessionKey = event?.sessionKey || event?.context?.sessionKey || 'unknown';
+
+          // 检测会话是否切换，获取上会话快照
+          const snapshot = plugin.detectSessionChangeAndGetSnapshot(agentId, sessionKey);
+
+          if (snapshot) {
+            const { text, tokens } = plugin.buildSessionContinuityContext(snapshot);
+            if (text && tokens > 0) {
+              log.info(`[algo-memory] 注入上会话上下文: ${tokens} tokens`);
+              api.prependSystemContext('\n\n' + text + '\n');
+            }
+          }
+        } catch (err) {
+          log.error('[algo-memory] before_agent_start 会话续接钩子错误:', err);
+        }
+      });
+
+      // 在 agent 结束时保存会话快照
+      api.on('agent_end', async (event: any) => {
+        try {
+          const agentId = event?.agentId || 'default';
+          const sessionKey = event?.sessionKey || event?.context?.sessionKey || 'unknown';
+          const messages = event?.messages || [];
+
+          if (messages.length > 0) {
+            plugin.saveSessionSnapshot(agentId, sessionKey, messages);
+          }
+        } catch (err) {
+          log.error('[algo-memory] agent_end 会话快照保存钩子错误:', err);
+        }
+      });
+    }
+
     if (config.autoRecall) {
       api.on('before_prompt_build', async (event: any) => {
         try {
@@ -819,7 +1043,7 @@ export default {
         }
       }, { priority: 10 });
 
-
+    }
 
     // === Session Summary ===
     api.on('session_end', async () => {
