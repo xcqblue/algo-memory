@@ -31,6 +31,10 @@ export interface Config {
   sessionContinuity: SessionContinuityConfig;
   feedback: FeedbackConfig;
   mcp: MCPConfig;
+  /** 批量写入配置 */
+  batchWrite: BatchWriteConfig;
+  /** 记忆压缩配置 */
+  compression: CompressionConfig;
 }
 
 export interface FeedbackConfig {
@@ -58,6 +62,24 @@ export interface SessionContinuityConfig {
   maxInjectTokens: number;
   /** 每次会话最多保存的 message 数量（用于生成摘要） */
   maxMessagesForSummary: number;
+}
+
+export interface BatchWriteConfig {
+  /** 是否启用批量写入 */
+  enabled: boolean;
+  /** 批量写入的缓冲时间（毫秒），多少时间内累积的消息一起写入 */
+  bufferMs: number;
+  /** 单次批量写入的最大条数 */
+  maxBatchSize: number;
+}
+
+export interface CompressionConfig {
+  /** 是否启用记忆压缩 */
+  enabled: boolean;
+  /** 压缩后内容的最大字符数 */
+  maxLength: number;
+  /** 是否提取关键词作为摘要补充 */
+  extractKeywords: boolean;
 }
 
 export interface SessionSnapshot {
@@ -221,4 +243,6 @@ export const DEFAULT_CONFIG: Config = {
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },
   mcp: { enabled: false, transport: 'stdio', port: 8181 },
   sessionContinuity: { enabled: true, maxInjectTokens: 800, maxMessagesForSummary: 30 },
+  batchWrite: { enabled: true, bufferMs: 500, maxBatchSize: 20 },
+  compression: { enabled: true, maxLength: 200, extractKeywords: true },
 };

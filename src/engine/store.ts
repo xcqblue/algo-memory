@@ -12,12 +12,98 @@ import {
   getTier,
   generateId,
   hashContent,
+  compressContent,
+  extractContentSummary,
   MAX_MESSAGE_LENGTH,
   MAX_SIMILAR_CHECK
 } from '../utils.js';
 import { queryAll, queryOne, run, runOrThrow } from '../db/queries.js';
 import { LLMClient } from './llm.js';
 import type { DbLike } from '../db/queries.js';
+
+// ============= Batch Write Buffer =============
+interface MemoryBuffer {
+  memories: Memory[];
+  timer: NodeJS.Timeout | null;
+}
+
+const memoryBuffers: Map<string, MemoryBuffer> = new Map();
+
+function getBuffer(AgentId: string, config: Config): MemoryBuffer {
+  if (!memoryBuffers.has(AgentId)) {
+    memoryBuffers.set(AgentId, { memories: [], timer: null });
+  }
+  return memoryBuffers.get(AgentId)!;
+}
+
+/**
+ * 将记忆批量写入数据库
+ */
+function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any): number {
+  const buffer = memoryBuffers.get(AgentId);
+  if (!buffer || buffer.memories.length === 0) return 0;
+
+  // 清除定时器
+  if (buffer.timer) {
+    clearTimeout(buffer.timer);
+    buffer.timer = null;
+  }
+
+  const memoriesToWrite = buffer.memories;
+  buffer.memories = [];
+
+  if (memoriesToWrite.length === 0) return 0;
+
+  let inserted = 0;
+  try {
+    // 批量插入
+    const placeholders = memoriesToWrite.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+    const params = memoriesToWrite.flatMap(m => [
+      m.id, m.agent_id, m.scope, m.content, m.type, m.tier, m.layer,
+      m.keywords, m.importance, m.access_count, m.cited_count,
+      m.created_at, m.last_accessed, m.content_hash, m.metadata
+    ]);
+
+    run(db,
+      `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
+       VALUES ${placeholders}`,
+      params
+    );
+
+    inserted = memoriesToWrite.length;
+    log.info(`[algo-memory] 批量写入完成: ${inserted} 条记忆`);
+  } catch (err) {
+    log.error('[algo-memory] 批量写入失败:', err);
+  }
+
+  return inserted;
+}
+
+/**
+ * 计划批量写入（延迟执行）
+ */
+function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: any): void {
+  const buffer = getBuffer(AgentId, config);
+
+  // 如果已经有定时器在运行，不重复创建
+  if (buffer.timer) return;
+
+  // 计划在 bufferMs 后执行批量写入
+  buffer.timer = setTimeout(() => {
+    flushMemoryBuffer(db, AgentId, config, log);
+  }, config.batchWrite?.bufferMs || 500);
+}
+
+/**
+ * 强制立即写入所有待处理的记忆
+ */
+export function flushAllBuffers(db: DbLike, config: Config, log: any): number {
+  let total = 0;
+  for (const AgentId of memoryBuffers.keys()) {
+    total += flushMemoryBuffer(db, AgentId, config, log);
+  }
+  return total;
+}
 
 /**
  * Score a message by how many core keywords it contains.
@@ -114,6 +200,8 @@ export async function store(
   try {
     // Collect tier-update candidates to batch them (avoids N+1 queries)
     const tierCandidates: string[] = [];
+    // 收集需要批量写入的记忆
+    const memoriesToBatch: Memory[] = [];
 
     for (const { msg } of scoredMessages) {
       const content = normalizeText(msg.content);
@@ -190,23 +278,45 @@ export async function store(
         keywords = await llmClient.extractKeywordsFromLLM(safe);
       }
 
+      // 启用压缩时，对内容进行压缩
+      let storedContent = safe;
+      if (config.compression?.enabled) {
+        const maxLen = config.compression.maxLength || 200;
+        storedContent = compressContent(safe, maxLen);
+
+        // 如果启用了关键词提取，也添加到 keywords
+        if (config.compression.extractKeywords && storedContent.length >= maxLen) {
+          const extraKeywords = extractContentSummary(safe, 3);
+          if (extraKeywords) {
+            keywords = keywords ? `${keywords},${extraKeywords}` : extraKeywords;
+          }
+        }
+      }
+
       const scope = config.scopes.enabled
         ? `${config.scopes.defaultScope}:${AgentId}`
         : 'global';
       const tier = getTier(importance, 1, 0, config.tier);
 
+      // 生成元数据，包含原始内容摘要（用于压缩后的完整信息恢复）
+      const originalSummary = safe.length > storedContent.length
+        ? `[原文摘要]${safe.substring(0, 200)}`
+        : '';
+
       const metadata = JSON.stringify({
         memory_category: isCore ? 'fact' : 'other',
         confidence: importance,
         source_session: AgentId,
-        l0_abstract: safe.substring(0, 100)
+        l0_abstract: originalSummary || storedContent.substring(0, 100),
+        compressed: storedContent !== safe,
+        original_length: safe.length
       });
 
       const memory: Memory = {
         id: generateId(),
         agent_id: AgentId,
         scope,
-        content: safe,
+        content: storedContent,
         type: 'other',
         tier,
         layer: isCore ? 'core' : 'general',
@@ -221,11 +331,26 @@ export async function store(
         _score: 0
       };
 
-      runOrThrow(db,
-        `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
-      );
+      // 判断是否使用批量写入
+      if (config.batchWrite?.enabled) {
+        const buffer = getBuffer(AgentId, config);
+        buffer.memories.push(memory);
+
+        // 如果缓冲区满了，立即写入
+        if (buffer.memories.length >= (config.batchWrite.maxBatchSize || 20)) {
+          flushMemoryBuffer(db, AgentId, config, log);
+        } else {
+          // 否则计划延迟写入
+          scheduleBatchWrite(db, AgentId, config, log);
+        }
+      } else {
+        // 直接写入（原有逻辑）
+        runOrThrow(db,
+          `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
+        );
+      }
 
       captured++;
     }
@@ -261,7 +386,8 @@ export async function store(
     if (tierCandidates.length > 0) clearRecallCache(AgentId);
     const storeDuration = Date.now() - storeStartTime;
     if (captured > 0) {
-      log.info(`[algo-memory] 存储完成, 新增: ${captured}, agentId: ${AgentId}, 耗时: ${storeDuration}ms`);
+      const writeMode = config.batchWrite?.enabled ? '批量' : '直接';
+      log.info(`[algo-memory] 存储完成, 新增: ${captured}, agentId: ${AgentId}, 耗时: ${storeDuration}ms, 模式: ${writeMode}`);
     }
   } catch (err) {
     log.error('[algo-memory] store 操作失败:', err);

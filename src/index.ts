@@ -73,6 +73,8 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     feedback: { ...DEFAULT_CONFIG.feedback, ...userConfig.feedback },
     mcp: { ...DEFAULT_CONFIG.mcp, ...userConfig.mcp },
     sessionContinuity: { ...DEFAULT_CONFIG.sessionContinuity, ...userConfig.sessionContinuity },
+    batchWrite: { ...DEFAULT_CONFIG.batchWrite, ...userConfig.batchWrite },
+    compression: { ...DEFAULT_CONFIG.compression, ...userConfig.compression },
   };
 }
 

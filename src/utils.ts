@@ -48,8 +48,84 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   }
   const confirms = ['ok', 'okay', '好', '好的', '收到', '了解', '明白', 'yes', 'no', '嗯', '哦'];
   if (confirms.includes(lower)) return true;
-  if (!lower || /^[.。!?！?\s]+$/.test(lower)) return true;
   return false;
+}
+
+// ============= Content Compression =============
+/**
+ * 压缩记忆内容，提取关键信息
+ * 策略：
+ * 1. 去除冗余修饰词
+ * 2. 提取核心句子
+ * 3. 保留关键信息（数字、时间、专有名词）
+ */
+export function compressContent(content: string, maxLength: number = 200): string {
+  if (!content || content.length <= maxLength) return content;
+
+  let compressed = content;
+
+  // 去除多余的空白字符
+  compressed = compressed.replace(/\s+/g, ' ').trim();
+
+  // 如果还是太长，进行智能截断
+  if (compressed.length > maxLength) {
+    // 尝试在句号、逗号处截断
+    const sentences = compressed.split(/[。！？；\n]/);
+    const result: string[] = [];
+    let currentLength = 0;
+
+    for (const sentence of sentences) {
+      const trimmed = sentence.trim();
+      if (!trimmed) continue;
+
+      if (currentLength + trimmed.length + 1 <= maxLength) {
+        result.push(trimmed);
+        currentLength += trimmed.length + 1;
+      } else if (result.length === 0) {
+        // 第一句话就超长，直接截断
+        result.push(trimmed.substring(0, maxLength - 3) + '...');
+        break;
+      } else {
+        break;
+      }
+    }
+
+    compressed = result.join('。');
+    if (compressed.length > maxLength) {
+      compressed = compressed.substring(0, maxLength - 3) + '...';
+    }
+  }
+
+  return compressed;
+}
+
+/**
+ * 提取内容的关键词摘要
+ */
+export function extractContentSummary(content: string, maxKeywords: number = 5): string {
+  // 提取中文词
+  const chineseWords = content.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  // 提取英文词
+  const englishWords = content.match(/[a-zA-Z]{3,}/g) || [];
+  // 提取数字
+  const numbers = content.match(/\d+/g) || [];
+
+  // 合并并去重
+  const allWords = [...new Set([...chineseWords, ...englishWords, ...numbers.map(n => '#' + n)])];
+
+  // 按长度排序，优先保留有意义的词
+  const significant = allWords
+    .filter(w => w.length >= 2)
+    .sort((a, b) => {
+      // 数字优先
+      if (a.startsWith('#') && !b.startsWith('#')) return -1;
+      if (!a.startsWith('#') && b.startsWith('#')) return 1;
+      // 长度优先
+      return b.length - a.length;
+    })
+    .slice(0, maxKeywords);
+
+  return significant.join(', ');
 }
 
 // ============= Keyword Extraction =============
