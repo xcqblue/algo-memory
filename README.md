@@ -2,7 +2,7 @@
 
 > OpenClaw 记忆管理插件 — 纯算法召回，零 API 费用，零外部依赖
 
-**版本 2.3.0** · [更新日志](#更新日志) · [配置参考](CONFIG.md)
+**版本 2.4.0** · [更新日志](#更新日志) · [配置参考](CONFIG.md)
 
 ---
 
@@ -203,6 +203,7 @@ openclaw gateway restart
 
 | 版本 | 内容 |
 |------|------|
+| **2.4.0** | 会话续接功能：解决"晚上对话后第二天早上续不上"的问题，新增 session_snapshots / session_metadata 表，持久化 lastSessionKey 防止 Gateway 重启丢失 |
 | **2.3.0** | v2.3.0 正式版：语言感知召回 / MMR早停修正 / cited_count扩大更新范围 / urgency字段移除 / 软删除简化 / MCP工具补全 / 批量更新SQL注入修复 / updateMemory完整判断链 / LLM默认关闭 / anthropic API修正 / 文档全面修正 |
 | **2.2.5** | 统一检索引擎（retrieve.ts），recall/search 共用同一管道；recall 保留 agent 权重 1.5×；Bug 修复 |
 | **2.2.4** | 存储优先级打分 / Query Expansion / 动态 Token 上限 / BM25F / 软删除 |
