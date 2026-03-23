@@ -40,6 +40,102 @@ function getBuffer(AgentId: string, config: Config): MemoryBuffer {
   return memoryBuffers.get(AgentId)!;
 }
 
+// ============= LLM 异步队列 =============
+interface LlmQueueItem {
+  type: 'isCore' | 'extractKeywords' | 'isDuplicate';
+  content: string;
+  resolve: (result: any) => void;
+  reject: (err: any) => void;
+  addedAt: number;
+}
+
+interface LlmRequest {
+  type: 'isCore' | 'extractKeywords' | 'isDuplicate';
+  content: string;
+}
+
+let llmQueue: LlmQueueItem[] = [];
+let llmProcessing = false;
+let llmProcessTimer: NodeJS.Timeout | null = null;
+let llmBatchWindowMs = 200;
+let llmClientRef: LLMClient | null = null;
+
+function initLlmQueue(batchWindowMs: number, llmClient: LLMClient | null) {
+  llmBatchWindowMs = batchWindowMs;
+  llmClientRef = llmClient;
+  llmQueue = [];
+  llmProcessing = false;
+}
+
+function addToLlmQueue(item: LlmRequest): Promise<any> {
+  return new Promise((resolve, reject) => {
+    // 缓存key
+    const cacheKey = `${item.type}:${item.content.toLowerCase().trim().substring(0, 100)}`;
+    
+    // 检查缓存（5分钟有效期）
+    const cached = llmCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
+      resolve(cached.result);
+      return;
+    }
+
+    llmQueue.push({ ...item, addedAt: Date.now(), resolve, reject });
+
+    if (!llmProcessTimer) {
+      llmProcessTimer = setTimeout(() => processLlmQueue(), llmBatchWindowMs);
+    }
+  });
+}
+
+// LLM 结果缓存
+const llmCache = new Map<string, { result: any; ts: number }>();
+
+async function processLlmQueue(): Promise<void> {
+  if (llmProcessing || llmQueue.length === 0) return;
+  llmProcessing = true;
+  llmProcessTimer = null;
+
+  const batch = llmQueue.splice(0, 10); // 最多10个一批
+
+  for (const item of batch) {
+    const cacheKey = `${item.type}:${item.content.toLowerCase().trim().substring(0, 100)}`;
+    
+    // 再次检查缓存
+    const cached = llmCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
+      item.resolve(cached.result);
+      continue;
+    }
+
+    try {
+      let result: any;
+      switch (item.type) {
+        case 'isCore':
+          result = llmClientRef ? await llmClientRef.isCoreMemory(item.content) : { isCore: false, confidence: 0.5 };
+          break;
+        case 'extractKeywords':
+          result = llmClientRef ? await llmClientRef.extractKeywordsFromLLM(item.content) : '';
+          break;
+        case 'isDuplicate':
+          result = { isDuplicate: false, similarity: 0.5 };
+          break;
+      }
+      if (result) {
+        llmCache.set(cacheKey, { result, ts: Date.now() });
+        item.resolve(result);
+      }
+    } catch (err) {
+      item.reject(err);
+    }
+  }
+
+  llmProcessing = false;
+
+  if (llmQueue.length > 0) {
+    llmProcessTimer = setTimeout(() => processLlmQueue(), 100);
+  }
+}
+
 /**
  * 检测用户是否空闲
  * 如果用户在 bufferMs 内没有新活动，可以提前刷新
@@ -218,6 +314,9 @@ export async function store(
 ): Promise<number> {
   const { db, config, llmClient, log, clearRecallCache, metrics } = deps;
 
+  // 初始化 LLM 异步队列
+  initLlmQueue(config.llm?.batchWindowMs || 200, llmClient);
+
   // Boundary checks
   if (!AgentId) {
     log.warn('[algo-memory] store 失败: agentId 为空');
@@ -314,18 +413,21 @@ export async function store(
 
       const needLLMForCore = config.threshold.useLlmForCore &&
                              llmClient &&
-                             (!isCore || safe.length >= config.threshold.lengthForCore);
+                             (!isCore && safe.length >= (config.threshold.lengthForCore || 50));
       if (needLLMForCore) {
-        const r = await llmClient.isCoreMemory(safe);
-        isCore = r.isCore;
-        importance = r.confidence;
+        const r = await addToLlmQueue({ type: 'isCore', content: safe });
+        if (r) {
+          isCore = r.isCore;
+          importance = r.confidence;
+        }
       }
 
       const needLLMForExtract = config.threshold.useLlmForExtract &&
                                  llmClient &&
-                                 safe.length >= config.threshold.lengthForExtract;
+                                 safe.length >= (config.threshold.lengthForExtract || 150);
       if (needLLMForExtract) {
-        keywords = await llmClient.extractKeywordsFromLLM(safe);
+        const r = await addToLlmQueue({ type: 'extractKeywords', content: safe });
+        if (r) keywords = r;
       }
 
       // 启用压缩时，对内容进行压缩

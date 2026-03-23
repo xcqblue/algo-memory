@@ -12,7 +12,7 @@ import LRUCache from 'lru-cache';
 import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
-import { store as doStore, normalizeForStorage, safeContent } from './engine/store.js';
+import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers } from './engine/store.js';
 import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
@@ -799,6 +799,13 @@ confidence 是 0-1 的置信度。
    */
   saveSessionSnapshot(AgentId: string, sessionKey: string, messages: any[]): void {
     if (!this.db || !this.config.sessionContinuity.enabled) return;
+
+    // 先刷新批量缓冲区，确保所有记忆都已写入数据库
+    try {
+      flushAllBuffers(this._db(), this.config, this.log);
+    } catch (e) {
+      this.log.warn(`[algo-memory] 刷新批量缓冲区失败: ${e}`);
+    }
 
     try {
       const maxMessages = this.config.sessionContinuity.maxMessagesForSummary || 30;

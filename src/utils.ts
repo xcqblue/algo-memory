@@ -46,7 +46,7 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   if (config.skipCommands) {
     if (lower.startsWith('/') || lower.startsWith('!') || lower.startsWith('-')) return true;
   }
-  const confirms = ['ok', 'okay', '好', '好的', '收到', '了解', '明白', 'yes', 'no', '嗯', '哦'];
+  const confirms = ['ok', 'okay', '好', '好的', '收到', '了解', '明白', 'yes', 'no', '嗯', '哦', 'yep', 'sure', 'got it', 'gotcha', 'roger', 'copy that', 'tks', 'thanks', 'thx', '👍', '😂', '哈哈哈', '嘿嘿', '哈哈', '哦哦', '啊啊', '这样子', '这样啊', '好吧', '行吧', '算了', '没事', '没关系', '不好意思', '抱歉', '稍等', '等等', '等一下'];
   if (confirms.includes(lower)) return true;
   return false;
 }
