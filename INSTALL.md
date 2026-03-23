@@ -7,14 +7,14 @@
 
 ---
 
-## 快速开始（3分钟）
+## 快速开始（3步）
 
 ```bash
 # 1. 克隆并安装
 git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
 cd ~/.openclaw/extensions/algo-memory && npm install && npm run build
 
-# 2. 启用插件（切换内存插槽）
+# 2. 启用插件
 openclaw plugins enable algo-memory
 
 # 3. 重启
