@@ -1034,7 +1034,8 @@ export default {
       api.on('agent_end', async (event: any, ctx: any) => {
         try {
           const agentId = ctx?.agentId || 'default';
-          const sessionKey = ctx?.sessionKey || 'unknown';
+          // 优先从 ctx 获取 sessionKey，也尝试从 event 获取作为兜底
+          const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
           const messages = event?.messages || [];
 
           if (messages.length > 0) {
