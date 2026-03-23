@@ -49,8 +49,10 @@
 ### 🔧 高级功能
 | 工具 | 功能 |
 |------|------|
-| `algo_memory_feedback` | 💬 自然语言修正 |
 | `algo_memory_metrics` | 📊 运行指标 |
+| `algo_memory_diagnostics` | 🔧 召回诊断 |
+| `algo_memory_recall_reset` | 🔄 重置召回去重 |
+| `algo_memory_correct` | ✏️ 自然语言修正 |
 
 ---
 
