@@ -409,7 +409,7 @@ Agent 调用工具
                     │ 检测 Session A 是 stale
                     │ 创建新 Session B
                     │
-                    │ before_agent_start
+                    │ session_start
                     │ detectSessionChange()
                     │ 发现 lastSessionKey(A) ≠ current(B)
                     │ 从 DB 读取 snapshot A
@@ -439,7 +439,7 @@ Agent 调用工具
     │
     ▼
 ┌─────────────────────────────────────────────────┐
-│ before_agent_start 钩子                          │
+│ session_start 钩子                               │
 │                                                   │
 │ detectSessionChangeAndGetSnapshot()               │
 │    │                                            │

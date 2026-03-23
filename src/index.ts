@@ -72,6 +72,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     sessionSummary: { ...DEFAULT_CONFIG.sessionSummary, ...userConfig.sessionSummary },
     feedback: { ...DEFAULT_CONFIG.feedback, ...userConfig.feedback },
     mcp: { ...DEFAULT_CONFIG.mcp, ...userConfig.mcp },
+    sessionContinuity: { ...DEFAULT_CONFIG.sessionContinuity, ...userConfig.sessionContinuity },
   };
 }
 
@@ -1008,11 +1009,11 @@ export default {
 
     // === 会话续接：检测会话切换并注入上会话上下文 ===
     if (config.sessionContinuity?.enabled) {
-      // 在 agent 开始前检测会话切换
-      api.on('before_agent_start', async (event: any) => {
+      // 在 session_start 时检测会话切换并注入上会话上下文
+      api.on('session_start', async (event: any, ctx: any) => {
         try {
-          const agentId = event?.agentId || 'default';
-          const sessionKey = event?.sessionKey || event?.context?.sessionKey || 'unknown';
+          const agentId = ctx?.agentId || 'default';
+          const sessionKey = event?.sessionKey || 'unknown';
 
           // 检测会话是否切换，获取上会话快照
           const snapshot = plugin.detectSessionChangeAndGetSnapshot(agentId, sessionKey);
@@ -1025,15 +1026,15 @@ export default {
             }
           }
         } catch (err) {
-          log.error('[algo-memory] before_agent_start 会话续接钩子错误:', err);
+          log.error('[algo-memory] session_start 会话续接钩子错误:', err);
         }
       });
 
-      // 在 agent 结束时保存会话快照
-      api.on('agent_end', async (event: any) => {
+      // 在 agent_end 时保存会话快照
+      api.on('agent_end', async (event: any, ctx: any) => {
         try {
-          const agentId = event?.agentId || 'default';
-          const sessionKey = event?.sessionKey || event?.context?.sessionKey || 'unknown';
+          const agentId = ctx?.agentId || 'default';
+          const sessionKey = ctx?.sessionKey || 'unknown';
           const messages = event?.messages || [];
 
           if (messages.length > 0) {
