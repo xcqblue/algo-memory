@@ -80,6 +80,8 @@ export interface CompressionConfig {
   maxLength: number;
   /** 是否提取关键词作为摘要补充 */
   extractKeywords: boolean;
+  /** 是否启用语义增强压缩 */
+  semanticEnhance: boolean;
 }
 
 export interface SessionSnapshot {
@@ -244,5 +246,5 @@ export const DEFAULT_CONFIG: Config = {
   mcp: { enabled: false, transport: 'stdio', port: 8181 },
   sessionContinuity: { enabled: true, maxInjectTokens: 800, maxMessagesForSummary: 30 },
   batchWrite: { enabled: true, bufferMs: 500, maxBatchSize: 20 },
-  compression: { enabled: true, maxLength: 200, extractKeywords: true },
+  compression: { enabled: true, maxLength: 200, extractKeywords: true, semanticEnhance: false },
 };

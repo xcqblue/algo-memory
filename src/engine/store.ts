@@ -25,15 +25,37 @@ import type { DbLike } from '../db/queries.js';
 interface MemoryBuffer {
   memories: Memory[];
   timer: NodeJS.Timeout | null;
+  lastFlush: number; // 上次刷新时间
 }
 
 const memoryBuffers: Map<string, MemoryBuffer> = new Map();
 
+// 用户活动跟踪（用于idle检测）
+const userActivity: Map<string, number> = new Map();
+
 function getBuffer(AgentId: string, config: Config): MemoryBuffer {
   if (!memoryBuffers.has(AgentId)) {
-    memoryBuffers.set(AgentId, { memories: [], timer: null });
+    memoryBuffers.set(AgentId, { memories: [], timer: null, lastFlush: Date.now() });
   }
   return memoryBuffers.get(AgentId)!;
+}
+
+/**
+ * 检测用户是否空闲
+ * 如果用户在 bufferMs 内没有新活动，可以提前刷新
+ */
+function checkIdleAndFlush(db: DbLike, AgentId: string, config: Config, log: any): void {
+  const buffer = getBuffer(AgentId, config);
+  if (buffer.memories.length === 0) return;
+
+  const idleTime = Date.now() - buffer.lastFlush;
+  const bufferMs = config.batchWrite?.bufferMs || 500;
+
+  // 如果空闲时间超过 bufferMs 的 50%，就提前刷新
+  if (idleTime >= bufferMs * 0.5) {
+    log.info(`[algo-memory] 检测到用户空闲 ${idleTime}ms，提前刷新批量缓冲区`);
+    flushMemoryBuffer(db, AgentId, config, log);
+  }
 }
 
 /**
@@ -51,6 +73,7 @@ function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any
 
   const memoriesToWrite = buffer.memories;
   buffer.memories = [];
+  buffer.lastFlush = Date.now();
 
   if (memoriesToWrite.length === 0) return 0;
 
@@ -80,6 +103,25 @@ function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any
 }
 
 /**
+ * 记录分层变化历史
+ */
+function recordTierChange(db: DbLike, memoryId: string, oldTier: string, newTier: string, reason: string, accessCount: number, log: any): void {
+  if (oldTier === newTier) return;
+
+  try {
+    const id = 'th_' + generateId();
+    run(db,
+      `INSERT INTO tier_history (id, memory_id, old_tier, new_tier, reason, access_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, memoryId, oldTier, newTier, reason, accessCount, Date.now()]
+    );
+    log.info(`[algo-memory] 分层变化: ${memoryId} ${oldTier} -> ${newTier} (${reason})`);
+  } catch (err) {
+    log.error('[algo-memory] 记录分层变化失败:', err);
+  }
+}
+
+/**
  * 计划批量写入（延迟执行）
  */
 function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: any): void {
@@ -106,6 +148,14 @@ export function flushAllBuffers(db: DbLike, config: Config, log: any): number {
 }
 
 /**
+ * 用户活动通知（用于idle检测）
+ * 当检测到用户空闲时，触发提前刷新
+ */
+export function notifyUserActivity(AgentId: string): void {
+  userActivity.set(AgentId, Date.now());
+}
+
+/**
  * Score a message by how many core keywords it contains.
  * Higher score = more likely to be worth storing.
  */
@@ -118,7 +168,7 @@ function messagePriority(content: string, coreKeywords: string[]): number {
 // Raw row types returned by queryAll
 type IdRow = { id: string };
 type IdContentRow = { id: string; content: string };
-type TierRow = { id: string; importance: number; access_count: number; created_at: number };
+type TierRow = { id: string; tier: string; importance: number; access_count: number; created_at: number };
 
 // Normalize content before storing: strip @mentions, compress whitespace, remove markdown noise
 export function normalizeForStorage(content: string): string {
@@ -280,9 +330,12 @@ export async function store(
 
       // 启用压缩时，对内容进行压缩
       let storedContent = safe;
+      let wasCompressed = false;
       if (config.compression?.enabled) {
         const maxLen = config.compression.maxLength || 200;
-        storedContent = compressContent(safe, maxLen);
+        const semanticEnhance = config.compression.semanticEnhance || false;
+        storedContent = compressContent(safe, maxLen, semanticEnhance);
+        wasCompressed = storedContent !== safe;
 
         // 如果启用了关键词提取，也添加到 keywords
         if (config.compression.extractKeywords && storedContent.length >= maxLen) {
@@ -358,24 +411,41 @@ export async function store(
     // Batch tier promotion — one SELECT + one UPDATE for all candidates
     if (tierCandidates.length > 0 && config.tier.enabled) {
       const uniqueIds = [...new Set(tierCandidates)];
-      const rows = queryAll(db,
-        `SELECT id, importance, access_count, created_at FROM memories WHERE id IN (${uniqueIds.map(() => '?').join(',')})`,
+
+      // 先查询当前的 tier（用于记录历史）
+      const currentRows = queryAll(db,
+        `SELECT id, tier, importance, access_count, created_at FROM memories WHERE id IN (${uniqueIds.map(() => '?').join(',')})`,
         uniqueIds
       ) as TierRow[];
-      // Build one CASE WHEN statement for all tier updates in a single SQL round-trip
-      if (rows.length > 0) {
-        // Build parameterized CASE WHEN: 2 params per row (id, tier) + n params for WHERE IN
+
+      // 计算新的 tier
+      const updates: { id: string; oldTier: string; newTier: string }[] = [];
+      for (const row of currentRows) {
+        const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
+        const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
+        if (row.tier !== newTier) {
+          updates.push({ id: row.id, oldTier: row.tier, newTier });
+        }
+      }
+
+      // 如果有 tier 变化，执行更新
+      if (updates.length > 0) {
         const idParams: string[] = [];
         const tierParams: string[] = [];
         const whereParams: string[] = [];
-        for (const row of rows) {
-          const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
-          const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
-          idParams.push(row.id);
-          tierParams.push(newTier);
-          whereParams.push(row.id);
+
+        for (const update of updates) {
+          idParams.push(update.id);
+          tierParams.push(update.newTier);
+          whereParams.push(update.id);
+
+          // 记录分层变化历史
+          const accessCount = currentRows.find(r => r.id === update.id)?.access_count || 0;
+          const reason = accessCount >= config.tier.coreThreshold ? `access_count达到${accessCount}` : 'compositeScore变化';
+          recordTierChange(db, update.id, update.oldTier, update.newTier, reason, accessCount, log);
         }
-        const whenClauses = rows.map(() => 'WHEN id = ? THEN ?').join(' ');
+
+        const whenClauses = updates.map(() => 'WHEN id = ? THEN ?').join(' ');
         run(db,
           `UPDATE memories SET tier = CASE ${whenClauses} ELSE tier END WHERE id IN (${whereParams.map(() => '?').join(',')})`,
           [...idParams, ...tierParams, ...whereParams]

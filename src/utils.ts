@@ -52,6 +52,99 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
 }
 
 // ============= Content Compression =============
+
+// 语义压缩模式 - 提取关键信息的正则表达式
+const SEMANTIC_PATTERNS = {
+  // 航班相关
+  flight: /([A-Z]{2,}\d{3,4})|航班[号]?\s*([A-Z0-9]+)/gi,
+  // 日期时间
+  date: /(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日]?)|(\d{1,2}[-/月]\d{1,2}[日]?)|(今天|明天|后天|昨天|前天)/g,
+  // 时间
+  time: /(\d{1,2}[时点]\d{0,2}分?)|(\d{1,2}:\d{2})/g,
+  // 金额价格
+  money: /(\d+(?:[万千百])?\s*元)|(?:价格|价钱|花费|费用|成本)[：:]?\s*(\d+(?:[万千百])?(?:\.\d+)?(?:元|块)?)/gi,
+  // 地点
+  location: /([\u4e00-\u9fff]{2,6}(?:省|市|区|县|路|街|道|机场|车站|火车站|酒店|医院|学校|商场))/g,
+  // 联系方式
+  contact: /(?:电话|手机|微信|邮箱|邮箱|QQ)[：:]?\s*([\w@.+-]+|\d{11})/gi,
+  // 人名
+  person: /(?:叫|名叫|姓名|名字)[：:]?\s*([\u4e00-\u9fff]{2,4})/g,
+  // 数量
+  quantity: /(\d+(?:[个条件次封张本把个])?)|([一二三四五六七八九十百千万\d]+(?:个|条|件|次|封|张|本|把|次))/g,
+};
+
+// 关键信息类型
+interface SemanticInfo {
+  flight?: string;
+  date?: string;
+  time?: string;
+  money?: string;
+  location?: string;
+  contact?: string;
+  person?: string;
+}
+
+/**
+ * 提取内容中的语义关键信息
+ */
+export function extractSemanticInfo(content: string): SemanticInfo {
+  const info: SemanticInfo = {};
+
+  for (const [key, pattern] of Object.entries(SEMANTIC_PATTERNS)) {
+    const matches = content.match(pattern);
+    if (matches && matches.length > 0) {
+      // 去重
+      const unique = [...new Set(matches)];
+      (info as any)[key] = unique.slice(0, 3).join(',');
+    }
+  }
+
+  return info;
+}
+
+/**
+ * 语义增强压缩
+ * 优先保留关键信息，然后保留核心句子
+ */
+export function semanticCompress(content: string, maxLength: number = 200): string {
+  if (!content || content.length <= maxLength) return content;
+
+  const semanticInfo = extractSemanticInfo(content);
+  const infoParts: string[] = [];
+
+  // 按优先级提取关键信息
+  const priorityKeys = ['flight', 'date', 'money', 'person', 'location', 'contact'];
+  for (const key of priorityKeys) {
+    if ((semanticInfo as any)[key]) {
+      infoParts.push((semanticInfo as any)[key]);
+    }
+  }
+
+  // 构建压缩结果
+  let result = infoParts.join(' | ');
+  if (result.length > maxLength * 0.6) {
+    result = result.substring(0, Math.floor(maxLength * 0.6));
+  }
+
+  // 如果还有空间，添加核心句子
+  const remainingLength = maxLength - result.length - 3;
+  if (remainingLength > 20) {
+    // 提取第一句完整的话
+    const firstSentence = content.split(/[。！？；\n]/)[0].trim();
+    if (firstSentence.length > 0) {
+      const truncated = firstSentence.length > remainingLength
+        ? firstSentence.substring(0, remainingLength - 3) + '...'
+        : firstSentence;
+      result = result ? `${result} | ${truncated}` : truncated;
+    }
+  }
+
+  // 去除多余空格
+  result = result.replace(/\s+/g, ' ').trim();
+
+  return result || content.substring(0, maxLength);
+}
+
 /**
  * 压缩记忆内容，提取关键信息
  * 策略：
@@ -59,8 +152,13 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
  * 2. 提取核心句子
  * 3. 保留关键信息（数字、时间、专有名词）
  */
-export function compressContent(content: string, maxLength: number = 200): string {
+export function compressContent(content: string, maxLength: number = 200, semanticEnhance: boolean = false): string {
   if (!content || content.length <= maxLength) return content;
+
+  // 如果启用语义增强，使用语义压缩
+  if (semanticEnhance) {
+    return semanticCompress(content, maxLength);
+  }
 
   let compressed = content;
 

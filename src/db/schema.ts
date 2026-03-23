@@ -56,6 +56,25 @@ export function initSchema(db: AnyDatabase, log: any): void {
     )
   `, 'session_metadata 表');
 
+  // Create tier_history table for tracking memory tier changes
+  required(`
+    CREATE TABLE IF NOT EXISTS tier_history (
+      id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL,
+      old_tier TEXT,
+      new_tier TEXT NOT NULL,
+      reason TEXT,
+      access_count INTEGER,
+      created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+    )
+  `, 'tier_history 表');
+
+  // Index for tier_history
+  try {
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_tier_history_memory ON tier_history(memory_id)').run();
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_tier_history_created ON tier_history(created_at DESC)').run();
+  } catch (_) { /* index creation is non-fatal */ }
+
   // Migration: drop deprecated urgency column (removed in v2.3.0)
   try { db.prepare('ALTER TABLE memories DROP COLUMN IF EXISTS urgency').run(); } catch (_) { /* ignore */ }
 
