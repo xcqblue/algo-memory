@@ -120,22 +120,6 @@ function getLlmCacheKey(type: string, content: string): string {
   return `${CACHE_KEY_PREFIX}:${type}:${content.toLowerCase().trim().substring(0, 100)}`;
 }
 
-/**
- * 检查缓存并返回结果（如果命中）
- * 命中返回结果，未命中返回null
- */
-function checkCacheHit(cacheKey: string): any | null {
-  const cached = getCachedResult(cacheKey);
-  return cached || null;
-}
-
-/**
- * 缓存结果
- */
-function cacheResult(cacheKey: string, result: any): void {
-  setCachedResult(cacheKey, result);
-}
-
 // ============= SQL构建辅助函数（统一SQL构建）=============
 // Memory表字段顺序
 const MEMORY_COLUMNS = [
@@ -250,7 +234,7 @@ function addToLlmQueue(item: LlmRequest): Promise<any> {
     const cacheKey = getLlmCacheKey(item.type, item.content);
 
     // 统一缓存检查
-    const cached = checkCacheHit(cacheKey);
+    const cached = getCachedResult(cacheKey);
     if (cached !== null) {
       resolve(cached);
       return;
@@ -275,7 +259,7 @@ async function processLlmQueue(): Promise<void> {
     const cacheKey = getLlmCacheKey(item.type, item.content);
 
     // 统一缓存检查
-    const cached = checkCacheHit(cacheKey);
+    const cached = getCachedResult(cacheKey);
     if (cached !== null) {
       item.resolve(cached);
       continue;
@@ -312,7 +296,7 @@ async function processLlmQueue(): Promise<void> {
           break;
       }
       if (result) {
-        cacheResult(cacheKey, result);
+        setCachedResult(cacheKey, result);
         item.resolve(result);
       }
     } catch (err) {
