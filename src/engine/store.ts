@@ -110,6 +110,73 @@ const llmSingleton: LlmQueueSingleton = {
 const llmCache = new Map<string, { result: any; ts: number; accessCount: number }>();
 const LLM_CACHE_TTL = DEFAULT_VALUES.LLM_CACHE_TTL_MS; // 5分钟
 const LLM_CACHE_MAX_SIZE = DEFAULT_VALUES.LLM_CACHE_MAX_SIZE;
+const CACHE_KEY_PREFIX = 'llm'; // 缓存key前缀
+
+// ============= 缓存辅助函数（合并缓存检查）=============
+/**
+ * 生成缓存key
+ */
+function getLlmCacheKey(type: string, content: string): string {
+  return `${CACHE_KEY_PREFIX}:${type}:${content.toLowerCase().trim().substring(0, 100)}`;
+}
+
+/**
+ * 检查缓存并返回结果（如果命中）
+ * 命中返回结果，未命中返回null
+ */
+function checkCacheHit(cacheKey: string): any | null {
+  const cached = getCachedResult(cacheKey);
+  return cached || null;
+}
+
+/**
+ * 缓存结果
+ */
+function cacheResult(cacheKey: string, result: any): void {
+  setCachedResult(cacheKey, result);
+}
+
+// ============= SQL构建辅助函数（统一SQL构建）=============
+// Memory表字段顺序
+const MEMORY_COLUMNS = [
+  'id', 'agent_id', 'scope', 'content', 'type', 'tier', 'layer',
+  'keywords', 'importance', 'access_count', 'cited_count',
+  'created_at', 'last_accessed', 'content_hash', 'metadata'
+] as const;
+
+/**
+ * 构建批量INSERT的占位符和参数
+ * @param memories 记忆数组
+ * @returns { placeholders: string, params: any[] }
+ */
+function buildMemoryBatchInsert(memories: Memory[]): { placeholders: string; params: any[] } {
+  const placeholders = memories.map(() =>
+    `(${MEMORY_COLUMNS.map(() => '?').join(', ')})`
+  ).join(', ');
+
+  const params = memories.flatMap(m =>
+    MEMORY_COLUMNS.map(col => {
+      const key = col as string;
+      return (m as any)[key];
+    })
+  );
+
+  return { placeholders, params };
+}
+
+/**
+ * 构建单个INSERT的占位符和参数
+ * @param memory 单个记忆
+ * @returns { placeholders: string, params: any[] }
+ */
+function buildMemoryInsert(memory: Memory): { placeholders: string; params: any[] } {
+  const { placeholders, params } = buildMemoryBatchInsert([memory]);
+  // 去掉外层括号
+  return {
+    placeholders: placeholders.replace(/^\(|\)$/g, ''),
+    params
+  };
+}
 
 // ============= LLM 重试机制（优化3）=============
 const LLM_MAX_RETRIES = 2;
@@ -180,11 +247,11 @@ function initLlmQueue(batchWindowMs: number, llmClient: LLMClient | null): void 
 
 function addToLlmQueue(item: LlmRequest): Promise<any> {
   return new Promise((resolve, reject) => {
-    const cacheKey = `${item.type}:${item.content.toLowerCase().trim().substring(0, 100)}`;
+    const cacheKey = getLlmCacheKey(item.type, item.content);
 
-    // 检查缓存（带LRU）
-    const cached = getCachedResult(cacheKey);
-    if (cached) {
+    // 统一缓存检查
+    const cached = checkCacheHit(cacheKey);
+    if (cached !== null) {
       resolve(cached);
       return;
     }
@@ -205,11 +272,11 @@ async function processLlmQueue(): Promise<void> {
   const batch = llmSingleton.queue.splice(0, 10);
 
   for (const item of batch) {
-    const cacheKey = `${item.type}:${item.content.toLowerCase().trim().substring(0, 100)}`;
+    const cacheKey = getLlmCacheKey(item.type, item.content);
 
-    // 再次检查缓存
-    const cached = getCachedResult(cacheKey);
-    if (cached) {
+    // 统一缓存检查
+    const cached = checkCacheHit(cacheKey);
+    if (cached !== null) {
       item.resolve(cached);
       continue;
     }
@@ -245,7 +312,7 @@ async function processLlmQueue(): Promise<void> {
           break;
       }
       if (result) {
-        setCachedResult(cacheKey, result);
+        cacheResult(cacheKey, result);
         item.resolve(result);
       }
     } catch (err) {
@@ -301,17 +368,11 @@ function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any
 
   let inserted = 0;
   try {
-    // 批量插入
-    const placeholders = memoriesToWrite.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
-    const params = memoriesToWrite.flatMap(m => [
-      m.id, m.agent_id, m.scope, m.content, m.type, m.tier, m.layer,
-      m.keywords, m.importance, m.access_count, m.cited_count,
-      m.created_at, m.last_accessed, m.content_hash, m.metadata
-    ]);
+    // 统一SQL构建
+    const { placeholders, params } = buildMemoryBatchInsert(memoriesToWrite);
 
     run(db,
-      `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
-       VALUES ${placeholders}`,
+      `INSERT INTO memories (${MEMORY_COLUMNS.join(', ')}) VALUES ${placeholders}`,
       params
     );
 
@@ -692,11 +753,11 @@ export async function store(
           scheduleBatchWrite(db, AgentId, config, log);
         }
       } else {
-        // 直接写入（原有逻辑）
+        // 直接写入（原有逻辑）- 使用统一SQL构建
+        const { placeholders, params } = buildMemoryInsert(memory);
         runOrThrow(db,
-          `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [memory.id, memory.agent_id, memory.scope, memory.content, memory.type, memory.tier, memory.layer, memory.keywords, memory.importance, memory.access_count, memory.cited_count, memory.created_at, memory.last_accessed, memory.content_hash, memory.metadata]
+          `INSERT INTO memories (${MEMORY_COLUMNS.join(', ')}) VALUES (${placeholders})`,
+          params
         );
       }
 
