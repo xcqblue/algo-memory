@@ -261,13 +261,8 @@ export function semanticCompress(content: string, maxLength: number = 200): stri
  * 2. 提取核心句子
  * 3. 保留关键信息（数字、时间、专有名词）
  */
-export function compressContent(content: string, maxLength: number = 200, semanticEnhance: boolean = false): string {
+export function compressContent(content: string, maxLength: number = 200): string {
   if (!content || content.length <= maxLength) return content;
-
-  // 如果启用语义增强，使用语义压缩
-  if (semanticEnhance) {
-    return semanticCompress(content, maxLength);
-  }
 
   let compressed = content;
 

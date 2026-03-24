@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.3.0
+ * algo-memory v2.6.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
@@ -13,7 +13,7 @@ import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
 import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers, getBufferStats } from './engine/store.js';
-import { detectTopicDrift, extractSimpleKeywords, jaccardSimilarity } from './utils.js';
+
 import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
@@ -997,80 +997,12 @@ confidence 是 0-1 的置信度。
   }
 
   /**
-   * 将重要记忆（core tier）同步到 workspace 的 memory/algo-memory/ 目录
-   *
-   * IMPORTANT: Do NOT write to MEMORY.md directly — the workspace plugin uses a
-   * JSON format (### algo-memory section with JSON payload). Writing Markdown
-   * format there would corrupt the workspace plugin's data structure.
-   *
-   * Instead, write to memory/algo-memory/YYYY-MM-DD.md — a separate file that
-   * the workspace plugin can optionally pick up via its file scanning logic.
-   * This avoids file locking conflicts with the workspace plugin.
+   * 同步 core 层记忆到 workspace 文件（已禁用：workspace plugin 使用 JSON 格式，
+   * 直接写 Markdown 会导致冲突。如需持久化，使用 export 工具导出 JSON。）
    */
-  async syncCoreToWorkspace(): Promise<{ synced: number; skipped: number }> {
-    const workspace = process.env.OPENCLAW_WORKSPACE
-      || path.join(process.env.HOME || '/tmp', '.openclaw', 'workspace');
-    const memoryDir = path.join(workspace, 'memory', 'algo-memory');
-
-    let synced = 0, skipped = 0;
-    try {
-      if (!fs.existsSync(memoryDir)) {
-        fs.mkdirSync(memoryDir, { recursive: true });
-      }
-
-      if (!this.db) return { synced: 0, skipped: 0 };
-
-      // 读取所有 core 层记忆（最近 30 天有新访问的）
-      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-      const cores = queryAll(this._db(),
-        `SELECT id, content, importance, access_count, cited_count, created_at, last_accessed FROM memories
-         WHERE agent_id = 'default' AND tier = 'core' AND layer = 'general'
-         AND (last_accessed > ? OR cited_count > 0)
-         ORDER BY importance DESC, access_count DESC LIMIT 30`,
-        [cutoff]
-      ) as unknown as Array<{
-        id: string; content: string; importance: number;
-        access_count: number; cited_count: number; created_at: number; last_accessed: number;
-      }>;
-
-      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-      const dateFile = path.join(memoryDir, `${today}.md`);
-      let existingIds = new Set<string>();
-
-      // 读取已存在的记录（去重）
-      if (fs.existsSync(dateFile)) {
-        const content = fs.readFileSync(dateFile, 'utf-8');
-        const idMatches = content.match(/^## memory:id:([a-zA-Z0-9_-]+)/gm) || [];
-        for (const m of idMatches) {
-          existingIds.add(m.split(':')[2]);
-        }
-      }
-
-      const newLines: string[] = [];
-      for (const m of cores) {
-        if (existingIds.has(m.id)) { skipped++; continue; }
-        const dateStr = new Date(m.created_at).toLocaleDateString('zh-CN');
-        const lastAccessStr = new Date(m.last_accessed).toLocaleDateString('zh-CN');
-        newLines.push(
-          `## memory:id:${m.id}\n` +
-          `content: ${m.content}\n` +
-          `importance: ${m.importance} | access: ${m.access_count} | cited: ${m.cited_count}\n` +
-          `created: ${dateStr} | last_accessed: ${lastAccessStr}\n`
-        );
-        synced++;
-      }
-
-      if (newLines.length > 0) {
-        const header = fs.existsSync(dateFile)
-          ? `\n${newLines.join('\n')}\n`
-          : `# algo-memory core memories — ${today}\n\n${newLines.join('\n')}\n`;
-        fs.appendFileSync(dateFile, header, 'utf-8');
-        this.log.info(`[algo-memory] workspace 同步: ${synced} 条 core 记忆写入 ${dateFile}`);
-      }
-    } catch (err: any) {
-      this.log.warn(`[algo-memory] syncCoreToWorkspace 失败: ${err?.message ?? err}`);
-    }
-    return { synced, skipped };
+  async syncCoreToWorkspace(): Promise<{ synced: number; skipped: number; message: string }> {
+    this.log.warn('[algo-memory] syncCoreToWorkspace 已禁用：workspace plugin 使用 JSON 格式，写入 Markdown 会导致冲突。请使用 algo_memory_export 导出记忆。');
+    return { synced: 0, skipped: 0, message: '已禁用，请使用 algo_memory_export 导出' };
   }
 
   // ===== CLI 增强工具 =====
@@ -1416,7 +1348,7 @@ confidence 是 0-1 的置信度。
 export default {
   id: 'algo-memory',
   name: 'algo-memory',
-  version: '2.3.0',
+  version: '2.6.0',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
@@ -1465,34 +1397,6 @@ export default {
           const query = userMessages.slice(-3).join(' ');
           // Session dedup is handled inside shouldRetrieve via per-agent dedup state
           if (!shouldRetrieve(query, config as any, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
-
-          // Direction 3: 话题漂移检测 → 触发预加载（proactive recall）
-          if ((config.adaptiveRetrieval as any)?.topicDrift?.enabled) {
-            const td = (config.adaptiveRetrieval as any).topicDrift;
-            const allUserMessages = (messages as any[])
-              .filter((m: any) => m.role === 'user')
-              .map((m: any) => extractMessageText(m.content))
-              .filter(Boolean);
-            if (allUserMessages.length >= td.windowSize * 2) {
-              const drifted = detectTopicDrift(allUserMessages, td);
-              if (drifted) {
-                // 提取当前话题关键词，作为 proactive 检索词
-                const currentKw = extractSimpleKeywords(query, 5);
-                if (currentKw.length > 0) {
-                  const proactiveQuery = currentKw.join(' ');
-                  log.info(`[algo-memory] [topic_drift] 检测到话题漂移，预加载关键词: ${proactiveQuery}`);
-                  const preloadCount = td.preloadCount ?? 3;
-                  // proactive 检索走独立路径，不走 session dedup
-                  const { hasMemory: pHas, memories: pMem } = await plugin.recall(agentId, proactiveQuery, { limit: preloadCount, skipDedup: true });
-                  if (pHas && pMem.length > 0) {
-                    const pSelected = pMem.slice(0, preloadCount).map((m: any) => `[预加载记忆] ${m.content}`).join('\n');
-                    api.prependSystemContext(`\n\n${pSelected}\n`);
-                    log.info(`[algo-memory] [topic_drift] 预加载 ${pMem.length} 条记忆`);
-                  }
-                }
-              }
-            }
-          }
 
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {
@@ -1735,102 +1639,7 @@ export default {
     }
 
     api.registerService(plugin);
-
-    // === MCP Tool Exposure ===
-    if (config.mcp.enabled) {
-      setupMCPServer(plugin, config, log).catch(err => {
-        log.error('[algo-memory] MCP 启动失败:', err);
-      });
-    }
   }
 };
-async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
-  try {
-    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
-    const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
-    const { CallToolRequestSchema, ListToolsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
-
-      const server = new Server({
-        name: 'algo-memory',
-        version: '2.3.0',
-      }, {
-        capabilities: { tools: {} },
-      });
-
-      // 注册核心工具到 MCP（精简到 8 个，调试/危险工具通过 CLI 使用）
-      server.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: [
-          {
-            name: 'algo_memory_search',
-            description: '全文搜索记忆（FTS5），返回相关记忆列表',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, query: { type: 'string' } }, required: ['agentId', 'query'] },
-          },
-          {
-            name: 'algo_memory_stats',
-            description: '查看记忆统计：总数、core/working/peripheral 分层数量',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } }, required: ['agentId'] },
-          },
-          {
-            name: 'algo_memory_list',
-            description: '列出记忆（支持分页）',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, limit: { type: 'number' }, offset: { type: 'number' } }, required: ['agentId'] },
-          },
-          {
-            name: 'algo_memory_get',
-            description: '获取单条记忆详情',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } }, required: ['agentId', 'memoryId'] },
-          },
-          {
-            name: 'algo_memory_update',
-            description: '更新记忆内容',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, content: { type: 'string' } }, required: ['agentId', 'memoryId', 'content'] },
-          },
-          {
-            name: 'algo_memory_delete',
-            description: '删除单条记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } }, required: ['agentId', 'memoryId'] },
-          },
-          {
-            name: 'algo_memory_correct',
-            description: '记忆修正。用法一：已知 memoryId → 直接更新；用法二：自然语言 → AI 定位并修正',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, correction: { type: 'string' }, memoryId: { type: 'string' }, newContent: { type: 'string' } }, required: ['agentId', 'correction'] },
-          },
-          {
-            name: 'algo_memory_export',
-            description: '导出记忆为 JSON',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, maxExport: { type: 'number' } }, required: ['agentId'] },
-          },
-        ],
-      }));
-
-      server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
-        const { name, arguments: args } = request.params;
-        try {
-          let result: any;
-          switch (name) {
-            case 'algo_memory_list': result = plugin.listMemories(args.agentId, args.limit || 20, args.offset || 0); break;
-            case 'algo_memory_search': result = plugin.searchMemories(args.agentId, args.query); break;
-            case 'algo_memory_stats': result = plugin.getStats(args.agentId); break;
-            case 'algo_memory_list': result = plugin.listMemories(args.agentId, args.limit || 20, args.offset || 0); break;
-            case 'algo_memory_get': result = plugin.getMemory(args.agentId, args.memoryId); break;
-            case 'algo_memory_update': result = { success: await plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
-            case 'algo_memory_delete': result = { success: plugin.deleteMemory(args.agentId, args.memoryId) }; break;
-            case 'algo_memory_correct': result = await plugin.correct(args.agentId, args.correction, args.memoryId, args.newContent); break;
-            case 'algo_memory_export': result = plugin.exportMemories(args.agentId, args.maxExport || 1000); break;
-            default: result = { error: `algo_memory: tool '${name}' not available — use algo_memory_stats or algo_memory_search` };
-          }
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        } catch (err: any) {
-          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err?.message ?? String(err) }) }] };
-        }
-      });
-
-      const transport = new StdioServerTransport();
-      await server.connect(transport);
-      log.info('[algo-memory] MCP stdio server 已启动（stdio 模式）');
-    } catch (err) {
-      log.error('[algo-memory] MCP 初始化失败:', err);
-    }
-  }
 
 

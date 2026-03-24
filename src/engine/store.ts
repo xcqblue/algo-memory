@@ -692,8 +692,7 @@ export async function store(
       let wasCompressed = false;
       if (config.compression?.enabled) {
         const maxLen = config.compression.maxLength || DEFAULT_VALUES.BATCH_MAX_SIZE;
-        const semanticEnhance = config.compression.semanticEnhance || false;
-        storedContent = compressContent(safe, maxLen, semanticEnhance);
+        storedContent = compressContent(safe, maxLen);
         wasCompressed = storedContent !== safe;
 
         // 如果启用了关键词提取，也添加到 keywords

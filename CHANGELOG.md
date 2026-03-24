@@ -2,6 +2,26 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.6.0] - 2026-03-24
+
+### Breaking Changes（配置字段删减，请检查旧配置）
+
+- 移除 `adaptiveRetrieval.topicDrift` 配置项（topicDrift 预加载功能已删除）
+- 移除 `tier.pending.maxPendingDays`、`tier.pending.recallUpgrade`
+- 移除 `tier.decay` 相关配置（`coreStaleDays`、`decayPerStep`、`demoteThreshold`）
+- 移除 `compression.semanticEnhance` 配置项
+
+### Bug Fixes
+
+- **MCP Server 冲突**：移除独立的 MCP stdio server 实现，OpenClaw 本身已是 MCP Host，插件工具通过 `registerTool()` 自动暴露，无需重复实现
+- **Workspace 文件冲突**：`syncCoreToWorkspace()` 改为禁用状态，log 警告引导用户使用 `algo_memory_export` 导出，避免与 workspace plugin 的 JSON 格式冲突
+- **代码臃肿清理**：删除 topicDrift 预加载逻辑（~50行）、MCP server（~110行）、semanticEnhance 死代码，净减少 243 行
+
+### Refactor
+
+- `before_prompt_build` 钩子逻辑简化：移除 topicDrift 预加载逻辑，恢复为只做 recall 一件事
+- `compressContent()` 删除未启用的 semanticEnhance 分支
+
 ## [2.5.0] - 2026-03-24
 
 ### Features
