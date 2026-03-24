@@ -100,7 +100,9 @@ export function initSchema(db: AnyDatabase, log: any): void {
       )
     `).run();
     db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, id, content, keywords) VALUES (new.rowid, new.id, new.content, new.keywords); END`).run();
-    log.info('[algo-memory] FTS5 全文搜索已启用');
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id = old.id; END`).run();
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN DELETE FROM memories_fts WHERE id = old.id; INSERT INTO memories_fts(rowid, id, content, keywords) VALUES (new.rowid, new.id, new.content, new.keywords); END`).run();
+    log.info('[algo-memory] FTS5 全文搜索已启用（含 INSERT/DELETE/UPDATE 触发器）');
   } catch (err: any) {
     log.warn('[algo-memory] FTS5 创建失败，搜索将降级为 LIKE:', err.message);
   }

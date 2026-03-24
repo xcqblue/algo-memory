@@ -11,10 +11,11 @@ export type DbLike = DatabaseType;
 export type SqlJsDatabase = DbLike;
 export type AnyDatabase = DbLike;
 
-// Convert a raw row (array) to an object keyed by column names
-function rowToObject(row: unknown[], cols: string[]): Record<string, unknown> {
+// Convert a raw row (object) to an object keyed by column names
+// better-sqlite3 stmt.all() returns rows as objects keyed by column name
+function rowToObject(row: unknown, cols: string[]): Record<string, unknown> {
   const obj: Record<string, unknown> = {};
-  cols.forEach((col: string, i: number) => { obj[col] = row[i]; });
+  cols.forEach((col: string) => { obj[col] = (row as Record<string, unknown>)[col]; });
   return obj;
 }
 

@@ -15,6 +15,7 @@ import {
   hashContent,
   compressContent,
   extractContentSummary,
+  extractMessageText,
   MAX_MESSAGE_LENGTH,
   MAX_SIMILAR_CHECK
 } from '../utils.js';
@@ -565,13 +566,16 @@ export async function store(
     return 0;
   }
 
-  // Truncate overly long messages
-  messages = messages.map(msg => ({
-    ...msg,
-    content: msg.content?.length > MAX_MESSAGE_LENGTH
-      ? msg.content.substring(0, MAX_MESSAGE_LENGTH) + '...[截断]'
-      : msg.content
-  }));
+  // Normalize + strip metadata, then truncate overly long messages
+  messages = messages.map(msg => {
+    const raw = extractMessageText(msg.content);
+    return {
+      ...msg,
+      content: raw.length > MAX_MESSAGE_LENGTH
+        ? raw.substring(0, MAX_MESSAGE_LENGTH) + '...[截断]'
+        : raw
+    };
+  });
 
   let captured = 0;
   const maxCapture = config.capturePerTurn || 3;

@@ -30,6 +30,7 @@ import {
   getTier,
   shouldRetrieve,
   estimateTokens,
+  extractMessageText,
   CACHE_MAX_SIZE,
   CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
@@ -169,6 +170,8 @@ class MemoryPlugin {
     try {
       this._db().exec("SELECT count(*) FROM memories_fts LIMIT 0");
       this.ftsAvailable = true;
+      // Rebuild FTS index on startup to fix any prior rowid drift
+      this.rebuildFTS();
     } catch (_) {
       this.ftsAvailable = false;
       this.log.warn('[algo-memory] FTS5 不可用，搜索将降级为 LIKE');
@@ -566,8 +569,15 @@ confidence 是 0-1 的置信度。
           const safe = safeContent(m.content || '');
           const tier = getTier(m.importance || 0.5, m.access_count || 1, 0, this.config.tier);
           run(this._db(),
-            `INSERT OR REPLACE INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO memories (id, agent_id, scope, content, type, tier, layer, keywords, importance, access_count, cited_count, created_at, last_accessed, content_hash, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               agent_id=excluded.agent_id, scope=excluded.scope, content=excluded.content,
+               type=excluded.type, tier=excluded.tier, layer=excluded.layer,
+               keywords=excluded.keywords, importance=excluded.importance,
+               access_count=excluded.access_count, cited_count=excluded.cited_count,
+               created_at=excluded.created_at, last_accessed=excluded.last_accessed,
+               content_hash=excluded.content_hash, metadata=excluded.metadata`,
             [
               m.id || generateId(), AgentId, m.scope || 'global',
               safe, m.type || 'other', tier, m.layer || 'general',
@@ -607,6 +617,26 @@ confidence 是 0-1 的置信度。
 
   getMetrics() {
     return this.metrics;
+  }
+
+  /** 重建 FTS5 索引，修复 rowid 漂移导致的 "missing row" 错误 */
+  rebuildFTS(): { success: boolean; message: string } {
+    if (!this.db) return { success: false, message: '数据库未初始化' };
+    if (!this.ftsAvailable) return { success: false, message: 'FTS5 不可用' };
+    try {
+      // 重建 FTS 索引：删除并重新插入所有行
+      this._db().exec(`
+        DELETE FROM memories_fts;
+        INSERT INTO memories_fts(rowid, id, content, keywords)
+          SELECT rowid, id, content, keywords FROM memories;
+      `);
+      const count = (this._db().prepare('SELECT COUNT(*) as cnt FROM memories_fts').get() as any)?.cnt || 0;
+      this.log.info(`[algo-memory] FTS5 索引重建完成，共 ${count} 条记录`);
+      return { success: true, message: `FTS5 重建成功，共 ${count} 条记录` };
+    } catch (err: any) {
+      this.log.error('[algo-memory] FTS5 重建失败:', err);
+      return { success: false, message: `FTS5 重建失败: ${err.message}` };
+    }
   }
 
   private clearRecallCache(AgentId: string): void {
@@ -744,14 +774,14 @@ confidence 是 0-1 的置信度。
     const lines: string[] = [];
 
     for (const msg of recentMessages) {
-      if (msg.role === 'user' && typeof msg.content === 'string') {
+      const rawText = extractMessageText(msg.content);
+      if (!rawText) continue;
+      if (msg.role === 'user') {
         // 截断过长内容
-        const content = msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content;
+        const content = rawText.length > 200 ? rawText.substring(0, 200) + '...' : rawText;
         lines.push(`用户: ${content}`);
-      } else if (msg.role === 'assistant' && msg.content && !msg.isError) {
-        const content = typeof msg.content === 'string'
-          ? (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content)
-          : '[助手回复]';
+      } else if (msg.role === 'assistant' && !msg.isError) {
+        const content = rawText.length > 200 ? rawText.substring(0, 200) + '...' : rawText;
         lines.push(`助手: ${content}`);
       }
     }
@@ -770,18 +800,18 @@ confidence 是 0-1 的置信度。
     const lines: string[] = [];
 
     for (const msg of recentMessages) {
-      if (msg.role === 'user' && typeof msg.content === 'string') {
-        const normalized = normalizeForStorage(msg.content);
+      const rawText = extractMessageText(msg.content);
+      if (!rawText) continue;
+      if (msg.role === 'user') {
+        const normalized = normalizeForStorage(rawText);
         if (normalized.length < 3) continue;
         const key = normalized.substring(0, 50);
         if (seen.has(key)) continue;
         seen.add(key);
         const content = normalized.length > 300 ? normalized.substring(0, 300) + '...' : normalized;
         lines.push(`用户: ${content}`);
-      } else if (msg.role === 'assistant' && msg.content && !msg.isError) {
-        const content = typeof msg.content === 'string'
-          ? normalizeForStorage(msg.content)
-          : '';
+      } else if (msg.role === 'assistant' && !msg.isError) {
+        const content = normalizeForStorage(rawText);
         if (!content || content.length < 3) continue;
         const key = 'a:' + content.substring(0, 50);
         if (seen.has(key)) continue;
@@ -1160,6 +1190,7 @@ export default {
       { name: 'algo_memory_metrics', description: '查看运行时指标', parameters: Type.Object({}) },
       { name: 'algo_memory_diagnostics', description: '召回诊断信息：DB 状态 + 缓存命中率 + MMR 配置 + 最近一次召回详情', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_recall_reset', description: '清除会话去重状态，允许相同查询再次召回', parameters: Type.Object({ agentId: Type.String() }) },
+      { name: 'algo_memory_fts_rebuild', description: '重建 FTS5 全文索引，修复 rowid 漂移导致的搜索失败问题', parameters: Type.Object({}) },
       { name: 'algo_memory_correct', description: '记忆修正。用法一（已知 memoryId）：直接更新内容；用法二（自然语言）：AI 定位相关记忆并生成修正建议，置信度>0.8 自动应用，否则返回建议待确认', parameters: Type.Object({
         agentId: Type.String(),
         correction: Type.String(),
@@ -1195,6 +1226,7 @@ export default {
                 break;
               }
               case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
+              case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
               case 'algo_memory_correct': result = await plugin.correct(params.agentId, params.correction, params.memoryId, params.newContent); break;
               default: result = { error: 'Unknown tool' };
             }
@@ -1337,6 +1369,7 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
               break;
             }
             case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(args.agentId); break;
+            case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
             default: result = { error: 'Unknown tool' };
           }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };

@@ -17,6 +17,35 @@ export const RETRY_DELAY_MS = 1000;
 export const MIN_CJK_QUERY_LENGTH = 6;
 export const MIN_EN_QUERY_LENGTH = 15;
 
+// ============= Feishu / OpenClaw Metadata Stripper =============
+// OpenClaw injects a "Conversation info (untrusted metadata): {json}" block
+// before every user message. Strip it so only real user text is stored.
+const METADATA_PATTERN = /^Conversation info[\s\S]*?---\s*/;
+
+export function stripInboundMetadata(raw: string): string {
+  if (!raw || typeof raw !== 'string') return raw;
+  return raw.replace(METADATA_PATTERN, '').trim();
+}
+
+/**
+ * Extract plain text from msg.content which may be:
+ * - string
+ * - array: [{type, text}, ...] Feishu multi-block format
+ * - object: {type, text} single block
+ * Then strip Conversation info metadata.
+ */
+export function extractMessageText(raw: any): string {
+  let str = '';
+  if (Array.isArray(raw)) {
+    str = raw.map(b => typeof b === 'object' && b !== null ? (b.text || '') : String(b)).join('');
+  } else if (typeof raw === 'object' && raw !== null) {
+    str = (raw as any).text || '';
+  } else {
+    str = String(raw ?? '');
+  }
+  return stripInboundMetadata(str);
+}
+
 // ============= ID / Hash =============
 export function generateId(): string {
   return 'mem_' + crypto.randomBytes(8).toString('hex');
@@ -363,14 +392,14 @@ export function shouldRetrieve(
   if (/^(what|who|which)\s+\w{1,8}\??$/i.test(trimmed) && trimmed.length < 15) return false;
   if (/^(什么|谁|哪个)\??$/.test(trimmed)) return false;
 
-  // Skip meta-questions (反问句 / interrogative about memory itself)
-  if (META_PATTERNS.some(p => p.test(trimmed))) return false;
-
-  // Force keywords always trigger retrieval (even after recent recall).
-  // Combine config forceKeywords with the language-aware defaults.
+  // Force keywords always trigger retrieval — check BEFORE META_PATTERNS
+  // so that "记得...吗" / "remember..." etc. are never filtered out.
   const langKeywords = getRetrieveKeywords(detectLanguage(trimmed));
   const allForceKeywords = [...(config.forceKeywords || []), ...langKeywords];
   if (allForceKeywords.some((k: string) => lowerQuery.includes(k))) return true;
+
+  // Skip meta-questions (反问句 / interrogative about memory itself)
+  if (META_PATTERNS.some(p => p.test(trimmed))) return false;
 
   // Length gate
   const isCJK = /[\u4e00-\u9fa5]/.test(trimmed);
