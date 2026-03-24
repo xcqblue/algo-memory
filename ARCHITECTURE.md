@@ -1,15 +1,15 @@
-# Architecture
+# 架构设计
 
-> How algo-memory works — design decisions, data flow, and key algorithms.
+> algo-memory 的工作原理 — 设计决策、数据流与核心算法。
 
 ---
 
-## System Overview
+## 系统概述
 
-algo-memory is a **pull-based memory system** built on SQLite. It does not require an external embedding service — instead it uses FTS5 BM25 for retrieval and JavaScript-side scoring. LLM is optional and used only for keyword extraction and dedup. MCP is not used — tools are exposed via OpenClaw's native `registerTool()` API.
+algo-memory 是一个基于 SQLite 的**拉取式记忆系统**。不依赖外部 embedding 服务，使用 FTS5 BM25 进行检索，JavaScript 端计算评分。LLM 是可选功能，仅用于关键词提取和去重。不使用 MCP，工具通过 OpenClaw 原生 `registerTool()` API 暴露。
 
 ```
-User Message
+用户消息
     │
     ▼
 agent_end Hook
@@ -17,122 +17,122 @@ agent_end Hook
     ▼
 store(AgentId, messages[])
     │
-    ├─ Phase 1 (sync): filter noise/duplicate/hash → candidates[]
+    ├─ 阶段1（同步）：过滤噪声/重复/哈希 → 候选列表[]
     │
-    ├─ Phase 2 (async): batch LLM — extractKeywords() × 1
-    │                   deduplicateByLLM() × n (if enabled)
+    ├─ 阶段2（异步）：批量 LLM — extractKeywords() × 1
+    │                   deduplicateByLLM() × n（如已启用）
     │
-    └─ Phase 3 (sync): scheduleBatchWrite() → MemoryBuffer
+    └─ 阶段3（同步）：scheduleBatchWrite() → MemoryBuffer
                                             │
-                                            ▼ (500ms delay or messageCount threshold)
+                                            ▼（500ms 防抖 或 消息数阈值）
                                       flushMemoryBuffer()
                                             │
                                             ▼
-                                     SQLite memories table
+                                     SQLite memories 表
                                             │
-                                            └─► FTS5 memories_fts (via triggers)
+                                            └─► FTS5 memories_fts（通过触发器）
 ```
 
 ---
 
-## Data Flow
+## 数据流
 
-### Capture Path（store）
+### 写入路径（store）
 
-1. `agent_end` fires with `event.messages[]`
-2. Each user message is:
-   - Cleaned: Feishu array format → plain text, metadata stripped
-   - Noise filtered: greetings / emoji-only / short queries
-   - Hash checked: `hashSet` in-memory deduplication
-   - Batch Jaccard: checked against same-batch candidates
-   - DB Jaccard: checked against last 5 DB memories
-3. Phase 2: LLM keyword extraction (1 call for all batch) + optional LLM dedup
-4. Tier computed: `importance × (1 + log10(access_count + 1))`
-5. Queued to `MemoryBuffer` (500ms debounce)
-6. On flush: batch INSERT to SQLite + FTS5 trigger auto-sync
+1. `agent_end` 触发，携带 `event.messages[]`
+2. 每条用户消息经过：
+   - 清洗：飞书数组格式 → 纯文本，去除元数据
+   - 噪声过滤：问候语 / 纯 emoji / 短查询
+   - 哈希去重：`hashSet` 内存去重
+   - 批量 Jaccard：与同一批次候选对比
+   - 数据库 Jaccard：与最近 5 条 DB 记忆对比
+3. 阶段2：LLM 关键词提取（批次内 1 次调用）+ 可选 LLM 去重
+4. 计算 tier：`importance × (1 + log10(access_count + 1))`
+5. 进入 `MemoryBuffer`（500ms 防抖）
+6. 触发 flush：批量 INSERT 到 SQLite + FTS5 触发器自动同步
 
-### Retrieval Path（recall）
+### 检索路径（recall）
 
 ```
-before_prompt_build fires
+before_prompt_build 触发
     │
     ▼
-Extract last 3 user messages → query string
+提取最近 3 条用户消息 → query 字符串
     │
     ▼
 shouldRetrieve(query, config, sessionDedup)
-    │  - forceKeywords check (before META_PATTERNS)
-    │  - META_PATTERNS skip
-    │  - Length gate (CJK ≥6, EN ≥15)
-    │  - sessionDedup (similarity ≥0.75 in 30s → skip)
+    │  - forceKeywords 检查（优先于 META_PATTERNS）
+    │  - META_PATTERNS 跳过
+    │  - 长度门槛（中文 ≥6，英文 ≥15）
+    │  - sessionDedup（30秒内相似度 ≥0.75 → 跳过）
     ▼
-FTS5 search (BM25)
+FTS5 搜索（BM25）
     │
     ▼
-scoreMemories() — tier weight × weibullDecay × reinforcement × lengthNorm
+scoreMemories() — tier权重 × weibullDecay × reinforcement × lengthNorm
     │
     ▼
-mmrDeduplicate() — λ×relevance - (1-λ)×diversity
+mmrDeduplicate() — λ×相关性 - (1-λ)×多样性
     │
     ▼
-hardMinScore filter (threshold 0.35)
+hardMinScore 过滤（阈值 0.35）
     │
     ▼
-cited_count += 1 (for returned items only)
+cited_count += 1（仅对返回的记忆）
     │
     ▼
-prependSystemContext() — formatted memories injected into LLM context
+prependSystemContext() — 格式化记忆注入 LLM 上下文
 ```
 
 ---
 
-## Memory Tier System
+## 记忆分层系统
 
 ```
 tier score = importance × (1 + log10(access_count + 1))
 
 core:       access_count ≥ 10
-            OR (score ≥ 0.7 AND age ≤ 60 days)
+            或 (score ≥ 0.7 且 age ≤ 60 天)
 
 peripheral: score < 0.15
-            OR (age > 60 days AND score < 0.7)
+            或 (age > 60 天 且 score < 0.7)
 
-working:    everything in between
+working:    其余情况
 ```
 
-Core memories are never auto-deleted by cleanup. Peripheral memories are subject to Weibull decay and cleanup after `cleanupDays` of no access.
+Core 记忆不会被 cleanup 自动删除。Peripheral 记忆受 Weibull 衰减影响，超过 `cleanupDays` 未被访问则清理。
 
 ---
 
-## Time Decay
+## 时间衰减
 
-### Weibull Decay（shape=1.5, scale=90 days）
+### Weibull 衰减（shape=1.5, scale=90 天）
 
 ```
 decay(t) = exp(-(t / scale) ^ shape)
 
-t=0 days   → decay = 1.000  (fresh, no decay)
-t=30 days  → decay = 0.894  (minimal decay)
-t=60 days  → decay = 0.710  (moderate decay)
-t=90 days  → decay = 0.368  (significant decay)
-t=180 days → decay = 0.018  (near zero)
+t=0 天   → decay = 1.000  （新鲜，无衰减）
+t=30 天  → decay = 0.894  （轻微衰减）
+t=60 天  → decay = 0.710  （中等衰减）
+t=90 天  → decay = 0.368  （显著衰减）
+t=180 天 → decay = 0.018  （接近零）
 ```
 
-shape > 1 means: **early protection** (new memories are safe) then **accelerated forgetting** over time.
+shape > 1 意味着：**前期保护**（新记忆安全）→ 随后**加速遗忘**。
 
-### Reinforcement
+### Reinforcement 强化
 
-When a memory is cited (appears in recall results):
+记忆被召回（出现在 recall 结果中）时：
 - `cited_count += 1`
 - `last_accessed = now`
 
-Compaction also reinforces: core memories boost `access_count` to 10, others to 5.
+Compaction 也会强化：core 记忆将 access_count 提升到 10，其他提升到 5。
 
 ---
 
-## OpenClaw Lifecycle Hooks
+## OpenClaw 生命周期 Hook
 
-### Hook Event Flow
+### Hook 事件流
 
 ```
 gateway_start
@@ -146,81 +146,82 @@ registerHook()
     ├─ before_compaction ──► store(sessionFile) ──► promotePeripheral()
     │                       └─► reinforceOnCompaction()
     │
-    ├─ after_compaction ──► (logged, reinforcement done in before_compaction)
+    ├─ after_compaction ──►（仅记录日志，强化在 before_compaction 完成）
     │
-    ├─ after_tool_call ──► reinforceCitedMemories(algo_memory_search results)
+    ├─ after_tool_call ──► reinforceCitedMemories(algo_memory_search 结果)
     │
     └─ gateway_stop ──► flushAll() ──► db.close()
 ```
 
-### Context Priority
+### 上下文优先级
 
-`api.prependSystemContext()` is used to inject memories. The `priority: 10` in `before_prompt_build` ensures algo-memory runs after other memory plugins but before the LLM call.
-
----
-
-## Workspace Integration
-
-algo-memory 的 `algo_memory_sync` 工具（导出 core 记忆）**已禁用**。workspace plugin 使用 JSON 格式写入 `MEMORY.md`，algo-memory 直接写 Markdown 会导致格式冲突。如需导出记忆，使用 `algo_memory_export` 工具。
+`api.prependSystemContext()` 用于注入记忆。`before_prompt_build` 中的 `priority: 10` 确保 algo-memory 在其他 memory 插件之后、LLM 调用之前执行。
 
 ---
 
-## LLM Providers
+## LLM 模型支持
 
-Supported providers (set via `config.llm.provider`):
+### 国内模型
 
-| Provider | Env Variable | Default Model |
-|----------|-------------|---------------|
-| MiniMax | `MINIMAX_API_KEY` | `abab6.5s-chat` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-chat` |
-| Kimi | `KIMI_API_KEY` | `moonshot-v1-8k` |
-| 阿里百炼 | `DASHSCOPE_API_KEY` | `qwen-plus` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-3-haiku` |
-| 智谱 GLM | `ZHIPU_API_KEY` | `glm-4-flash` |
-| Ollama | `OLLAMA_BASE_URL` | `llama3` |
-| SiliconFlow | `SILICONFLOW_API_KEY` | `Qwen/Qwen2-7B-Instruct` |
+| Provider | 别名 | 默认模型 | 推荐 |
+|----------|------|---------|------|
+| `minimax` | — | `abab6.5s-chat` | abab6.5s-chat（推荐）/ abab6.5g-chat |
+| `deepseek` | — | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1推理）|
+| `kimi` | `moonshot` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k（长上下文）|
+| `zhipu` | — | `glm-4-flash` | glm-4-flash（免费）/ glm-4-plus（最强）|
+| `qwen` | `dashscope`、`bailian` | `qwen-plus` | qwen-plus（推荐）/ qwen-max（最强）/ qwen2.5-72b-instruct |
+| `hunyuan` | — | `hunyuan-standard` | hunyuan-pro（腾讯混元 Pro）|
+| `wenxin` | — | `ernie-3.5-8k` | ernie-4.0-8k（百度文心）|
+| `siliconflow` | `silicon` | `Qwen/Qwen2-7B-Instruct` | SiliconFlow 聚合 50+ 模型 |
 
----
+### 国外模型
 
-## Error Handling Strategy
-
-| Scenario | Strategy |
-|----------|---------|
-| LLM API failure | Retry up to 3 times with exponential backoff |
-| DB write failure | Log error, skip this item, continue |
-| FTS unavailable | Fallback to `LIKE '%term%'` query |
-| Invalid message format | Catch exception, skip this message |
-| Buffer flush during DB close | `flushing` mutex prevents race |
+| Provider | 默认模型 | 推荐 |
+|----------|---------|------|
+| `openai` | `gpt-4o-mini` | gpt-4o-mini（快）/ gpt-4o（强）|
+| `anthropic` | `claude-3-haiku-20240307` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
+| `ollama` | `llama2` | 本地自定义模型 |
 
 ---
 
-## Performance Characteristics
+## 错误处理策略
 
-| Operation | Complexity | Typical Latency |
-|-----------|-----------|----------------|
-| `store()` Phase 1 (sync filter) | O(n) | < 1ms |
-| `extractKeywords()` LLM call | O(1) per batch | 500-2000ms |
-| FTS5 search | O(log n) | 5-20ms |
-| JS scoring (n results) | O(n) | < 1ms |
-| MMR dedup | O(k²) where k = maxResults | < 1ms |
-| Buffer flush (batch write) | O(b) where b = batch size | 10-50ms |
-
-n = total memories in DB (typically < 10,000)
-b = buffer size (typically 1-20)
+| 场景 | 策略 |
+|------|------|
+| LLM API 失败 | 指数退避重试最多 3 次 |
+| DB 写入失败 | 记录错误，跳过该项目，继续执行 |
+| FTS 不可用 | 降级为 `LIKE '%term%'` 查询 |
+| 消息格式无效 | 捕获异常，跳过该消息 |
+| DB 关闭时 buffer 还在 flush | `flushing` 互斥锁防止竞争 |
 
 ---
 
-## Key Design Decisions
+## 性能特征
 
-1. **SQLite over LanceDB**: algo-memory is designed for environments without external services. SQLite is embedded, zero-config, and sufficient for text retrieval at this scale.
+| 操作 | 复杂度 | 典型延迟 |
+|------|--------|---------|
+| `store()` 阶段1（同步过滤）| O(n) | < 1ms |
+| `extractKeywords()` LLM 调用 | O(1) 每批次 | 500-2000ms |
+| FTS5 搜索 | O(log n) | 5-20ms |
+| JS 评分（n 个结果）| O(n) | < 1ms |
+| MMR 去重 | O(k²)，k = maxResults | < 1ms |
+| Buffer flush（批量写入）| O(b)，b = 批次大小 | 10-50ms |
 
-2. **FTS5 over vector search**: Vector search requires an embedding API. FTS5 BM25 provides comparable text retrieval without external dependencies.
+n = DB 中总记忆数（通常 < 10,000）
+b = buffer 大小（通常 1-20）
 
-3. **Tier system over pure recency**: Pure recency cannot distinguish "my wife's birthday" (important, infrequent access) from "lunch plans" (ephemeral). The tier system handles this.
+---
 
-4. **Batch LLM over per-message LLM**: Reduces LLM API calls by 50-95% in burst scenarios. Keywords are shared across batch messages as an acceptable approximation.
+## 关键设计决策
 
-5. **Fire-and-forget compaction hooks**: `before_compaction` and `after_compaction` hooks do not await LLM operations to avoid blocking OpenClaw's compaction pipeline.
+1. **SQLite 而非 LanceDB**：algo-memory 设计为无需外部服务的环境。SQLite 内嵌、零配置，对这个规模完全够用。
 
-6. **Workspace isolation**: algo-memory does not write to MEMORY.md directly to avoid corrupting the workspace plugin's JSON format.
+2. **FTS5 而非向量搜索**：向量搜索需要 embedding API。FTS5 BM25 提供相当的文本检索能力，无需外部依赖。
+
+3. **分层系统而非纯时效**：纯时效（如 VectorDB 默认方案）无法区分"我老婆生日"（重要但访问不频繁）和"午饭计划"（临时性的）。tier 分层系统解决了这个问题。
+
+4. **批量 LLM 而非逐条 LLM**：在突发场景下将 LLM API 调用减少 50-95%。关键词在同一批次消息间共享，是可接受的近似方案。
+
+5. **Fire-and-forget compaction hooks**：`before_compaction` 和 `after_compaction` hooks 不等待 LLM 操作，避免阻塞 OpenClaw 的 compaction 流程。
+
+6. **Workspace 隔离**：algo-memory 不直接写入 `MEMORY.md`，避免破坏 workspace plugin 的 JSON 格式。

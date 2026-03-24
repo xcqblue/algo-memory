@@ -105,12 +105,14 @@ algo-memory 的 LLM **不是必选功能**。如需关键词提取或去重：
 ```bash
 export MINIMAX_API_KEY="your-key"      # MiniMax
 export DEEPSEEK_API_KEY="your-key"     # DeepSeek
-export KIMI_API_KEY="your-key"        # Kimi/Moonshot
+export KIMI_API_KEY="your-key"         # Kimi/Moonshot
 export DASHSCOPE_API_KEY="your-key"   # 阿里百炼/通义千问
-export ZHIPU_API_KEY="your-key"       # 智谱 GLM
-export OPENAI_API_KEY="your-key"      # OpenAI
-export ANTHROPIC_API_KEY="your-key"   # Anthropic
-export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
+export ZHIPU_API_KEY="your-key"        # 智谱 GLM
+export HUNYUAN_API_KEY="your-key"     # 腾讯混元
+export WENXIN_API_KEY="your-key"      # 百度文心
+export SILICONFLOW_API_KEY="your-key"  # SiliconFlow 聚合平台
+export OPENAI_API_KEY="your-key"       # OpenAI
+export ANTHROPIC_API_KEY="your-key"    # Anthropic
 ```
 
 然后在插件配置中指定 provider：
@@ -132,36 +134,45 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 
 ## 支持模型
 
+### 国内模型
+
+| Provider | 别名 | 默认模型 | 推荐 |
+|----------|------|---------|------|
+| `minimax` | — | `abab6.5s-chat` | abab6.5s-chat（推荐）/ abab6.5g-chat |
+| `deepseek` | — | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1推理）|
+| `kimi` | `moonshot` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k（长上下文）|
+| `zhipu` | — | `glm-4-flash` | glm-4-flash（免费）/ glm-4-plus（最强）|
+| `qwen` | `dashscope`、`bailian` | `qwen-plus` | qwen-plus（推荐）/ qwen-max（最强）/ qwen2.5-72b-instruct（超大杯）|
+| `hunyuan` | — | `hunyuan-standard` | hunyuan-pro（腾讯混元 Pro）|
+| `wenxin` | — | `ernie-3.5-8k` | ernie-4.0-8k（百度文心）|
+| `siliconflow` | `silicon` | `Qwen/Qwen2-7B-Instruct` | SiliconFlow 聚合 50+ 模型 |
+
+### 国外模型
+
 | Provider | 默认模型 | 推荐 |
 |----------|---------|------|
-| `minimax` | `abab6.5s-chat` | abab6.5s-chat（推荐）/ abab6.5g-chat |
-| `deepseek` | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1推理）|
-| `kimi` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k（长上下文）|
-| `zhipu` | `glm-4-flash` | glm-4-flash（免费）/ glm-4-plus（最强）|
-| `qwen` | `qwen-plus` | qwen-plus（推荐）/ qwen-max（最强）/ qwen2.5-72b-instruct（超大杯）|
 | `openai` | `gpt-4o-mini` | gpt-4o-mini（快）/ gpt-4o（强）|
-| `anthropic` | `claude-3-haiku` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
-| `ollama` | `llama3` | 本地自定义 |
-| `siliconflow` | `Qwen/Qwen2-7B-Instruct` | SiliconFlow 聚合 50+ 模型 |
+| `anthropic` | `claude-3-haiku-20240307` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
+| `ollama` | `llama2` | 本地自定义模型 |
 
-> `qwen` / `dashscope` / `moonshot` 是别名，自动映射到内部 provider key。
+### 完整模型列表
 
-**模型动态化**：内置 modelMap 只做日志展示用，模型名直接透传给 API。配置 `customModelNames` 可覆盖任意模型的显示名称：
-
-```json
-{
-  "plugins": {
-    "algo-memory": {
-      "llm": {
-        "provider": "deepseek",
-        "model": "deepseek-r2-latest",
-        "customModelNames": {
-          "deepseek-r2-latest": "DeepSeek R2（最新内部测试版）"
-        }
-      }
-    }
-  }
-}
+```
+MiniMax:     abab6.5s-chat, abab6.5g-chat, abab6.5s-chat-200k,
+             abab1.8s-chat, abab1.8g-chat, abab6s-chat, abab5.5s-chat
+DeepSeek:    deepseek-chat, deepseek-coder, deepseek-reasoner
+Kimi:        moonshot-v1-8k, moonshot-v1-32k, moonshot-v1-128k,
+             kimi-chat, kimi-chat-latest
+智谱 GLM:    glm-4-flash, glm-4, glm-4-plus, glm-3-turbo
+阿里百炼:    qwen-plus, qwen-turbo, qwen-max, qwen-long,
+             qwen2.5-72b-instruct
+腾讯混元:    hunyuan-pro, hunyuan-standard
+百度文心:    ernie-4.0-8k, ernie-3.5-8k, ernie-speed-8k
+SiliconFlow: Qwen/Qwen2-7B-Instruct, THUDM/glm-4-9b-chat,
+             deepseek-ai/DeepSeek-V2-Chat
+OpenAI:      gpt-4o-mini
+Anthropic:   claude-3-haiku-20240307
+Ollama:      llama2, mistral
 ```
 
 ---
