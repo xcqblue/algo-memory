@@ -433,3 +433,165 @@ export function getTier(importance: number, accessCount: number, daysOld: number
 export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+// ============= Synonym Expansion for FTS5 Query =============
+// 离线同义词扩展，提升 FTS5 的语义泛化能力
+
+/**
+ * 中文同义词表（可根据需求扩充）
+ * key = 标准词，value = 同义词列表
+ */
+const SYNONYMS: Record<string, string[]> = {
+  // 人物关系
+  '老婆': ['媳妇', '妻子', '爱人'],
+  '老公': ['丈夫', '老公'],
+  '孩子': ['儿子', '女儿', '娃'],
+  // 地点
+  '北京': ['帝都', '京城'],
+  '上海': ['沪', '魔都'],
+  // 动作/状态
+  '住': ['居住', '定居', '住在'],
+  '吃': ['吃东西', '用餐', '吃饭'],
+  '喝': ['喝水', '喝茶', '喝咖啡'],
+  '工作': ['上班', '干活', '办公'],
+  '出差': ['商务出行'],
+  // 职业
+  '老板': ['上司', '领导'],
+  // 数字/时间
+  '生日': ['出生日期'],
+  '生日': ['出生日期'],
+  // 手机/电脑
+  '手机': ['iPhone', '安卓', '智能手机'],
+  '电脑': ['计算机', '笔记本', 'Mac'],
+  // 项目/代码
+  '项目': ['proj', 'project'],
+  '代码': ['code', '源码', '程序'],
+  // 常用表达
+  '记住': ['记得', '别忘', '重要'],
+  '喜欢': ['爱', '偏爱', '喜好'],
+  '讨厌': ['不喜欢', '厌恶'],
+  // 食物
+  '辣': ['麻辣', '川菜', '火锅'],
+};
+
+/**
+ * 中文停用词列表（FTS5 查询时不单独检索这些）
+ */
+const STOP_WORDS = new Set([
+  '的', '了', '在', '是', '我', '你', '他', '她', '它', '们',
+  '这', '那', '有', '和', '与', '或', '不', '很', '都', '也',
+  '就', '还', '又', '但', '而', '及', '把', '被', '让', '给',
+  '对', '于', '用', '从', '到', '去', '来', '上', '下', '里',
+  '外', '前', '后', '中', '内', '间', '等', '各', '本', '此',
+  '一', '一个', 'the', 'a', 'an', 'is', 'are', 'was', 'were',
+]);
+
+/**
+ * 判断是否为中文句子（包含中文字符）
+ */
+export function isChinese(text: string): boolean {
+  return /[\u4e00-\u9fff]/.test(text);
+}
+
+/**
+ * 简单中文分词（正向最大正向最大匹配 + 数字字母合并）
+ * 相比 jieba：零依赖，纯 JS，轻量快速
+ */
+export function simpleChineseTokenize(text: string): string[] {
+  // 先做基础分词：按空格和标点
+  const rawTokens = text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  // 合并连续的数字和字母（iPhone -> iphone, MacBook -> macbook）
+  const merged: string[] = [];
+  for (const token of rawTokens) {
+    if (merged.length > 0 && /^[a-z0-9]+$/i.test(token) && /[a-z0-9]+$/i.test(merged[merged.length - 1])) {
+      merged[merged.length - 1] += token;
+    } else {
+      merged.push(token);
+    }
+  }
+
+  return merged.filter(t => t.length > 1 && !STOP_WORDS.has(t));
+}
+
+/**
+ * FTS5 OR 扩展查询构建
+ * 输入: "我想去北京出差"
+ * 输出: "我 OR 想去 OR 北京 OR 帝都 OR 出差 OR 商务出行"
+ */
+export function buildFts5ExpandedQuery(query: string): string {
+  const tokens = simpleChineseTokenize(query);
+  if (tokens.length === 0) return query;
+
+  const seen = new Set<string>();
+  const allTokens: string[] = [];
+
+  for (const token of tokens) {
+    if (!seen.has(token)) {
+      seen.add(token);
+      allTokens.push(token);
+    }
+    // 查同义词
+    for (const [key, syns] of Object.entries(SYNONYMS)) {
+      if (key === token || syns.includes(token)) {
+        for (const syn of [key, ...syns]) {
+          if (!seen.has(syn)) {
+            seen.add(syn);
+            allTokens.push(syn);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  if (allTokens.length === 0) return query;
+  if (allTokens.length === 1) return allTokens[0];
+
+  // 构建 OR 查询
+  return allTokens.map(t => `"${t}"`).join(' OR ');
+}
+
+/**
+ * 多路召回 Query 列表生成
+ * 输入: "我想去北京出差"
+ * 输出: ["我想去北京出差", "北京出差", "想去北京", "帝都商务出行"]
+ */
+export function generateMultiPathQueries(query: string, maxPaths = 4): string[] {
+  const tokens = simpleChineseTokenize(query);
+  if (tokens.length === 0) return [query];
+
+  const queries: string[] = [query]; // 原始 query 优先
+
+  if (tokens.length >= 2) {
+    // 路径1：取前3个token（去掉尾部不重要的词）
+    const prefix = tokens.slice(0, Math.min(3, tokens.length)).join(' ');
+    if (prefix !== query) queries.push(prefix);
+
+    // 路径2：最后2个token（通常包含核心词）
+    const suffix = tokens.slice(-2).join(' ');
+    if (suffix !== query && suffix !== prefix) queries.push(suffix);
+  }
+
+  if (tokens.length >= 3) {
+    // 路径3：只取首尾token（去除中间填充词）
+    const headTail = `${tokens[0]} ${tokens[tokens.length - 1]}`;
+    if (headTail !== query) queries.push(headTail);
+  }
+
+  return queries.slice(0, maxPaths);
+}
+
+/**
+ * BM25+ 评分增强
+ * 在 SQLite BM25 基础上加 δ=1.0，避免短文本评分过低
+ * 只对 score > 0 的结果加偏移，等效于 BM25+ 的下界保护
+ */
+export function bm25PlusBoost(score: number, delta = 1.0): number {
+  if (score <= 0) return score;
+  return score + delta;
+}
