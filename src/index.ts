@@ -1101,7 +1101,7 @@ confidence 是 0-1 的置信度。
   }
 
   /** 将会话期间新增的记忆写入 Markdown 摘要文件（跨 session 延续） */
-  writeSessionSummary(): void {
+  writeSessionSummary(agentId = 'default'): void {
     if (!this.config.sessionSummary.enabled) return;
     // Flush all agent buffers first so latest memories are in DB before we read them
     this.flushAll();
@@ -1110,13 +1110,15 @@ confidence 是 0-1 的置信度。
       const stateDir = this.dbPath.replace(/[/\\][^/\\]+$/, '');
       const summaryDir = path.join(stateDir, this.config.sessionSummary.dir);
       if (!fs.existsSync(summaryDir)) fs.mkdirSync(summaryDir, { recursive: true });
-      const filePath = path.join(summaryDir, `${today}.md`);
-      const markerPath = path.join(summaryDir, `.${today}.lastids`); // tracks last written IDs
+      // Use per-agent summary files to avoid mixing sessions for different users
+      const safeId = String(agentId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const filePath = path.join(summaryDir, `${today}_${safeId}.md`);
+      const markerPath = path.join(summaryDir, `.${today}_${safeId}.lastids`);
 
       // 读取最近 N 条记忆的 content_hash 作为指纹（内容变了就重写）
       const recentMemories = queryAll(this._db(),
-        `SELECT content_hash FROM memories ORDER BY created_at DESC LIMIT ?`,
-        [this.config.sessionSummary.maxItems]
+        `SELECT content_hash FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`,
+        [agentId, this.config.sessionSummary.maxItems]
       ) as unknown as Array<{ content_hash: string }>;
       if (recentMemories.length === 0) return;
 
@@ -1138,8 +1140,8 @@ confidence 是 0-1 的置信度。
       // 收集记忆详情
       const memoryDetails = queryAll(this._db(),
         `SELECT id, content, tier, importance, created_at FROM memories
-         ORDER BY created_at DESC LIMIT ?`,
-        [this.config.sessionSummary.maxItems]
+         WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`,
+        [agentId, this.config.sessionSummary.maxItems]
       ) as unknown as Array<{ id: string; content: string; tier: string; importance: number; created_at: number }>;
 
       const lines: string[] = [];
@@ -1234,9 +1236,12 @@ export default {
       });
 
       // 在 agent_end 时保存会话快照
+      // sessionKey 作为 agentId（in-memory Map key）实现多用户隔离：
+      // 同一用户的同一会话共享快照，不同会话独立。
+      // ctx?.sessionKey 是比 ctx?.agentId 更可靠的会话标识符。
       api.on('agent_end', async (event: any, ctx: any) => {
         try {
-          const agentId = ctx?.agentId || event?.sessionKey?.split(':')[2] || 'default';
+          const agentId = ctx?.sessionKey || ctx?.agentId || 'default';
           const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
           const messages = event?.messages || [];
           if (messages.length > 0) {
@@ -1290,9 +1295,12 @@ export default {
     }
 
     // === Session Summary ===
-    api.on('session_end', async () => {
+    // session_end: event.sessionKey 是唯一可靠的标识符
+    // 注意：session_end 可能没有 ctx.agentId，必须依赖 event.sessionKey
+    api.on('session_end', async (event: any) => {
       try {
-        plugin.writeSessionSummary();
+        const agentId = event?.sessionKey || 'default';
+        plugin.writeSessionSummary(agentId);
       } catch (err: any) {
         log.error('[algo-memory] session_end 钩子错误:', err?.message ?? err, err?.stack);
       }
@@ -1300,47 +1308,47 @@ export default {
 
     // === Compaction lifecycle (March 5 2026: before_compaction / after_compaction hooks) ===
     // OpenClaw calls these during context compression cycles.
-    // before_compaction: has event.sessionFile (JSONL transcript) and event.messages — capture
-    //                    memories BEFORE compaction truncates them.
-    // after_compaction:  has event.compactedCount, event.sessionFile — reinforce post-compaction.
+    // before_compaction: has event.sessionFile (JSONL transcript) and event.messages —
+    //                   capture memories BEFORE compaction truncates them.
+    // after_compaction:  has event.compactedCount, event.sessionFile — reinforce.
+    //
+    // NOTE: This hook runs IN PARALLEL with the compaction LLM call.
+    // All operations are fire-and-forget (no await) so they do NOT block compaction.
     api.on('before_compaction', async (event: any, ctx: any) => {
-      try {
-        const agentId = ctx?.agentId || 'default';
-        if (!plugin.isActive()) return;
-        if (!config.autoCapture) return; // Only capture if autoCapture is enabled
+      const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
+      if (!plugin.isActive() || !config.autoCapture) return;
 
-        // Read session transcript from disk (event.sessionFile points to JSONL on disk,
-        // which has ALL messages before compaction truncation).
-        let sessionMessages: any[] = [];
-        if (event.sessionFile && typeof event.sessionFile === 'string') {
-          try {
-            const content = fs.readFileSync(event.sessionFile, 'utf-8');
-            sessionMessages = content.trim().split('\n')
-              .filter(Boolean)
-              .map((line: string) => {
-                try { return JSON.parse(line); } catch { return null; }
-              })
-              .filter(Boolean);
-          } catch (readErr) {
-            log.warn(`[algo-memory] before_compaction: 无法读取 sessionFile: ${event.sessionFile}`);
-          }
+      // Read session transcript from disk without blocking
+      const readSessionFile = (filePath: string): any[] => {
+        try {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          return content.trim().split('\n')
+            .filter(Boolean)
+            .map((line: string) => { try { return JSON.parse(line); } catch { return null; } })
+            .filter(Boolean);
+        } catch {
+          return [];
         }
-        // Also use event.messages as fallback
-        if (sessionMessages.length === 0 && Array.isArray(event.messages)) {
-          sessionMessages = event.messages;
-        }
+      };
 
-        if (sessionMessages.length > 0) {
-          // Flush buffer first so recent memories are included
-          plugin.flushAll();
-          await plugin.store(agentId, sessionMessages);
-          log.info(`[algo-memory] before_compaction: 从 sessionFile 捕获 ${sessionMessages.length} 条消息写入记忆`);
-        }
+      // 1. Fire-and-forget: read session file + store to DB
+      const sessionMessages = readSessionFile(event.sessionFile || '');
+      plugin.store(agentId, sessionMessages).catch((err: any) => {
+        log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
+      });
 
-        // Also trigger peripheral promotion during compaction cycle
-        await plugin.promotePeripheralOnCompaction(agentId);
-      } catch (err: any) {
-        log.error('[algo-memory] before_compaction 钩子错误:', err?.message ?? err, err?.stack);
+      // 2. Fire-and-forget: DB-only peripheral promotion (no LLM, fast)
+      plugin.promotePeripheralOnCompaction(agentId).catch((err: any) => {
+        log.error('[algo-memory] before_compaction promote 错误:', err?.message ?? err);
+      });
+
+      // 3. Fire-and-forget: reinforcement (DB-only, fast)
+      plugin.reinforceOnCompaction(agentId).catch((err: any) => {
+        log.error('[algo-memory] before_compaction reinforce 错误:', err?.message ?? err);
+      });
+
+      if (sessionMessages.length > 0) {
+        log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息待 capture（异步，不阻塞 compaction）`);
       }
     });
 
