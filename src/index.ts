@@ -828,6 +828,100 @@ confidence 是 0-1 的置信度。
   }
 
   /**
+   * 健康检查：全面诊断 DB、FTS、buffer、内存、LLM 调用状态
+   */
+  getHealth(): {
+    ok: boolean; db: any; fts: any; buffer: any; memory: any;
+    llmStats: any; config: any; issues: string[];
+  } {
+    const issues: string[] = [];
+    const db: any = { ok: false };
+    const fts: any = { ok: false };
+    const buffer: any = {};
+    const llmStats: any = {};
+
+    if (!this.db) {
+      issues.push('数据库未初始化（插件未启动或加载失败）');
+      return { ok: false, db, fts, buffer, memory: {}, llmStats, config: {}, issues };
+    }
+
+    // DB 基本检查
+    try {
+      const memCount = (queryOne(this._db(), 'SELECT COUNT(*) as cnt FROM memories') as any)?.cnt ?? 0;
+      const snapCount = (queryOne(this._db(), 'SELECT COUNT(*) as cnt FROM session_snapshots') as any)?.cnt ?? 0;
+      db.ok = true;
+      db.memories = memCount;
+      db.snapshots = snapCount;
+      db.path = this.dbPath;
+    } catch (err: any) {
+      issues.push(`DB 查询失败: ${err?.message ?? err}`);
+    }
+
+    // FTS 检查
+    try {
+      if (this.ftsAvailable) {
+        const ftsCount = (queryOne(this._db(), 'SELECT COUNT(*) as cnt FROM memories_fts') as any)?.cnt ?? 0;
+        const memCount = (queryOne(this._db(), 'SELECT COUNT(*) as cnt FROM memories') as any)?.cnt ?? 0;
+        fts.ok = true;
+        fts.indexed = ftsCount;
+        fts.memories = memCount;
+        fts.synced = ftsCount === memCount;
+        if (ftsCount !== memCount) {
+          issues.push(`FTS 索引与主表不同步: FTS=${ftsCount} vs memories=${memCount}，建议运行 rebuildFTS`);
+        }
+      } else {
+        issues.push('FTS5 不可用，搜索将使用 LIKE 降级');
+      }
+    } catch (err: any) {
+      issues.push(`FTS 检查失败: ${err?.message ?? err}`);
+    }
+
+    // Buffer 状态
+    try {
+      const memBuffers = getBufferStats();
+      const bufferEntries = Object.entries(memBuffers);
+      for (const [id, stat] of bufferEntries) {
+        buffer[id] = {
+          pending: stat.pending,
+          flushing: stat.flushing,
+          lastFlush: stat.lastFlush ? new Date(stat.lastFlush).toISOString() : null
+        };
+      }
+      if (bufferEntries.length === 0) {
+        issues.push('无活动的 Buffer（插件可能未处理过消息）');
+      }
+    } catch (err: any) {
+      issues.push(`Buffer 状态读取失败: ${err?.message ?? err}`);
+    }
+
+    // LLM 统计
+    llmStats.apiCalls = this.metrics.llmApiCalls ?? 0;
+    llmStats.totalTokens = this.metrics.totalTokens ?? 0;
+    llmStats.cacheHits = this.metrics.llmCacheHits ?? 0;
+
+    // Config 有效性
+    const config = {
+      autoCapture: this.config.autoCapture,
+      autoRecall: this.config.autoRecall,
+      cleanupDays: this.config.cleanupDays,
+      llmProvider: this.config.llm?.provider ?? '未配置',
+      mmrLambda: this.config.mmr?.lambda,
+      sessionContinuity: this.config.sessionContinuity?.enabled,
+    };
+
+    return {
+      ok: issues.length === 0,
+      db,
+      fts,
+      buffer,
+      memory: { rss: Math.round(process.memoryUsage().rss / 1024 / 1024) + 'MB' },
+      llmStats,
+      config,
+      issues
+    };
+  }
+
+  /**
    * 手动触发 compaction 强化流程（对应 session:compact:before + after 的合并调用）
    * 等价于 OpenClaw 压缩周期中的强化步骤
    */
@@ -884,6 +978,57 @@ confidence 是 0-1 的置信度。
     } catch (err) {
       this.log.error('[algo-memory] recordLlmUsage 失败:', err);
     }
+  }
+
+  /**
+   * 将重要记忆（core tier）同步到 workspace 的 MEMORY.md
+   * 被 before_compaction / after_compaction 调用，保持记忆在 OpenClaw 全局可用
+   */
+  async syncCoreToWorkspace(): Promise<{ synced: number; skipped: number }> {
+    const workspace = process.env.OPENCLAW_WORKSPACE || path.join(process.env.HOME || '/tmp', '.openclaw', 'workspace');
+    const memoryFile = path.join(workspace, 'MEMORY.md');
+    const date = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+
+    let synced = 0, skipped = 0;
+    try {
+      // 读取现有 MEMORY.md 内容，用于去重
+      let existing = '';
+      if (fs.existsSync(memoryFile)) {
+        existing = fs.readFileSync(memoryFile, 'utf-8');
+      }
+
+      // 读取所有 core 层记忆
+      if (!this.db) return { synced: 0, skipped: 0 };
+      const cores = queryAll(this._db(),
+        `SELECT id, content, importance, access_count, created_at FROM memories
+         WHERE agent_id = 'default' AND tier = 'core' AND layer = 'general'
+         ORDER BY importance DESC, access_count DESC LIMIT 50`
+      ) as unknown as Array<{ id: string; content: string; importance: number; access_count: number; created_at: number }>;
+
+      const lines: string[] = [];
+      for (const m of cores) {
+        // 简单去重：如果 existing 已经包含这条记忆的内容片段，跳过
+        if (existing.includes(m.content.substring(0, 20))) {
+          skipped++;
+          continue;
+        }
+        const dateStr = new Date(m.created_at).toLocaleDateString('zh-CN');
+        lines.push(`- [core] ${m.content} *(importance: ${m.importance}, 访问: ${m.access_count}, ${dateStr})*`);
+        synced++;
+      }
+
+      if (lines.length > 0) {
+        const header = !existing.includes('## Core Memories')
+          ? `\n\n## Core Memories\n`
+          : `\n`;
+        const entry = header + lines.join('\n') + `\n`;
+        fs.appendFileSync(memoryFile, entry, 'utf-8');
+        this.log.info(`[algo-memory] workspace 同步: ${synced} 条 core 记忆写入 MEMORY.md`);
+      }
+    } catch (err: any) {
+      this.log.warn(`[algo-memory] syncCoreToWorkspace 失败: ${err?.message ?? err}`);
+    }
+    return { synced, skipped };
   }
 
   // ===== CLI 增强工具 =====
@@ -1209,8 +1354,12 @@ confidence 是 0-1 的置信度。
     this.cache.clear();
     if (this.db) {
       try {
-        // Flush all buffers before closing so no data is lost on shutdown
+        // Flush all buffers — errors are logged but do not prevent DB close
         flushAllBuffers(this._db(), this.config, this.log);
+      } catch (err: any) {
+        this.log.error('[algo-memory] close() flush 失败:', err?.message ?? err);
+      }
+      try {
         const pidPath = this.dbPath.replace(/[/\\][^/\\]+$/, '') + '/algo-memory.pid';
         fs.unlinkSync(pidPath);
       } catch (_) { /* ignore */ }
@@ -1372,10 +1521,15 @@ export default {
       };
 
       // 1. Fire-and-forget: read session file + store to DB
-      const sessionMessages = readSessionFile(event.sessionFile || '');
-      plugin.store(agentId, sessionMessages).catch((err: any) => {
-        log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
-      });
+      const sessionMessages = (event.sessionFile && typeof event.sessionFile === 'string')
+        ? readSessionFile(event.sessionFile)
+        : [];
+
+      if (sessionMessages.length > 0) {
+        plugin.store(agentId, sessionMessages).catch((err: any) => {
+          log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
+        });
+      }
 
       // 2. Fire-and-forget: DB-only peripheral promotion (no LLM, fast)
       plugin.promotePeripheralOnCompaction(agentId).catch((err: any) => {
@@ -1510,6 +1664,7 @@ export default {
       { name: 'algo_memory_recall_reset', description: '清除会话去重状态，允许相同查询再次召回', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_fts_rebuild', description: '重建 FTS5 全文索引，修复 rowid 漂移导致的搜索失败问题', parameters: Type.Object({}) },
       { name: 'algo_memory_compact', description: '手动触发 compaction 强化：提升 peripheral→working/core，强化 core importance，清理低价值 peripheral', parameters: Type.Object({ agentId: Type.String() }) },
+      { name: 'algo_memory_health', description: '健康检查：DB 完整性、FTS 同步状态、buffer 待写数量、内存占用、LLM 调用统计', parameters: Type.Object({}) },
       { name: 'algo_memory_correct', description: '记忆修正。用法一（已知 memoryId）：直接更新内容；用法二（自然语言）：AI 定位相关记忆并生成修正建议，置信度>0.8 自动应用，否则返回建议待确认', parameters: Type.Object({
         agentId: Type.String(),
         correction: Type.String(),
@@ -1547,6 +1702,7 @@ export default {
               case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
               case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
               case 'algo_memory_compact': result = await plugin.manualCompact(params.agentId); break;
+              case 'algo_memory_health': result = plugin.getHealth(); break;
               case 'algo_memory_correct': result = await plugin.correct(params.agentId, params.correction, params.memoryId, params.newContent); break;
               default: result = { error: 'Unknown tool' };
             }
@@ -1691,6 +1847,7 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(args.agentId); break;
             case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
             case 'algo_memory_compact': result = await plugin.manualCompact(args.agentId); break;
+            case 'algo_memory_health': result = plugin.getHealth(); break;
             default: result = { error: 'Unknown tool' };
           }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
