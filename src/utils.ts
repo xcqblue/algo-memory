@@ -5,58 +5,6 @@
 import * as crypto from 'crypto';
 import type { Config, NoiseFilterConfig, TierConfig, ReinforcementConfig, Memory, SessionDedupConfig } from './types.js';
 
-/**
- * 简单关键词提取（纯规则，无需 LLM）
- * v2.5.0: 用于 topic drift 检测
- */
-export function extractSimpleKeywords(text: string, maxKeywords = 10): string[] {
-  // 去掉停用词
-  const stopWords = new Set(['的', '了', '在', '是', '我', '你', '他', '她', '它', '们', '这', '那', '有', '没有', '和', '与', '或', '不', '很', '都', '也', '就', '还', '又', '但', '而', '及', '与', '把', '被', '让', '给', '对', '于', '用', '从', '到', '去', '来', '上', '下', '里', '外', '前', '后', '中', '内', '间', '等', '各', '本', '此', '一', '一个', 'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'we', 'they', 'he', 'she', 'it', 'what', 'which', 'who', 'when', 'where', 'why', 'how']);
-  const words = text
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(w => w.length > 1 && !stopWords.has(w) && !/^\d+$/.test(w));
-  const freq = new Map<string, number>();
-  for (const w of words) freq.set(w, (freq.get(w) || 0) + 1);
-  return [...freq.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, maxKeywords)
-    .map(([w]) => w);
-}
-
-/**
- * 计算两组关键词的 Jaccard 重叠度
- */
-export function keywordOverlap(kw1: string[], kw2: string[]): number {
-  if (kw1.length === 0 || kw2.length === 0) return 0;
-  const set2 = new Set(kw2);
-  const intersection = kw1.filter(k => set2.has(k)).length;
-  return intersection / Math.max(kw1.length, kw2.length);
-}
-
-/**
- * 检测话题是否发生漂移（v2.5.0: proactive recall 前置检测）
- * @param messages 最近 N 条消息（role=user）
- * @param driftConfig topicDrift 配置
- * @returns true = 检测到话题漂移，应触发预加载
- */
-export function detectTopicDrift(
-  messages: string[],
-  driftConfig: { windowSize: number; driftThreshold: number }
-): boolean {
-  if (messages.length < driftConfig.windowSize * 2) return false;
-  const half = driftConfig.windowSize;
-  const recent = messages.slice(-half);
-  const previous = messages.slice(-half * 2, -half);
-  const kw1 = extractSimpleKeywords(recent.join(' '));
-  const kw2 = extractSimpleKeywords(previous.join(' '));
-  const overlap = keywordOverlap(kw1, kw2);
-  // overlap 越小 = 话题变化越大
-  return overlap < (1 - driftConfig.driftThreshold);
-}
-
-// ============= Constants =============
 export const MAX_MESSAGE_LENGTH = 10000;
 export const CACHE_MAX_SIZE = 100;
 export const CACHE_TTL_MS = 5 * 60 * 1000;

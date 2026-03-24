@@ -198,7 +198,7 @@ export interface Memory {
   scope: string;
   content: string;
   type: string;
-  tier: 'core' | 'working' | 'peripheral' | 'pending';
+  tier: 'core' | 'working' | 'peripheral';
   layer: string;
   keywords: string;
   importance: number;

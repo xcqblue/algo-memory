@@ -18,7 +18,7 @@ export function initSchema(db: AnyDatabase, log: any): void {
   required(`
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, scope TEXT DEFAULT 'agent',
-      content TEXT NOT NULL, type TEXT DEFAULT 'other', tier TEXT DEFAULT 'pending',
+      content TEXT NOT NULL, type TEXT DEFAULT 'other', tier TEXT DEFAULT 'working',
       layer TEXT DEFAULT 'general', keywords TEXT, importance REAL DEFAULT 0.5,
       access_count INTEGER DEFAULT 0, cited_count INTEGER DEFAULT 0,
       tier_confidence REAL DEFAULT 1.0,

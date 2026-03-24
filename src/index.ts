@@ -814,23 +814,6 @@ confidence 是 0-1 的置信度。
     }
   }
 
-  /**
-   * 将 pending tier 升级为 working（v2.5.0: post-capture classification）
-   * 被 recall 命中的 pending 记忆说明有实际价值，立即升级
-   */
-  async upgradePendingMemories(AgentId: string, memoryIds: string[]): Promise<void> {
-    if (!this.db || memoryIds.length === 0) return;
-    try {
-      const placeholders = memoryIds.map(() => '?').join(',');
-      run(this._db(),
-        `UPDATE memories SET tier = 'working', tier_confidence = 1.0, last_tier_update = ?, importance = MIN(1.0, importance + 0.1) WHERE id IN (${placeholders}) AND tier = 'pending'`,
-        [Date.now(), ...memoryIds]
-      );
-      this.log.info(`[algo-memory] [upgrade_pending] 升级 ${memoryIds.length} 条 pending → working`);
-    } catch (err) {
-      this.log.error('[algo-memory] upgradePendingMemories 失败:', err);
-    }
-  }
 
   /** 插件是否处于激活状态 */
   isActive(): boolean {
@@ -1416,12 +1399,6 @@ export default {
             const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
             log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
             api.prependSystemContext(selected.join('\n') + suffix + '\n');
-
-            // Direction 1: post-capture classification — recall 成功 → pending tier 升 working
-            const pendingIds = memories.filter((m: any) => m.tier === 'pending').map((m: any) => m.id);
-            if (pendingIds.length > 0) {
-              plugin.upgradePendingMemories(agentId, pendingIds).catch(() => {});
-            }
           }
         } catch (err: any) {
           log.error('[algo-memory] before_prompt_build 钩子错误:', err?.message ?? err, err?.stack);
