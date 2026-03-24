@@ -169,24 +169,6 @@
           }
         }
       },
-      "sessionSummary": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "enabled": {
-            "type": "boolean",
-            "default": false
-          },
-          "dir": {
-            "type": "string",
-            "default": "memory"
-          },
-          "maxItems": {
-            "type": "number",
-            "default": 50
-          }
-        }
-      },
       "tier": {
         "type": "object",
         "properties": {
@@ -596,21 +578,6 @@
     "hardMinScore.threshold": {
       "label": "最低分阈值"
     },
-    "sessionSummary": {
-      "label": "Session摘要",
-      "description": "session 结束时写 Markdown 摘要"
-    },
-    "sessionSummary.enabled": {
-      "label": "启用摘要写入"
-    },
-    "sessionSummary.dir": {
-      "label": "摘要目录",
-      "description": "已禁用（v2.6.0），写 workspace 文件会导致冲突，请使用 algo_memory_export 导出"
-    },
-    "sessionSummary.maxItems": {
-      "label": "最大条数"
-    },
-    "tier": {
       "label": "分层管理",
       "description": "核心/工作/外围记忆分层"
     },

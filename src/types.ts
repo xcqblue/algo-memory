@@ -10,7 +10,7 @@ export interface Config {
   maxInjectTokens: number;
   cleanupDays: number;
   metricsEnabled: boolean; // enable llm_output hook to record LLM usage stats
-  snapshotRetentionDays: number; // how many days of session snapshots to keep
+ // how many days of session snapshots to keep
   language: string;
   coreKeywords: string[];
   recencyDecay: boolean;
@@ -29,8 +29,6 @@ export interface Config {
   capturePerTurn: number;
   llm: LLMConfig;
   threshold: ThresholdConfig;
-  sessionSummary: SessionSummaryConfig;
-  sessionContinuity: SessionContinuityConfig;
   feedback: FeedbackConfig;
   mcp: MCPConfig;
   /** 批量写入配置 */
@@ -57,14 +55,6 @@ export interface MCPConfig {
   port: number;
 }
 
-export interface SessionContinuityConfig {
-  /** 是否启用会话续接功能 */
-  enabled: boolean;
-  /** 注入上下文的最大 tokens 上限 */
-  maxInjectTokens: number;
-  /** 每次会话最多保存的 message 数量（用于生成摘要） */
-  maxMessagesForSummary: number;
-}
 
 export interface BatchWriteConfig {
   /** 是否启用批量写入 */
@@ -145,13 +135,6 @@ export interface HardMinScoreConfig {
   threshold: number;
 }
 
-export interface SessionSummaryConfig {
-  enabled: boolean;
-  /** Markdown 摘要写入目录，默认为 <stateDir>/memory */
-  dir: string;
-  /** 摘要文件最大条数（超出截断旧条目） */
-  maxItems: number;
-}
 
 export interface TierConfig {
   enabled: boolean;
@@ -245,7 +228,7 @@ export const DEFAULT_CONFIG: Config = {
   maxInjectTokens: 1500,
   cleanupDays: 180,
   metricsEnabled: true,  // enable llm_output hook to record LLM usage stats
-  snapshotRetentionDays: 30,  // days of session snapshots to retain before cleanup
+
   language: 'auto',
   coreKeywords: ['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget'],
   recencyDecay: true,
@@ -275,10 +258,8 @@ export const DEFAULT_CONFIG: Config = {
   capturePerTurn: 3,
   llm: { enabled: false, provider: 'auto', apiKey: '', model: '', baseURL: '', batchWindowMs: 200 },
   threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
-  sessionSummary: { enabled: true, dir: 'memory', maxItems: 50 },
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },
   mcp: { enabled: false, transport: 'stdio', port: 8181 },
-  sessionContinuity: { enabled: true, maxInjectTokens: 800, maxMessagesForSummary: 30 },
   batchWrite: { enabled: true, bufferMs: 500, maxBatchSize: 20 },
   compression: { enabled: true, maxLength: 200, extractKeywords: true },
 };

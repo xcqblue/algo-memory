@@ -45,8 +45,6 @@ algo-memory 在以下事件触发时自动工作（无需配置）：
 | `llm_output` | LLM 回复后 | 记录 token 使用统计 |
 | `gateway_stop` | Gateway 关闭 | 干净 flush 所有 buffer，关闭 DB |
 
-> `session_start` / `session_end` 是 Planned 事件，当前 OpenClaw 版本不触发，实际由 `agent_end` 统一处理 capture + 会话快照。
-
 ---
 
 ## 工具（18 个）
@@ -213,11 +211,8 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 ### 会话
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `sessionContinuity.enabled` | `true` | 启用会话续接 |
-| `sessionContinuity.maxInjectTokens` | `800` | 注入上下文的最大 token 数 |
-| `sessionContinuity.maxMessagesForSummary` | `30` | 生成摘要最多使用多少条消息 |
-| `sessionSummary.enabled` | `true` | 结束时写摘要 |
-| `sessionSummary.maxItems` | `50` | 摘要最大条数 |
+| `cleanupDays` | `180` | peripheral 层记忆超过此天数后清理 |
+| `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
 
 ### 自适应召回
 | 配置项 | 默认值 | 说明 |

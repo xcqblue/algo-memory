@@ -26,7 +26,6 @@
 | `maxResults` | `5` | 单次召回最大条数 |
 | `capturePerTurn` | `3` | 每轮对话最多存储条数 |
 | `cleanupDays` | `180` | peripheral 层记忆超过此天数后清理 |
-| `snapshotRetentionDays` | `30` | session_snapshots 表保留天数 |
 | `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
 | `language` | `"auto"` | 语言：`auto` / `zh` / `en` |
 
@@ -149,41 +148,6 @@ peripheral: score < 0.15
 working:    everything in between
 ```
 
----
-
-## 会话续接
-
-解决"晚上对话后，第二天早上继续时上下文丢失"的问题。
-
-| 配置 | 默认 | 说明 |
-|------|------|------|
-| `sessionContinuity.enabled` | `true` | 启用会话续接 |
-| `sessionContinuity.maxInjectTokens` | `800` | 注入上下文的最大 token 数 |
-| `sessionContinuity.maxMessagesForSummary` | `30` | 生成摘要最多使用多少条消息 |
-
-**工作原理：**
-1. `agent_end` 钩子：保存会话快照到 `session_snapshots` 表
-2. 下次会话开始：检测到 sessionKey 变化，从 DB 读取上会话摘要注入上下文
-
----
-
-## Session 摘要
-
-| 配置 | 默认 | 说明 |
-|------|------|------|
-| `sessionSummary.enabled` | `true` | 开启 session 结束时写摘要 |
-| `sessionSummary.maxItems` | `50` | 摘要最大条数（超出截断旧条目）|
-
-> 注意：`sessionSummary.dir` 配置已废弃（v2.6.0 禁用了直接写 workspace 文件，避免与 workspace plugin 冲突）。如需导出，使用 `algo_memory_export` 工具。
-
----
-
-## 反馈修正
-
-| 配置 | 默认 | 说明 |
-|------|------|------|
-| `feedback.enabled` | `true` | 开启反馈修正 |
-| `feedback.maxMemories` | `5` | 单次反馈最多召回的记忆条数 |
 | `feedback.matchThreshold` | `0.6` | LLM 匹配置信度阈值 |
 
 ---
@@ -241,7 +205,6 @@ working:    everything in between
   "maxResults": 5,
   "capturePerTurn": 3,
   "cleanupDays": 180,
-  "snapshotRetentionDays": 30,
   "metricsEnabled": true,
   "language": "auto",
   "coreKeywords": ["记住", "重要", "别忘", "不要忘记", "remember", "important", "never forget"],
@@ -297,14 +260,6 @@ working:    everything in between
     }
   },
   "sessionContinuity": {
-    "enabled": true,
-    "maxInjectTokens": 800,
-    "maxMessagesForSummary": 30
-  },
-  "sessionSummary": {
-    "enabled": true,
-    "maxItems": 50
-  },
   "feedback": {
     "enabled": true,
     "maxMemories": 5,

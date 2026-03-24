@@ -30,8 +30,7 @@ store(AgentId, messages[])
                                             ▼
                                      SQLite memories table
                                             │
-                                            ├─► FTS5 memories_fts (via triggers)
-                                            └─► session_snapshots (session_end hook)
+                                            └─► FTS5 memories_fts (via triggers)
 ```
 
 ---
@@ -144,8 +143,6 @@ registerHook()
     ├─ before_prompt_build ──► recall() ──► prependSystemContext()
     │
     ├─ agent_end ──► store() ──► scheduleBatchWrite()
-    │                 └─► saveSessionSnapshot()  ← sessionContinuity
-    │
     ├─ before_compaction ──► store(sessionFile) ──► promotePeripheral()
     │                       └─► reinforceOnCompaction()
     │
@@ -168,33 +165,14 @@ registerHook()
 
 ## Workspace Integration
 
-algo-memory stores workspace-relevant data in two places:
+algo-memory 写入 workspace 的文件：
 
 | Path | Purpose | Format |
 |------|---------|--------|
-| `~/.openclaw/state/algo-memory/session_snapshots` | Session continuity | SQLite table (session_snapshots) |
 | `memory/algo-memory/YYYY-MM-DD.md` | Core memory sync | **已禁用（v2.6.0）** |
 
 **为什么不直接写 workspace 文件？**
 workspace plugin 使用 JSON 格式写入 `MEMORY.md`，algo-memory 直接写 Markdown 会导致格式冲突。v2.6.0 起 `syncCoreToWorkspace` 改为禁用状态，如需导出使用 `algo_memory_export` 工具。
-
----
-
-## Session Continuity
-
-Two independent mechanisms coexist:
-
-| System | Storage | Trigger | Scope |
-|--------|---------|---------|-------|
-| OpenClaw built-in | `sessions.json` | compaction `memoryFlush` | transcript |
-| algo-memory | `session_snapshots` table | `session_end` | summary |
-
-algo-memory's snapshots are plain-text summaries (not the full transcript), designed for:
-1. Fast injection via `prependSystemContext()`
-2. Long-term persistence across Gateway restarts
-3. Token-budget-friendly (not the full message history)
-
----
 
 ## LLM Providers
 

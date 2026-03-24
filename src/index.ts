@@ -71,10 +71,8 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     smartDedup: scalar('smartDedup', DEFAULT_CONFIG.smartDedup),
     dedupThreshold: scalar('dedupThreshold', DEFAULT_CONFIG.dedupThreshold),
     capturePerTurn: scalar('capturePerTurn', DEFAULT_CONFIG.capturePerTurn),
-    sessionSummary: { ...DEFAULT_CONFIG.sessionSummary, ...userConfig.sessionSummary },
     feedback: { ...DEFAULT_CONFIG.feedback, ...userConfig.feedback },
     mcp: { ...DEFAULT_CONFIG.mcp, ...userConfig.mcp },
-    sessionContinuity: { ...DEFAULT_CONFIG.sessionContinuity, ...userConfig.sessionContinuity },
     batchWrite: { ...DEFAULT_CONFIG.batchWrite, ...userConfig.batchWrite },
     compression: { ...DEFAULT_CONFIG.compression, ...userConfig.compression },
   };
@@ -186,19 +184,6 @@ class MemoryPlugin {
     this.log.info(`[algo-memory] 每轮最多写入: ${this.config.capturePerTurn} 条`);
 
     this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
-
-    // 恢复会话状态（防止 Gateway 重启后丢失 lastSessionKey）
-    if (this.config.sessionContinuity?.enabled) {
-      try {
-        const rows = queryAll(this._db(), `SELECT agent_id FROM session_metadata`) as any[];
-        for (const row of rows) {
-          this.restoreLastSessionKey(row.agent_id);
-        }
-        this.log.info(`[algo-memory] 已恢复 ${rows.length} 个 Agent 的会话状态`);
-      } catch (err) {
-        this.log.error('[algo-memory] 恢复会话状态失败:', err);
-      }
-    }
   }
 
   async store(AgentId: string, messages: any[]): Promise<void> {
@@ -695,40 +680,8 @@ confidence 是 0-1 的置信度。
     if (total > 0) {
       this.log.info('[algo-memory] 清理了', total, '条过期记忆');
     }
-
-    // 清理过期的会话快照（默认保留 7 天）
-    this.cleanupSnapshots();
   }
 
-  /**
-   * 清理过期的会话快照
-   */
-  cleanupSnapshots(): void {
-    if (!this.db) return;
-    try {
-      const snapshotRetentionDays = this.config.snapshotRetentionDays ?? 30;
-      const cutoff = Date.now() - snapshotRetentionDays * 24 * 60 * 60 * 1000;
-
-      // 获取要删除的快照数量
-      const countRows = queryAll(this._db(),
-        `SELECT COUNT(*) as cnt FROM session_snapshots WHERE ended_at < ?`,
-        [cutoff]
-      ) as any[];
-      const count = countRows[0]?.cnt || 0;
-
-      if (count === 0) return;
-
-      // 删除过期快照
-      const deleted = run(this._db(),
-        `DELETE FROM session_snapshots WHERE ended_at < ?`,
-        [cutoff]
-      );
-
-      this.log.info(`[algo-memory] 清理了 ${deleted} 条过期会话快照（保留最近 ${snapshotRetentionDays} 天）`);
-    } catch (err) {
-      this.log.error('[algo-memory] 清理会话快照失败:', err);
-    }
-  }
 
   /**
    * compaction 周期开始前：将频繁访问的 peripheral 记忆升级为 working
@@ -847,10 +800,8 @@ confidence 是 0-1 的置信度。
     // DB 基本检查
     try {
       const memCount = (queryOne(this._db(), 'SELECT COUNT(*) as cnt FROM memories') as any)?.cnt ?? 0;
-      const snapCount = (queryOne(this._db(), 'SELECT COUNT(*) as cnt FROM session_snapshots') as any)?.cnt ?? 0;
       db.ok = true;
       db.memories = memCount;
-      db.snapshots = snapCount;
       db.path = this.dbPath;
     } catch (err: any) {
       issues.push(`DB 查询失败: ${err?.message ?? err}`);
@@ -905,7 +856,6 @@ confidence 是 0-1 的置信度。
       cleanupDays: this.config.cleanupDays,
       llmProvider: this.config.llm?.provider ?? '未配置',
       mmrLambda: this.config.mmr?.lambda,
-      sessionContinuity: this.config.sessionContinuity?.enabled,
     };
 
     return {
@@ -1026,286 +976,6 @@ confidence 是 0-1 的置信度。
 
   // ============= 会话续接功能 =============
   /** 上一次会话的 sessionKey（用于检测会话切换） */
-  private lastSessionKey: Map<string, string> = new Map();
-
-  /**
-   * 从消息列表生成会话摘要
-   * 提取关键上下文用于跨会话续接
-   */
-  generateSessionSummary(messages: any[], maxMessages: number = 30): string {
-    if (!messages || messages.length === 0) return '';
-
-    // 取最近 N 条消息
-    const recentMessages = messages.slice(-maxMessages);
-    const lines: string[] = [];
-
-    for (const msg of recentMessages) {
-      const rawText = extractMessageText(msg.content);
-      if (!rawText) continue;
-      if (msg.role === 'user') {
-        // 截断过长内容
-        const content = rawText.length > 200 ? rawText.substring(0, 200) + '...' : rawText;
-        lines.push(`用户: ${content}`);
-      } else if (msg.role === 'assistant' && !msg.isError) {
-        const content = rawText.length > 200 ? rawText.substring(0, 200) + '...' : rawText;
-        lines.push(`助手: ${content}`);
-      }
-    }
-
-    return lines.join('\n');
-  }
-
-  /**
-   * 从消息列表提取上下文快照（去重压缩版本）
-   */
-  extractContextSnapshot(messages: any[], maxMessages: number = 30): string {
-    if (!messages || messages.length === 0) return '';
-
-    const recentMessages = messages.slice(-maxMessages);
-    const seen = new Set<string>();
-    const lines: string[] = [];
-
-    for (const msg of recentMessages) {
-      const rawText = extractMessageText(msg.content);
-      if (!rawText) continue;
-      if (msg.role === 'user') {
-        const normalized = normalizeForStorage(rawText);
-        if (normalized.length < 3) continue;
-        const key = normalized.substring(0, 50);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const content = normalized.length > 300 ? normalized.substring(0, 300) + '...' : normalized;
-        lines.push(`用户: ${content}`);
-      } else if (msg.role === 'assistant' && !msg.isError) {
-        const content = normalizeForStorage(rawText);
-        if (!content || content.length < 3) continue;
-        const key = 'a:' + content.substring(0, 50);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const truncated = content.length > 300 ? content.substring(0, 300) + '...' : content;
-        lines.push(`助手: ${truncated}`);
-      }
-    }
-
-    return lines.join('\n');
-  }
-
-  /**
-   * 保存会话快照到数据库
-   */
-  saveSessionSnapshot(AgentId: string, sessionKey: string, messages: any[]): void {
-    if (!this.db || !this.config.sessionContinuity.enabled) return;
-
-    // 先刷新批量缓冲区，确保所有记忆都已写入数据库
-    try {
-      flushAllBuffers(this._db(), this.config, this.log);
-    } catch (e) {
-      this.log.warn(`[algo-memory] 刷新批量缓冲区失败: ${e}`);
-    }
-
-    try {
-      const maxMessages = this.config.sessionContinuity.maxMessagesForSummary || 30;
-      const summary = this.generateSessionSummary(messages, maxMessages);
-      const contextSnapshot = this.extractContextSnapshot(messages, maxMessages);
-      const messageCount = messages.length;
-      const totalTokens = estimateTokens(JSON.stringify(messages));
-
-      // 写入数据库
-      const id = 'snap_' + generateId();
-      run(this._db(),
-        `INSERT INTO session_snapshots (id, agent_id, session_key, ended_at, summary, context_snapshot, message_count, total_tokens, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, AgentId, sessionKey, Date.now(), summary, contextSnapshot, messageCount, totalTokens, Date.now()]
-      );
-
-      // 持久化 lastSessionKey 到数据库（防止 Gateway 重启后丢失）
-      run(this._db(),
-        `INSERT OR REPLACE INTO session_metadata (agent_id, last_session_key, updated_at)
-         VALUES (?, ?, ?)`,
-        [AgentId, sessionKey, Date.now()]
-      );
-
-      // 同时更新内存中的 lastSessionKey
-      this.lastSessionKey.set(AgentId, sessionKey);
-
-      this.log.info(`[algo-memory] 会话快照已保存: ${sessionKey}, ${messageCount} 条消息, ${totalTokens} tokens`);
-    } catch (err) {
-      this.log.error('[algo-memory] 保存会话快照失败:', err);
-    }
-  }
-
-  /**
-   * 从数据库恢复 lastSessionKey（Gateway 重启后调用）
-   */
-  restoreLastSessionKey(AgentId: string): void {
-    if (!this.db) return;
-    try {
-      const row = queryOne(this._db(),
-        `SELECT last_session_key FROM session_metadata WHERE agent_id = ?`,
-        [AgentId]
-      ) as any;
-      if (row?.last_session_key) {
-        this.lastSessionKey.set(AgentId, row.last_session_key);
-        this.log.info(`[algo-memory] 恢复 lastSessionKey: ${row.last_session_key}`);
-      }
-    } catch (err) {
-      this.log.error('[algo-memory] 恢复 lastSessionKey 失败:', err);
-    }
-  }
-
-  /**
-   * 获取指定 Agent 的最新会话快照
-   */
-  getLastSessionSnapshot(AgentId: string): any {
-    if (!this.db || !this.config.sessionContinuity.enabled) return null;
-
-    try {
-      const row = queryOne(this._db(),
-        `SELECT * FROM session_snapshots WHERE agent_id = ? ORDER BY ended_at DESC LIMIT 1`,
-        [AgentId]
-      );
-      return row || null;
-    } catch (err) {
-      this.log.error('[algo-memory] 获取会话快照失败:', err);
-      return null;
-    }
-  }
-
-  /**
-   * 检测并处理会话切换
-   * 如果 sessionKey 变了，返回上次会话的快照用于续接
-   */
-  detectSessionChangeAndGetSnapshot(AgentId: string, currentSessionKey: string): any {
-    if (!this.config.sessionContinuity.enabled) return null;
-
-    const lastKey = this.lastSessionKey.get(AgentId);
-
-    // 如果是同一个会话，不需要续接
-    if (lastKey === currentSessionKey) {
-      return null;
-    }
-
-    // 更新记录的 sessionKey
-    this.lastSessionKey.set(AgentId, currentSessionKey);
-
-    // 如果没有上次的 sessionKey，说明是首次，不需要续接
-    if (!lastKey) {
-      return null;
-    }
-
-    // 查找上一个会话的快照
-    const snapshot = this.getLastSessionSnapshot(AgentId);
-    if (snapshot) {
-      this.log.info(`[algo-memory] 检测到会话切换: ${lastKey} -> ${currentSessionKey}`);
-    }
-
-    return snapshot;
-  }
-
-  /**
-   * 构建会话续接的上下文文本
-   */
-  buildSessionContinuityContext(snapshot: any): { text: string; tokens: number } {
-    if (!snapshot) return { text: '', tokens: 0 };
-
-    const maxTokens = this.config.sessionContinuity.maxInjectTokens || 800;
-    const lines: string[] = [];
-
-    // 添加摘要部分
-    if (snapshot.summary) {
-      lines.push('【上会话摘要】');
-      const summaryLines = snapshot.summary.split('\n').slice(-10); // 最近 10 行
-      for (const line of summaryLines) {
-        const lineTokens = estimateTokens(line) + 1;
-        if (estimateTokens(lines.join('\n') + '\n' + line) <= maxTokens) {
-          lines.push(line);
-        }
-      }
-    }
-
-    // 添加上下文快照（如果还有空间）
-    if (snapshot.context_snapshot && lines.join('\n').length < maxTokens * 2) {
-      lines.push('');
-      lines.push('【上会话详情】');
-      const contextLines = snapshot.context_snapshot.split('\n').slice(-20); // 最近 20 行
-      for (const line of contextLines) {
-        const currentTokens = estimateTokens(lines.join('\n') + '\n' + line);
-        if (currentTokens <= maxTokens) {
-          lines.push(line);
-        } else {
-          break;
-        }
-      }
-    }
-
-    const text = lines.join('\n');
-    return { text, tokens: estimateTokens(text) };
-  }
-
-  /** 将会话期间新增的记忆写入 Markdown 摘要文件（跨 session 延续） */
-  writeSessionSummary(agentId = 'default'): void {
-    if (!this.config.sessionSummary.enabled) return;
-    // Flush all agent buffers first so latest memories are in DB before we read them
-    this.flushAll();
-    try {
-      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-      const stateDir = this.dbPath.replace(/[/\\][^/\\]+$/, '');
-      const summaryDir = path.join(stateDir, this.config.sessionSummary.dir);
-      if (!fs.existsSync(summaryDir)) fs.mkdirSync(summaryDir, { recursive: true });
-      // Use per-agent summary files to avoid mixing sessions for different users
-      const safeId = String(agentId).replace(/[^a-zA-Z0-9_-]/g, '_');
-      const filePath = path.join(summaryDir, `${today}_${safeId}.md`);
-      const markerPath = path.join(summaryDir, `.${today}_${safeId}.lastids`);
-
-      // 读取最近 N 条记忆的 content_hash 作为指纹（内容变了就重写）
-      const recentMemories = queryAll(this._db(),
-        `SELECT content_hash FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`,
-        [agentId, this.config.sessionSummary.maxItems]
-      ) as unknown as Array<{ content_hash: string }>;
-      if (recentMemories.length === 0) return;
-
-      const currentHashes = recentMemories.map(m => m.content_hash).join(',');
-
-      // 读取上次写入的指纹，避免无变化重复写入
-      let lastHashes = '';
-      if (fs.existsSync(markerPath)) lastHashes = fs.readFileSync(markerPath, 'utf-8').trim();
-      if (lastHashes === currentHashes) return; // 无新内容，跳过
-
-      // 读取现有 Markdown 内容
-      let existing = '';
-      if (fs.existsSync(filePath)) existing = fs.readFileSync(filePath, 'utf-8');
-
-      const header = existing.includes('# Algo-Memory 日记')
-        ? ''
-        : `# Algo-Memory 日记\n\n`;
-
-      // 收集记忆详情
-      const memoryDetails = queryAll(this._db(),
-        `SELECT id, content, tier, importance, created_at FROM memories
-         WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`,
-        [agentId, this.config.sessionSummary.maxItems]
-      ) as unknown as Array<{ id: string; content: string; tier: string; importance: number; created_at: number }>;
-
-      const lines: string[] = [];
-      const dateStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-      lines.push(`\n## ${dateStr}  Session 摘要\n`);
-      for (const m of memoryDetails) {
-        const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
-        lines.push(`- [${m.tier.toUpperCase()}] ${m.content.slice(0, 200)}${m.content.length > 200 ? '…' : ''} *(重要性: ${m.importance.toFixed(2)}, ${time})*`);
-      }
-
-      let output = existing || header;
-      if (!output.includes('# Algo-Memory 日记')) output = header + output;
-      output = output.replace(/\n+$/, '\n') + lines.join('\n') + '\n';
-
-      fs.writeFileSync(filePath, output, 'utf-8');
-      fs.writeFileSync(markerPath, currentHashes, 'utf-8'); // 保存本次 hash 指纹
-      this.log.info(`[algo-memory] Session 摘要已写入: ${filePath}`);
-    } catch (err) {
-      this.log.error('[algo-memory] Session 摘要写入失败:', err);
-    }
-  }
-
   close(): void {
     if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
     this.cache.clear();
@@ -1344,24 +1014,14 @@ export default {
 
     // === Hooks ===
     // IMPORTANT: All OpenClaw hooks pass (event, ctx) — ctx.agentId is the source of truth.
-    // 注意：session_start / session_end 是 Planned/Future 事件，当前 OpenClaw 版本不触发
-    // agent_end 同时处理 capture + 会话快照，两个操作合并到一个 hook 减少开销
-    if (config.autoCapture || config.sessionContinuity?.enabled) {
+    if (config.autoCapture) {
       api.on('agent_end', async (event: any, ctx: any) => {
         const agentId = ctx?.agentId || 'default';
-        const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
         const messages = event?.messages || [];
-
-        // 1. capture 用户消息到记忆（autoCapture）
-        if (config.autoCapture && messages.length > 0) {
+        if (messages.length > 0) {
           plugin.store(agentId, messages).catch((err: any) => {
             log.error('[algo-memory] agent_end store 错误:', err?.message ?? err);
           });
-        }
-
-        // 2. 保存会话快照（sessionContinuity）
-        if (config.sessionContinuity?.enabled && messages.length > 0) {
-          plugin.saveSessionSnapshot(agentId, sessionKey, messages);
         }
       });
     }

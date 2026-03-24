@@ -28,36 +28,6 @@ export function initSchema(db: AnyDatabase, log: any): void {
     )
   `, 'memories 表');
 
-  // Create session_snapshots table for cross-session continuity
-  required(`
-    CREATE TABLE IF NOT EXISTS session_snapshots (
-      id TEXT PRIMARY KEY,
-      agent_id TEXT NOT NULL,
-      session_key TEXT NOT NULL,
-      ended_at INTEGER NOT NULL,
-      summary TEXT,
-      context_snapshot TEXT,
-      message_count INTEGER DEFAULT 0,
-      total_tokens INTEGER DEFAULT 0,
-      created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-    )
-  `, 'session_snapshots 表');
-
-  // Index for session_snapshots
-  try {
-    db.prepare('CREATE INDEX IF NOT EXISTS idx_snapshots_agent ON session_snapshots(agent_id)').run();
-    db.prepare('CREATE INDEX IF NOT EXISTS idx_snapshots_agent_ended ON session_snapshots(agent_id, ended_at DESC)').run();
-  } catch (_) { /* index creation is non-fatal */ }
-
-  // Create session_metadata table for persisting session state across restarts
-  required(`
-    CREATE TABLE IF NOT EXISTS session_metadata (
-      agent_id TEXT PRIMARY KEY,
-      last_session_key TEXT,
-      updated_at INTEGER
-    )
-  `, 'session_metadata 表');
-
   // Create tier_history table for tracking memory tier changes
   required(`
     CREATE TABLE IF NOT EXISTS tier_history (
