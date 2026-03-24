@@ -15,6 +15,8 @@ import {
   compressContent,
   extractContentSummary,
   extractMessageText,
+  normalizeText,
+  stripInboundMetadata,
   MAX_MESSAGE_LENGTH,
   MAX_SIMILAR_CHECK
 } from '../utils.js';
@@ -823,4 +825,17 @@ export async function store(
   }
 
   return captured;
+}
+
+// 导出 buffer 统计（供 health check 使用）
+export function getBufferStats(): Record<string, { pending: number; flushing: boolean; lastFlush: number | null }> {
+  const result: Record<string, { pending: number; flushing: boolean; lastFlush: number | null }> = {};
+  for (const [id, buf] of memoryBuffers) {
+    result[id] = {
+      pending: buf.memories.length,
+      flushing: buf.flushing,
+      lastFlush: buf.lastFlush || null
+    };
+  }
+  return result;
 }

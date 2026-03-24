@@ -12,7 +12,7 @@ import LRUCache from 'lru-cache';
 import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
-import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers } from './engine/store.js';
+import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers, getBufferStats } from './engine/store.js';
 import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
@@ -87,7 +87,8 @@ class MemoryPlugin {
   private cache: LRUCache<string, any>;
   private cleanupInterval: NodeJS.Timeout | null = null;
   private config: Config;
-  // Internal non-null db accessor (caller must guard against null)
+  /** 供外部 hook 调用，init 后 db 不为 null */
+  getDb(): DatabaseType { return this.db!; }
   private _db(): DatabaseType { return this.db!; }
   llmClient: LLMClient | null = null;
   private log: any;
@@ -105,7 +106,8 @@ class MemoryPlugin {
     dbErrors: 0,
     lastErrorAt: null as number | null,
     llmApiCalls: 0,
-    totalTokens: 0
+    totalTokens: 0,
+    llmCacheHits: 0,
   };
 
   constructor(config: Partial<Config>, log: any = console) {
@@ -703,7 +705,7 @@ confidence 是 0-1 的置信度。
   cleanupSnapshots(): void {
     if (!this.db) return;
     try {
-      const snapshotRetentionDays = 7; // 快照保留天数
+      const snapshotRetentionDays = this.config.snapshotRetentionDays ?? 30;
       const cutoff = Date.now() - snapshotRetentionDays * 24 * 60 * 60 * 1000;
 
       // 获取要删除的快照数量
@@ -814,11 +816,6 @@ confidence 是 0-1 的置信度。
   /** 插件是否处于激活状态 */
   isActive(): boolean {
     return this.db !== null;
-  }
-
-  /** 暴露内部 DB 引用给外部调用（如 hook） */
-  getDb(): ReturnType<typeof this._db> | null {
-    return this.db;
   }
 
   /** 手动刷新所有 agent 的 buffer 到 DB */
@@ -1426,34 +1423,10 @@ export default {
       });
     }
 
-    // === 会话续接：检测会话切换并注入上会话上下文 ===
+    // 注意：session_start / session_end 是 Planned/Future 事件，当前 OpenClaw 版本不触发
+    // 会话续接功能通过 session_snapshots 表和 session_key 追踪实现，暂不依赖这些 hook
+    // 但 agent_end 保存会话快照仍依赖 sessionContinuity 配置
     if (config.sessionContinuity?.enabled) {
-      // 在 session_start 时检测会话切换并注入上会话上下文
-      api.on('session_start', async (event: any, ctx: any) => {
-        try {
-          const agentId = ctx?.agentId || event?.sessionKey?.split(':')[2] || 'default';
-          const sessionKey = event?.sessionKey || 'unknown';
-          if (log.info) {
-            log.info(`[algo-memory] session_start - agentId=${agentId}, sessionKey=${sessionKey}, resumedFrom=${event.resumedFrom}`);
-          }
-          // 检测会话是否切换，获取上会话快照
-          const snapshot = plugin.detectSessionChangeAndGetSnapshot(agentId, sessionKey);
-          if (snapshot) {
-            const { text, tokens } = plugin.buildSessionContinuityContext(snapshot);
-            if (text && tokens > 0) {
-              log.info(`[algo-memory] 注入上会话上下文: ${tokens} tokens`);
-              api.prependSystemContext('\n\n' + text + '\n');
-            }
-          }
-        } catch (err: any) {
-          log.error('[algo-memory] session_start 会话续接钩子错误:', err?.message ?? err, err?.stack);
-        }
-      });
-
-      // 在 agent_end 时保存会话快照
-      // sessionKey 作为 agentId（in-memory Map key）实现多用户隔离：
-      // 同一用户的同一会话共享快照，不同会话独立。
-      // ctx?.sessionKey 是比 ctx?.agentId 更可靠的会话标识符。
       api.on('agent_end', async (event: any, ctx: any) => {
         try {
           const agentId = ctx?.sessionKey || ctx?.agentId || 'default';
@@ -1481,7 +1454,7 @@ export default {
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
           // Session dedup is handled inside shouldRetrieve via per-agent dedup state
-          if (!shouldRetrieve(query, { enabled: true, sessionDedup: config.sessionDedup, forceKeywords: config.forceKeywords }, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
+          if (!shouldRetrieve(query, config as any, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
 
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {
@@ -1508,18 +1481,6 @@ export default {
       }, { priority: 10 });
 
     }
-
-    // === Session Summary ===
-    // session_end: event.sessionKey 是唯一可靠的标识符
-    // 注意：session_end 可能没有 ctx.agentId，必须依赖 event.sessionKey
-    api.on('session_end', async (event: any) => {
-      try {
-        const agentId = event?.sessionKey || 'default';
-        plugin.writeSessionSummary(agentId);
-      } catch (err: any) {
-        log.error('[algo-memory] session_end 钩子错误:', err?.message ?? err, err?.stack);
-      }
-    });
 
     // === Compaction lifecycle (March 5 2026: before_compaction / after_compaction hooks) ===
     // OpenClaw calls these during context compression cycles.
@@ -1552,6 +1513,10 @@ export default {
         : [];
 
       if (sessionMessages.length > 0) {
+        // 先立即强制 flush 当前 buffer，再异步 store（避免 compaction 开始前 buffer 未 flush 丢失）
+        const { flushAllBuffers } = await import('./engine/store.js');
+        flushAllBuffers(plugin.getDb(), config, log);
+
         plugin.store(agentId, sessionMessages).catch((err: any) => {
           log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
         });
@@ -1576,9 +1541,9 @@ export default {
       try {
         const agentId = ctx?.agentId || 'default';
         if (!plugin.isActive()) return;
-        // Reinforce memories after compaction completes
-        await plugin.reinforceOnCompaction(agentId);
-        log.info(`[algo-memory] after_compaction: 完成强化，compactedCount=${event.compactedCount}, messageCount=${event.messageCount}`);
+        // 注意：reinforceOnCompaction 已在 before_compaction 中 fire-and-forget 执行
+        // compaction 后 context 已截断，此处无需重复强化
+        log.info(`[algo-memory] after_compaction: 跳过（强化已在 before_compaction 完成），compactedCount=${event.compactedCount}`);
       } catch (err: any) {
         log.error('[algo-memory] after_compaction 钩子错误:', err?.message ?? err, err?.stack);
       }
@@ -1691,6 +1656,7 @@ export default {
       { name: 'algo_memory_fts_rebuild', description: '重建 FTS5 全文索引，修复 rowid 漂移导致的搜索失败问题', parameters: Type.Object({}) },
       { name: 'algo_memory_compact', description: '手动触发 compaction 强化：提升 peripheral→working/core，强化 core importance，清理低价值 peripheral', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_health', description: '健康检查：DB 完整性、FTS 同步状态、buffer 待写数量、内存占用、LLM 调用统计', parameters: Type.Object({}) },
+      { name: 'algo_memory_sync', description: '手动同步 core 层记忆到 workspace 文件（memory/algo-memory/YYYY-MM-DD.md）。按需调用，非自动运行', parameters: Type.Object({}) },
       { name: 'algo_memory_correct', description: '记忆修正。用法一（已知 memoryId）：直接更新内容；用法二（自然语言）：AI 定位相关记忆并生成修正建议，置信度>0.8 自动应用，否则返回建议待确认', parameters: Type.Object({
         agentId: Type.String(),
         correction: Type.String(),
@@ -1729,6 +1695,7 @@ export default {
               case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
               case 'algo_memory_compact': result = await plugin.manualCompact(params.agentId); break;
               case 'algo_memory_health': result = plugin.getHealth(); break;
+              case 'algo_memory_sync': result = await plugin.syncCoreToWorkspace(); break;
               case 'algo_memory_correct': result = await plugin.correct(params.agentId, params.correction, params.memoryId, params.newContent); break;
               default: result = { error: 'Unknown tool' };
             }
