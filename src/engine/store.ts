@@ -5,7 +5,6 @@
 import { DEFAULT_VALUES } from '../types.js';
 import type { Config, Memory } from '../types.js';
 import {
-  normalizeText,
   isNoise,
   isCoreKeyword,
   extractKeywords,

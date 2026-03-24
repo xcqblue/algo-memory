@@ -10,6 +10,7 @@ export interface Config {
   maxInjectTokens: number;
   cleanupDays: number;
   metricsEnabled: boolean; // enable llm_output hook to record LLM usage stats
+  snapshotRetentionDays: number; // how many days of session snapshots to keep
   language: string;
   coreKeywords: string[];
   recencyDecay: boolean;
@@ -244,6 +245,7 @@ export const DEFAULT_CONFIG: Config = {
   maxInjectTokens: 1500,
   cleanupDays: 180,
   metricsEnabled: true,  // enable llm_output hook to record LLM usage stats
+  snapshotRetentionDays: 30,  // days of session snapshots to retain before cleanup
   language: 'auto',
   coreKeywords: ['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget'],
   recencyDecay: true,

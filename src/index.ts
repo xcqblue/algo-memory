@@ -1481,7 +1481,7 @@ export default {
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
           // Session dedup is handled inside shouldRetrieve via per-agent dedup state
-          if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
+          if (!shouldRetrieve(query, { enabled: true, sessionDedup: config.sessionDedup, forceKeywords: config.forceKeywords }, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
 
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {
