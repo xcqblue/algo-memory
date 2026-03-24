@@ -4,10 +4,6 @@ All notable changes to algo-memory are documented here.
 
 ## [2.7.0] - 2026-03-24
 
-### 新功能
-
-- **向量搜索接口**（可选，默认关闭）：支持 openai / minimaxi / bge / ollama / siliconflow，存储在 `memory_embeddings` 表，FTS5+向量混合融合评分（`ftsWeight` 配置权重）
-
 ### Breaking Changes（Session 续接功能移除，请检查旧配置）
 
 - 移除 `sessionContinuity` 配置项及所有相关代码

@@ -9,46 +9,10 @@ import {
   weibullDecay,
   reinforcementFactor,
   mmrDeduplicate,
-  lengthNorm,
-  cosineSimilarity,
+  lengthNorm
 } from '../utils.js';
-import { queryAll, run, getEmbeddings } from '../db/queries.js';
-import { embedText } from './embed.js';
+import { queryAll, run } from '../db/queries.js';
 import type { DbLike } from '../db/queries.js';
-
-// ============= Query Embedding Cache =============
-// 同一 query 在 5 分钟内不重复调用 embedding API
-interface CacheEntry {
-  embedding: number[];
-  dimensions: number;
-  ts: number;
-}
-const queryEmbeddingCache = new Map<string, CacheEntry>();
-const EMBEDDING_CACHE_TTL_MS = 5 * 60 * 1000; // 5分钟
-
-function getCachedQueryEmbedding(query: string): number[] | null {
-  const entry = queryEmbeddingCache.get(query);
-  if (entry && Date.now() - entry.ts < EMBEDDING_CACHE_TTL_MS) {
-    return entry.embedding;
-  }
-  return null;
-}
-
-function setCachedQueryEmbedding(query: string, embedding: number[], dimensions: number): void {
-  // 最多缓存 100 个 query，防止内存无限增长
-  if (queryEmbeddingCache.size >= 100) {
-    const oldestKey = [...queryEmbeddingCache.entries()]
-      .sort((a, b) => a[1].ts - b[1].ts)[0]?.[0];
-    if (oldestKey) queryEmbeddingCache.delete(oldestKey);
-  }
-  queryEmbeddingCache.set(query, { embedding, dimensions, ts: Date.now() });
-}
-
-export function clearQueryEmbeddingCache(): void {
-  queryEmbeddingCache.clear();
-}
-
-export { getCachedQueryEmbedding };
 
 export interface RecallDeps {
   db: DbLike;
@@ -158,47 +122,6 @@ export async function recall(
     memories = memories.map(m => {
       return { ...m, _score: m.importance };
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
-  }
-
-  // ---- Vector hybrid fusion (optional) ----
-  if (config.vectorSearch?.enabled && config.vectorSearch.model) {
-    try {
-      // 优先从缓存读取，避免重复调用 embedding API
-      let cached = getCachedQueryEmbedding(query);
-      if (!cached) {
-        const result = await embedText(query, config.vectorSearch);
-        cached = result.embedding;
-        setCachedQueryEmbedding(query, cached, result.dimensions);
-      }
-      const memoryIds = memories.map(m => m.id);
-      const embMap = getEmbeddings(db, memoryIds);
-      if (embMap.size > 0) {
-        const ftsWeight = config.vectorSearch.ftsWeight ?? 0.5;
-        const vectorWeight = 1 - ftsWeight;
-        const maxFtsScore = memories[0]?._score || 1;
-        let maxSim = 0;
-        const sims = new Map<string, number>();
-        for (const m of memories) {
-          const emb = embMap.get(m.id);
-          if (emb) {
-            const sim = cosineSimilarity(cached, emb);
-            sims.set(m.id, sim);
-            if (sim > maxSim) maxSim = sim;
-          }
-        }
-        if (maxSim > 0) {
-          memories = memories.map(m => {
-            const vecScore = sims.get(m.id) || 0;
-            const normFts = maxFtsScore > 0 ? m._score / maxFtsScore : 0;
-            const normVec = maxSim > 0 ? vecScore / maxSim : 0;
-            const fusedScore = normFts * ftsWeight + normVec * vectorWeight;
-            return { ...m, _score: fusedScore };
-          }).sort((a, b) => b._score - a._score);
-        }
-      }
-    } catch (err) {
-      log.warn('[algo-memory] 向量搜索失败，静默降级:', err);
-    }
   }
 
   // Build the final returned set: MMR → hardMinScore → truncate

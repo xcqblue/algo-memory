@@ -41,20 +41,6 @@ export function initSchema(db: AnyDatabase, log: any): void {
     )
   `, 'tier_history 表');
 
-  // Create memory_embeddings table for vector search
-  required(`
-    CREATE TABLE IF NOT EXISTS memory_embeddings (
-      memory_id TEXT PRIMARY KEY,
-      embedding TEXT NOT NULL,
-      dimensions INTEGER NOT NULL,
-      provider TEXT NOT NULL DEFAULT 'minimaxi',
-      created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-    )
-  `, 'memory_embeddings 表');
-
-  // Index for memory_embeddings
-  try { db.prepare('CREATE INDEX IF NOT EXISTS idx_embeddings_created ON memory_embeddings(created_at)').run(); } catch (_) { /* non-fatal */ }
-
   // Index for tier_history
   try {
     db.prepare('CREATE INDEX IF NOT EXISTS idx_tier_history_memory ON tier_history(memory_id)').run();

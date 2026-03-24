@@ -15,7 +15,7 @@ import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
 import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers, getBufferStats } from './engine/store.js';
 
 import { retrieve } from './engine/retrieve.js';
-import { recall as doRecall, clearQueryEmbeddingCache } from './engine/recall.js';
+import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
 import type { RecallDeps } from './engine/recall.js';
 import { LLMClient, resolveLLMConfig, llmEndpoint, llmHeaders } from './engine/llm.js';
@@ -971,8 +971,7 @@ confidence 是 0-1 的置信度。
   clearRecallDedup(AgentId: string): { success: boolean; message: string } {
     this.lastRecallQuery.delete(AgentId);
     this.lastRecallTime.delete(AgentId);
-    clearQueryEmbeddingCache();
-    return { success: true, message: `Agent ${AgentId} 的会话去重状态已清除，query 向量缓存已清空` };
+    return { success: true, message: `Agent ${AgentId} 的会话去重状态已清除` };
   }
 
   // ============= 会话续接功能 =============
