@@ -151,7 +151,7 @@ export OPENAI_API_KEY="your-key"
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `llm.provider` | `"minimax"` | LLM 提供商 |
-| `llm.model` | `"auto"` | 模型名称 |
+| `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
 | `noiseFilter.useLlmForDedup` | `false` | 启用 LLM 辅助去重（额外 LLM 调用）|
 | `noiseFilter.useLlmForCore` | `false` | 启用 LLM 判断 core（额外 LLM 调用）|
 | `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
