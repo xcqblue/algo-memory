@@ -2,6 +2,25 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.7.0] - 2026-03-24
+
+### Breaking Changes（Session 续接功能移除，请检查旧配置）
+
+- 移除 `sessionContinuity` 配置项及所有相关代码
+- 移除 `sessionSummary` 配置项及所有相关代码
+- 移除 `session_snapshots` 数据库表（init 时不再创建）
+- 移除 `session_metadata` 数据库表
+- 移除 `snapshotRetentionDays` 配置项
+- 移除 `before_prompt_build` 中的会话续接注入逻辑
+- 移除 `generateSessionSummary()`、`extractContextSnapshot()`、`saveSessionSnapshot()`、`getLastSessionSnapshot()`、`detectSessionChangeAndGetSnapshot()`、`buildSessionContinuityContext()`、`writeSessionSummary()`、`restoreLastSessionKey()` 方法
+- 移除 `lastSessionKey` Map 状态管理
+
+### Refactor
+
+- `agent_end` hook 简化为仅处理消息 capture，不再调用 session snapshot
+- 清理 `index.ts` 约 280 行 session 相关代码
+- 文档全面更新（README/CONFIG/ARCHITECTURE/INSTALL）
+
 ## [2.6.0] - 2026-03-24
 
 ### Breaking Changes（配置字段删减，请检查旧配置）

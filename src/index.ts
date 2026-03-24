@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.6.0
+ * algo-memory v2.7.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索

@@ -1,6 +1,6 @@
 {
   "name": "algo-memory",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "\u7eaf\u7b97\u6cd5\u957f\u671f\u8bb0\u5fc6\u63d2\u4ef6 - \u9ed8\u8ba4\u542f\u7528LLM / \u652f\u6301\u591a\u6a21\u578b",
   "type": "module",
   "main": "dist/index.js",

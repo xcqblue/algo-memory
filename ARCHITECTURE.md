@@ -61,7 +61,7 @@ Extract last 3 user messages → query string
     │
     ▼
 shouldRetrieve(query, config, sessionDedup)
-    │  - forceKeywords check (BEFORE META_PATTERNS)
+    │  - forceKeywords check (before META_PATTERNS)
     │  - META_PATTERNS skip
     │  - Length gate (CJK ≥6, EN ≥15)
     │  - sessionDedup (similarity ≥0.75 in 30s → skip)
@@ -69,7 +69,7 @@ shouldRetrieve(query, config, sessionDedup)
 FTS5 search (BM25)
     │
     ▼
-scoreMemories() — tier weight × recency × reinforcement × lengthNorm
+scoreMemories() — tier weight × weibullDecay × reinforcement × lengthNorm
     │
     ▼
 mmrDeduplicate() — λ×relevance - (1-λ)×diversity
@@ -126,7 +126,7 @@ When a memory is cited (appears in recall results):
 - `cited_count += 1`
 - `last_accessed = now`
 
-Reinforcement factor: `1.0 + (access_count - 1) × 0.5`, capped at `3.0×`.
+Compaction also reinforces: core memories boost `access_count` to 10, others to 5.
 
 ---
 
@@ -136,13 +136,13 @@ Reinforcement factor: `1.0 + (access_count - 1) × 0.5`, capped at `3.0×`.
 
 ```
 gateway_start
-    │
     ▼
 registerHook()
     │
     ├─ before_prompt_build ──► recall() ──► prependSystemContext()
     │
     ├─ agent_end ──► store() ──► scheduleBatchWrite()
+    │
     ├─ before_compaction ──► store(sessionFile) ──► promotePeripheral()
     │                       └─► reinforceOnCompaction()
     │
@@ -150,12 +150,8 @@ registerHook()
     │
     ├─ after_tool_call ──► reinforceCitedMemories(algo_memory_search results)
     │
-    ├─ llm_output ──► recordLlmUsage(token stats)
-    │
     └─ gateway_stop ──► flushAll() ──► db.close()
 ```
-
-> `session_start` / `session_end` 是 Planned 事件，当前 OpenClaw 版本不触发，实际由 `agent_end` 统一处理 capture + 会话快照。
 
 ### Context Priority
 
@@ -165,30 +161,25 @@ registerHook()
 
 ## Workspace Integration
 
-algo-memory 写入 workspace 的文件：
+algo-memory 的 `algo_memory_sync` 工具（导出 core 记忆）**已禁用**。workspace plugin 使用 JSON 格式写入 `MEMORY.md`，algo-memory 直接写 Markdown 会导致格式冲突。如需导出记忆，使用 `algo_memory_export` 工具。
 
-| Path | Purpose | Format |
-|------|---------|--------|
-| `memory/algo-memory/YYYY-MM-DD.md` | Core memory sync | **已禁用（v2.6.0）** |
-
-**为什么不直接写 workspace 文件？**
-workspace plugin 使用 JSON 格式写入 `MEMORY.md`，algo-memory 直接写 Markdown 会导致格式冲突。v2.6.0 起 `syncCoreToWorkspace` 改为禁用状态，如需导出使用 `algo_memory_export` 工具。
+---
 
 ## LLM Providers
 
 Supported providers (set via `config.llm.provider`):
 
-| Provider | Env Variable | Model |
-|----------|-------------|-------|
-| MiniMax | `MINIMAX_API_KEY` | `auto` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `auto` |
-| Kimi | `KIMI_API_KEY` | `auto` |
-| 阿里百炼 | `DASHSCOPE_API_KEY` | `auto` |
-| OpenAI | `OPENAI_API_KEY` | `auto` |
-| Anthropic | `ANTHROPIC_API_KEY` | `auto` |
-| 智谱 GLM | `ZHIPU_API_KEY` | `auto` |
-| Ollama | `OLLAMA_BASE_URL` | `auto` |
-| SiliconFlow | `SILICONFLOW_API_KEY` | `auto` |
+| Provider | Env Variable | Default Model |
+|----------|-------------|---------------|
+| MiniMax | `MINIMAX_API_KEY` | `abab6.5s-chat` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| Kimi | `KIMI_API_KEY` | `moonshot-v1-8k` |
+| 阿里百炼 | `DASHSCOPE_API_KEY` | `qwen-plus` |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-3-haiku` |
+| 智谱 GLM | `ZHIPU_API_KEY` | `glm-4-flash` |
+| Ollama | `OLLAMA_BASE_URL` | `llama3` |
+| SiliconFlow | `SILICONFLOW_API_KEY` | `Qwen/Qwen2-7B-Instruct` |
 
 ---
 
@@ -226,7 +217,7 @@ b = buffer size (typically 1-20)
 
 2. **FTS5 over vector search**: Vector search requires an embedding API. FTS5 BM25 provides comparable text retrieval without external dependencies.
 
-3. **Tier system over pure recency**: Pure recency (e.g., VectorDB's default) cannot distinguish "my wife's birthday" (important, infrequent access) from "lunch plans" (ephemeral). The tier system handles this.
+3. **Tier system over pure recency**: Pure recency cannot distinguish "my wife's birthday" (important, infrequent access) from "lunch plans" (ephemeral). The tier system handles this.
 
 4. **Batch LLM over per-message LLM**: Reduces LLM API calls by 50-95% in burst scenarios. Keywords are shared across batch messages as an acceptable approximation.
 

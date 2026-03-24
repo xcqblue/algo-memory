@@ -1,5 +1,5 @@
 /**
- * algo-memory v2.3.0 - LLM Client
+ * algo-memory v2.7.0 - LLM Client
  */
 
 import type { Config, LLMConfig } from '../types.js';

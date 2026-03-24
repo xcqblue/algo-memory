@@ -259,7 +259,6 @@ working:    everything in between
       "peripheral": 0.5
     }
   },
-  "sessionContinuity": {
   "feedback": {
     "enabled": true,
     "maxMemories": 5,
@@ -284,4 +283,3 @@ working:    everything in between
     "maxBatchSize": 20
   }
 }
-```

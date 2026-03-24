@@ -2,7 +2,7 @@
 
 > 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v2.6.0 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
+**版本：** v2.7.0 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
 
 ---
 
@@ -14,20 +14,20 @@
 - **peripheral** — 低重要度，随时间自然衰减（Weibull, shape=1.5, scale=90天）
 
 ### 全文检索（FTS5）
-- SQLite FTS5 虚拟表，无需外部 embedding API
+- SQLite FTS5 虚拟表，无需外部 embedding API，离线/隐私友好
 - BM25 排序，支持 Query Expansion 降级
 - **MMR 多样化检索**（λ=0.7）— 避免重复结果
 
 ### LLM 增强（可选）
-- 自动提取关键词（批量，O(1) 次 LLM 调用 per store）
+- 自动提取关键词（批量，每批次仅 1 次 LLM 调用）
 - LLM 辅助去重（jaccard 阈值 0.85）
 - 语义压缩（按句子截断，保留关键信息）
 - **纯算法模式零成本运行**，LLM 非必选
 
 ### OpenClaw 全生命周期接入
-- 7 个 Hook 完整接入（见下文）
-- `session_continuity` — 会话续接，上下文跨 Gateway 重启保留
+- 6 个 Hook 完整接入（见下文）
 - `compaction` 强化 — compaction 周期自动升级 peripheral / 强化 core
+- `after_tool_call` — 工具调用后实时强化召回的记忆
 
 ---
 
@@ -42,7 +42,6 @@ algo-memory 在以下事件触发时自动工作（无需配置）：
 | `before_compaction` | compaction 开始前 | 从 session transcript 预捕获，触发强化（fire-and-forget）|
 | `after_compaction` | compaction 结束后 | 强化 core / 清理低价值 peripheral |
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
-| `llm_output` | LLM 回复后 | 记录 token 使用统计 |
 | `gateway_stop` | Gateway 关闭 | 干净 flush 所有 buffer，关闭 DB |
 
 ---
@@ -105,7 +104,7 @@ openclaw gateway restart
 algo-memory 的 LLM **不是必选功能**。如需关键词提取或去重：
 ```bash
 export MINIMAX_API_KEY="your-key"      # MiniMax
-export DEEPSEEK_API_KEY="your-key"    # DeepSeek
+export DEEPSEEK_API_KEY="your-key"     # DeepSeek
 export KIMI_API_KEY="your-key"        # Kimi/Moonshot
 export DASHSCOPE_API_KEY="your-key"   # 阿里百炼/通义千问
 export ZHIPU_API_KEY="your-key"       # 智谱 GLM
@@ -122,7 +121,7 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
     "algo-memory": {
       "llm": {
         "provider": "zhipu",
-        "model": "glm-4.7-flash"
+        "model": "glm-4-flash"
       }
     }
   }
@@ -169,18 +168,29 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 
 ## 配置项说明
 
-### 核心配置
+### 基础配置
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `autoCapture` | `true` | agent_end 时自动捕获消息 |
 | `autoRecall` | `true` | before_prompt_build 时自动召回 |
 | `maxResults` | `5` | 最多召回记忆条数 |
 | `maxInjectTokens` | `1500` | 注入上下文的最大 token 数 |
+| `capturePerTurn` | `3` | 每轮对话最多存储条数 |
 | `cleanupDays` | `180` | peripheral 记忆超过此天数未访问则清理 |
-| `snapshotRetentionDays` | `30` | session_snapshots 保留天数 |
 | `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
+| `language` | `"auto"` | 语言：`auto` / `zh` / `en` |
 
-### 清理与分层
+### 核心识别
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `coreKeywords` | 见下方 | 命中这些关键词的消息直接标记为 core |
+| `recencyDecay` | `true` | 开启时间衰减 |
+| `recencyHalfLife` | `180` 天 | 时间衰减半衰期 |
+
+> **coreKeywords 默认值**
+> `["记住", "牢记", "重要", "不要忘记", "记住它", "remember", "important", "never forget"]`
+
+### 三层分级
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `tier.coreThreshold` | `10` | access_count ≥ 此值直接升为 core |
@@ -190,10 +200,53 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 | `tier.weights.working` | `1.0` | working 层召回权重 |
 | `tier.weights.peripheral` | `0.5` | peripheral 层召回权重 |
 
-### LLM
+### 评分增强
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm.enabled` | `false` | 是否启用 LLM（默认关闭，纯算法模式）|
+| `weibullDecay.enabled` | `true` | Weibull 分布衰减 |
+| `weibullDecay.shape` | `1.5` | Weibull 形状参数 |
+| `weibullDecay.scale` | `90` | Weibull 尺度参数（天） |
+| `reinforcement.enabled` | `true` | 访问次数强化 |
+| `reinforcement.factor` | `0.5` | 每次访问的强化因子 |
+| `reinforcement.maxMultiplier` | `3` | 最大强化倍数 |
+| `lengthNorm.enabled` | `true` | 长度归一化 |
+| `lengthNorm.anchor` | `500` | 锚点长度 |
+| `hardMinScore.enabled` | `true` | 硬阈值过滤 |
+| `hardMinScore.threshold` | `0.35` | 分数低于此值的结果丢弃 |
+
+### MMR 多样化检索
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `mmr.enabled` | `true` | 启用 MMR 多样化检索 |
+| `mmr.lambda` | `0.7` | 相关性/多样性平衡（1=全相关，0=全多样）|
+| `mmr.threshold` | `0.85` | MMR 截断阈值 |
+
+### 自适应召回
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `adaptiveRetrieval.minQueryLength` | `2` | 查询长度小于此值不触发召回 |
+| `adaptiveRetrieval.forceKeywords` | 见下方 | 含这些词强制触发召回 |
+| `adaptiveRetrieval.sessionDedup.enabled` | `true` | 开启会话内去重 |
+| `adaptiveRetrieval.sessionDedup.windowMs` | `30000` | 去重时间窗口（毫秒）|
+| `adaptiveRetrieval.sessionDedup.similarityThreshold` | `0.75` | Jaccard 相似度阈值 |
+
+> **forceKeywords 默认值**
+> 中文：`['记住', '之前', '上次', '记得', '前', 'what', 'why', 'how', '什么', '为什么', '怎么']`
+> 英文：`['remember', 'before', 'last', 'previously', 'earlier', 'what', 'why', 'how']`
+
+### 去重与过滤
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `smartDedup` | `true` | 开启 Jaccard 智能去重 |
+| `dedupThreshold` | `0.85` | Jaccard 相似度阈值 |
+| `noiseFilter.enabled` | `true` | 开启噪声过滤 |
+| `noiseFilter.skipGreetings` | `true` | 过滤 hi/hello/hey/你好/您好/嗨 |
+| `noiseFilter.skipCommands` | `true` | 过滤 / ! - 开头的命令 |
+
+### LLM（可选，默认关闭）
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `llm.enabled` | `false` | 是否启用 LLM |
 | `llm.provider` | `"auto"` | 提供商 |
 | `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
 | `llm.customModelNames` | `{}` | 自定义模型显示名映射 |
@@ -201,31 +254,15 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 | `threshold.useLlmForExtract` | `false` | LLM 提取关键词 |
 | `threshold.useLlmForDedup` | `false` | LLM 辅助去重 |
 
-### MMR 多样化
+### 批量与压缩
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `mmr.enabled` | `true` | 启用 MMR 多样化检索 |
-| `mmr.threshold` | `0.85` | MMR 截断阈值 |
-| `mmr.lambda` | `0.7` | 相关性/多样性平衡（1=全相关，0=全多样）|
-
-### 会话
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `cleanupDays` | `180` | peripheral 层记忆超过此天数后清理 |
-| `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
-
-### 自适应召回
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `adaptiveRetrieval.minQueryLength` | `2` | 查询长度小于此值不触发召回 |
-| `adaptiveRetrieval.forceKeywords` | 见下方 | 含这些词强制触发召回 |
-| `sessionDedup.enabled` | `true` | 开启会话内去重 |
-| `sessionDedup.windowMs` | `30000` | 去重时间窗口（毫秒）|
-| `sessionDedup.similarityThreshold` | `0.75` | Jaccard 相似度阈值 |
-
-> **forceKeywords 默认值**
-> 中文：`['记住', '之前', '上次', '记得', 'what', 'why', 'how', '什么', '为什么', '怎么']`
-> 英文：`['remember', 'before', 'last', 'previously', 'earlier', 'what', 'why', 'how']`
+| `batchWrite.enabled` | `true` | 开启批量写入 |
+| `batchWrite.bufferMs` | `500` | 批量缓冲区延迟（毫秒）|
+| `batchWrite.maxBatchSize` | `20` | 超过此条数立即写入 |
+| `compression.enabled` | `true` | 开启压缩存储 |
+| `compression.maxLength` | `200` | 压缩后最大长度 |
+| `compression.extractKeywords` | `true` | 提取关键词补充摘要 |
 
 ---
 
@@ -236,14 +273,14 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 CREATE TABLE memories (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
-  scope TEXT DEFAULT 'global',
+  scope TEXT DEFAULT 'agent',
   content TEXT NOT NULL,
   type TEXT DEFAULT 'other',
-  tier TEXT DEFAULT 'working',   -- core / working / peripheral / pending
+  tier TEXT DEFAULT 'working',      -- core / working / peripheral
   layer TEXT DEFAULT 'general',
-  keywords TEXT DEFAULT '',
+  keywords TEXT,
   importance REAL DEFAULT 0.5,
-  access_count INTEGER DEFAULT 1,
+  access_count INTEGER DEFAULT 0,
   cited_count INTEGER DEFAULT 0,
   tier_confidence REAL DEFAULT 1.0,
   last_tier_update INTEGER,
@@ -257,16 +294,28 @@ CREATE TABLE memories (
 ### memories_fts 表（FTS5）
 ```sql
 CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, content, keywords);
--- 触发器自动同步 INSERT/DELETE/UPDATE
+-- INSERT/UPDATE/DELETE 触发器自动同步
+```
+
+### tier_history 表（可选）
+```sql
+CREATE TABLE tier_history (
+  id TEXT PRIMARY KEY,
+  memory_id TEXT NOT NULL,
+  old_tier TEXT,
+  new_tier TEXT NOT NULL,
+  reason TEXT,
+  access_count INTEGER,
+  created_at INTEGER
+);
 ```
 
 ---
 
-## 与 memory-lancedb 的关系
+## 与 OpenClaw 内置 memory 的关系
 
-algo-memory 和 OpenClaw 内置的 `memory-lancedb` **不可同时使用**（会导致重复 capture）。
+algo-memory 和 OpenClaw 内置的 `memory-core` / `memory-lancedb` **共用同一插槽，不可同时使用**。
 
-如果使用 algo-memory，在 OpenClaw 配置中设置：
 ```json
 {
   "plugins": {
@@ -277,11 +326,12 @@ algo-memory 和 OpenClaw 内置的 `memory-lancedb` **不可同时使用**（会
 }
 ```
 
-algo-memory 的独有价值：
+**algo-memory 的独有价值：**
 - 无需 embedding API，离线/隐私友好
-- importance / cited_count / tier 分层
+- importance / cited_count / tier 三层分级
 - Weibull 时间衰减 + reinforcement 强化机制
 - 结构化 import/export/correct 操作
+- 纯算法模式零 LLM 成本
 
 ---
 
