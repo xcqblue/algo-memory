@@ -14,7 +14,7 @@
 git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
 cd ~/.openclaw/extensions/algo-memory && npm install && npm run build
 
-# 2. 启用插件
+# 2. 启用插件（algo-memory 和内置 memory-core 共用同一插槽）
 openclaw plugins enable algo-memory
 
 # 3. 重启

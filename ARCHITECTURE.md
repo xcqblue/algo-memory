@@ -6,7 +6,7 @@
 
 ## System Overview
 
-algo-memory is a **pull-based memory system** built on SQLite. It does not require an external embedding service — instead it uses FTS5 BM25 for retrieval and JavaScript-side scoring. LLM is optional and used only for keyword extraction and dedup.
+algo-memory is a **pull-based memory system** built on SQLite. It does not require an external embedding service — instead it uses FTS5 BM25 for retrieval and JavaScript-side scoring. LLM is optional and used only for keyword extraction and dedup. MCP is not used — tools are exposed via OpenClaw's native `registerTool()` API.
 
 ```
 User Message
@@ -141,26 +141,24 @@ gateway_start
     ▼
 registerHook()
     │
-    ├─ session_start ──► detectSessionChange() ──► prependSystemContext()
-    │
     ├─ before_prompt_build ──► recall() ──► prependSystemContext()
     │
     ├─ agent_end ──► store() ──► scheduleBatchWrite()
-    │                 └─► saveSessionSnapshot()
+    │                 └─► saveSessionSnapshot()  ← sessionContinuity
     │
     ├─ before_compaction ──► store(sessionFile) ──► promotePeripheral()
     │                       └─► reinforceOnCompaction()
     │
-    ├─ after_compaction ──► reinforceOnCompaction()
+    ├─ after_compaction ──► (logged, reinforcement done in before_compaction)
     │
     ├─ after_tool_call ──► reinforceCitedMemories(algo_memory_search results)
     │
     ├─ llm_output ──► recordLlmUsage(token stats)
     │
-    ├─ session_end ──► writeSessionSummary()
-    │
     └─ gateway_stop ──► flushAll() ──► db.close()
 ```
+
+> `session_start` / `session_end` 是 Planned 事件，当前 OpenClaw 版本不触发，实际由 `agent_end` 统一处理 capture + 会话快照。
 
 ### Context Priority
 
@@ -170,15 +168,15 @@ registerHook()
 
 ## Workspace Integration
 
-algo-memory writes to two workspace locations:
+algo-memory stores workspace-relevant data in two places:
 
 | Path | Purpose | Format |
 |------|---------|--------|
-| `memory/algo-memory/YYYY-MM-DD.md` | Core memory sync | Markdown with `## memory:id:xxx` headers |
-| `~/.openclaw/workspace/memory/` | Session snapshots | `{date}_[agentId].md` |
+| `~/.openclaw/state/algo-memory/session_snapshots` | Session continuity | SQLite table (session_snapshots) |
+| `memory/algo-memory/YYYY-MM-DD.md` | Core memory sync | **已禁用（v2.6.0）** |
 
-**Why not MEMORY.md?**
-The workspace plugin uses a JSON format in `### algo-memory` section of MEMORY.md. Writing Markdown there would corrupt the workspace plugin's data. Instead, `memory/algo-memory/` directory is used — workspace plugin can optionally scan it via its file discovery logic.
+**为什么不直接写 workspace 文件？**
+workspace plugin 使用 JSON 格式写入 `MEMORY.md`，algo-memory 直接写 Markdown 会导致格式冲突。v2.6.0 起 `syncCoreToWorkspace` 改为禁用状态，如需导出使用 `algo_memory_export` 工具。
 
 ---
 

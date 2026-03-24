@@ -21,11 +21,13 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `enabled` | `true` | 是否启用插件 |
-| `autoCapture` | `true` | 自动存储用户消息 |
-| `autoRecall` | `true` | 自动注入记忆到 prompt |
+| `autoCapture` | `true` | agent_end 时自动存储用户消息 |
+| `autoRecall` | `true` | before_prompt_build 时自动注入记忆 |
 | `maxResults` | `5` | 单次召回最大条数 |
 | `capturePerTurn` | `3` | 每轮对话最多存储条数 |
 | `cleanupDays` | `180` | peripheral 层记忆超过此天数后清理 |
+| `snapshotRetentionDays` | `30` | session_snapshots 表保留天数 |
+| `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
 | `language` | `"auto"` | 语言：`auto` / `zh` / `en` |
 
 ---
@@ -35,7 +37,7 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `coreKeywords` | 见下方 | 命中这些关键词的消息直接标记为 core |
-| `recencyDecay` | `true` | 开启时间衰减（地板 0.5） |
+| `recencyDecay` | `true` | 开启时间衰减 |
 | `recencyHalfLife` | `180` 天 | 时间衰减半衰期 |
 
 > **coreKeywords 默认值**
@@ -60,8 +62,6 @@
 | `noiseFilter.skipGreetings` | `true` | 过滤 hi/hello/hey/你好/您好/嗨 |
 | `noiseFilter.skipCommands` | `true` | 过滤 / ! - 开头的命令 |
 
-> **注意**：`noiseFilter.enabled = false` 会完全禁用噪声过滤
-
 ---
 
 ## 自适应召回
@@ -70,20 +70,24 @@
 |------|------|------|
 | `adaptiveRetrieval.enabled` | `true` | 开启自适应检索判断 |
 | `adaptiveRetrieval.minQueryLength` | `2` | 查询长度小于此值不触发召回 |
-| `adaptiveRetrieval.forceKeywords` | 见下方 | 含这些词强制触发召回（与语言默认值合并） |
 
 ### 会话去重
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `adaptiveRetrieval.sessionDedup.enabled` | `true` | 开启会话内去重 |
-| `adaptiveRetrieval.sessionDedup.windowMs` | `30000` | 去重时间窗口（毫秒） |
-| `adaptiveRetrieval.sessionDedup.similarityThreshold` | `0.6` | Jaccard 相似度阈值 |
+| `adaptiveRetrieval.sessionDedup.windowMs` | `30000` | 去重时间窗口（毫秒）|
+| `adaptiveRetrieval.sessionDedup.similarityThreshold` | `0.75` | Jaccard 相似度阈值 |
+
+### 强制召回关键词
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `adaptiveRetrieval.forceKeywords` | 见下方 | 含这些词强制触发召回 |
 
 > **forceKeywords 默认值**
-> - 中文：`['记住', '之前', '上次', '记得', '前', '上次', 'what', 'why', 'how', '什么', '为什么', '怎么']`
+> - 中文：`['记住', '之前', '上次', '记得', '前', 'what', 'why', 'how', '什么', '为什么', '怎么']`
 > - 英文：`['remember', 'before', 'last', 'previously', 'earlier', 'what', 'why', 'how']`
-> - 日/韩/西/法/德亦有对应词表
 
 ---
 
@@ -97,34 +101,53 @@
 | `reinforcement.enabled` | `true` | 访问次数强化 |
 | `reinforcement.factor` | `0.5` | 每次访问的强化因子 |
 | `reinforcement.maxMultiplier` | `3` | 最大强化倍数 |
-| `mmr.enabled` | `true` | 开启 MMR 多样性去重（recall 模式） |
-| `mmr.lambda` | `0.7` | λ×相关 − (1−λ)×多样 |
-| `mmr.threshold` | `0.85` | 早停阈值 |
 | `lengthNorm.enabled` | `true` | 长度归一化 |
 | `lengthNorm.anchor` | `500` | 锚点长度 |
 | `hardMinScore.enabled` | `true` | 硬阈值过滤 |
 | `hardMinScore.threshold` | `0.35` | 分数低于此值的结果丢弃 |
 
-> **时间衰减公式**：`score × (0.5 + 0.5 × 0.5^(daysOld / halfLife))`
-
 ---
 
-## 三层晋升
+## MMR 多样化检索
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `tier.enabled` | `true` | 启用三层晋升 |
+| `mmr.enabled` | `true` | 开启 MMR 多样性检索 |
+| `mmr.lambda` | `0.7` | λ×相关 − (1−λ)×多样（1=全相关，0=全多样）|
+| `mmr.threshold` | `0.85` | 早停阈值 |
+
+---
+
+## 三层分级
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `tier.enabled` | `true` | 启用三层分级 |
 | `tier.coreThreshold` | `10` | 访问次数达到此值晋升 core |
-| `tier.peripheralThreshold` | `0.15` | 分数低于此值降级 peripheral |
+| `tier.peripheralThreshold` | `0.15` | 复合评分低于此值降级 peripheral |
 | `tier.ageDays` | `60` | 超过此天数的记忆不因高 importance 升 core |
 
-### 层级说明
+### 层级权重（recall 时的得分乘数）
 
-| 层级 | 条件 | 权重 |
-|------|------|------|
-| core | 高频访问（≥coreThreshold）或高 importance | ×1.5 |
-| working | 普通对话 | ×1.0 |
-| peripheral | 低频/超期 | ×0.5（自动清理）|
+| 层级 | 默认权重 | 说明 |
+|------|---------|------|
+| core | ×1.5 | 高频访问或高 importance |
+| working | ×1.0 | 普通对话 |
+| peripheral | ×0.5 | 低频/超期，自动清理 |
+
+### 晋升条件
+
+```
+tier score = importance × (1 + log10(access_count + 1))
+
+core:       access_count ≥ 10
+            OR (score ≥ 0.7 AND age ≤ 60 days)
+
+peripheral: score < 0.15
+            OR (age > 60 days AND score < 0.7)
+
+working:    everything in between
+```
 
 ---
 
@@ -136,12 +159,11 @@
 |------|------|------|
 | `sessionContinuity.enabled` | `true` | 启用会话续接 |
 | `sessionContinuity.maxInjectTokens` | `800` | 注入上下文的最大 token 数 |
-| `sessionContinuity.maxMessagesForSummary` | `30` | 生成摘要时最多使用多少条消息 |
+| `sessionContinuity.maxMessagesForSummary` | `30` | 生成摘要最多使用多少条消息 |
 
-### 工作原理
-
-1. `agent_end` 钩子：保存会话快照到数据库
-2. `session_start` 钩子：检测会话切换，注入上会话上下文
+**工作原理：**
+1. `agent_end` 钩子：保存会话快照到 `session_snapshots` 表
+2. 下次会话开始：检测到 sessionKey 变化，从 DB 读取上会话摘要注入上下文
 
 ---
 
@@ -149,9 +171,10 @@
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `sessionSummary.enabled` | `true` | 开启 session 结束时写 Markdown 摘要 |
-| `sessionSummary.dir` | `"memory"` | 摘要目录（相对于 stateDir） |
-| `sessionSummary.maxItems` | `50` | 每次写入的最大条数 |
+| `sessionSummary.enabled` | `true` | 开启 session 结束时写摘要 |
+| `sessionSummary.maxItems` | `50` | 摘要最大条数（超出截断旧条目）|
+
+> 注意：`sessionSummary.dir` 配置已废弃（v2.6.0 禁用了直接写 workspace 文件，避免与 workspace plugin 冲突）。如需导出，使用 `algo_memory_export` 工具。
 
 ---
 
@@ -160,23 +183,31 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `feedback.enabled` | `true` | 开启反馈修正 |
-| `feedback.maxMemories` | `5` | 单次反馈最多修正的记忆条数 |
-| `feedback.matchThreshold` | `0.6` | 匹配阈值 |
+| `feedback.maxMemories` | `5` | 单次反馈最多召回的记忆条数 |
+| `feedback.matchThreshold` | `0.6` | LLM 匹配置信度阈值 |
 
 ---
 
-## LLM 配置（可选）
+## LLM 配置（可选，默认关闭）
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `llm.enabled` | `false` | 是否启用 LLM 调用 |
-| `llm.provider` | `"auto"` | 提供商：auto / openai / anthropic / azure / gemini / ollama |
+| `llm.provider` | `"auto"` | 提供商：minimax / deepseek / kimi / zhipu / qwen / openai / anthropic / ollama / siliconflow |
 | `llm.apiKey` | `""` | API Key |
-| `llm.model` | `""` | 模型名称 |
-| `llm.baseURL` | `""` | API Base URL（可选） |
-| `llm.batchWindowMs` | `200` | LLM 批量处理窗口期（毫秒） |
+| `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
+| `llm.baseURL` | `""` | API Base URL（可选）|
+| `llm.batchWindowMs` | `200` | LLM 批量处理窗口期（毫秒）|
 
-> **注意**：LLM 默认关闭，纯算法模式零成本运行
+### LLM 辅助开关
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `threshold.useLlmForCore` | `false` | LLM 判断 core（额外 LLM 调用）|
+| `threshold.useLlmForExtract` | `false` | LLM 提取关键词（批量，1次/batch）|
+| `threshold.useLlmForDedup` | `false` | LLM 辅助去重（额外 LLM 调用）|
+
+> **注意**：LLM 默认关闭，纯算法模式零成本运行。
 
 ---
 
@@ -185,7 +216,7 @@
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `batchWrite.enabled` | `true` | 开启批量写入 |
-| `batchWrite.bufferMs` | `500` | 批量缓冲区延迟（毫秒） |
+| `batchWrite.bufferMs` | `500` | 批量缓冲区延迟（毫秒）|
 | `batchWrite.maxBatchSize` | `20` | 超过此条数立即写入 |
 
 ---
@@ -196,8 +227,7 @@
 |------|------|------|
 | `compression.enabled` | `true` | 开启压缩存储 |
 | `compression.maxLength` | `200` | 压缩后最大长度 |
-| `compression.extractKeywords` | `true` | 提取关键词补充 |
-| `compression.semanticEnhance` | `false` | 语义增强压缩 |
+| `compression.extractKeywords` | `true` | 提取关键词补充摘要 |
 
 ---
 
@@ -211,6 +241,8 @@
   "maxResults": 5,
   "capturePerTurn": 3,
   "cleanupDays": 180,
+  "snapshotRetentionDays": 30,
+  "metricsEnabled": true,
   "language": "auto",
   "coreKeywords": ["记住", "重要", "别忘", "不要忘记", "remember", "important", "never forget"],
   "smartDedup": true,
@@ -227,7 +259,7 @@
     "sessionDedup": {
       "enabled": true,
       "windowMs": 30000,
-      "similarityThreshold": 0.6
+      "similarityThreshold": 0.75
     }
   },
   "weibullDecay": {
@@ -257,7 +289,12 @@
     "enabled": true,
     "coreThreshold": 10,
     "peripheralThreshold": 0.15,
-    "ageDays": 60
+    "ageDays": 60,
+    "weights": {
+      "core": 1.5,
+      "working": 1.0,
+      "peripheral": 0.5
+    }
   },
   "sessionContinuity": {
     "enabled": true,
@@ -266,7 +303,6 @@
   },
   "sessionSummary": {
     "enabled": true,
-    "dir": "memory",
     "maxItems": 50
   },
   "feedback": {
@@ -285,8 +321,7 @@
   "compression": {
     "enabled": true,
     "maxLength": 200,
-    "extractKeywords": true,
-    "semanticEnhance": false
+    "extractKeywords": true
   },
   "batchWrite": {
     "enabled": true,

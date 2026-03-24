@@ -1,8 +1,8 @@
 # algo-memory
 
-> Structured SQLite-based memory plugin for OpenClaw — tier scoring, FTS5 search, LLM-augmented capture, and full OpenClaw lifecycle integration.
+> 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v2.5.0 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
+**版本：** v2.6.0 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
 
 ---
 
@@ -18,14 +18,15 @@
 - BM25 排序，支持 Query Expansion 降级
 - **MMR 多样化检索**（λ=0.7）— 避免重复结果
 
-### LLM 增强（可选，默认为 MiniMax）
+### LLM 增强（可选）
 - 自动提取关键词（批量，O(1) 次 LLM 调用 per store）
 - LLM 辅助去重（jaccard 阈值 0.85）
 - 语义压缩（按句子截断，保留关键信息）
+- **纯算法模式零成本运行**，LLM 非必选
 
 ### OpenClaw 全生命周期接入
-- 9 个 Hook 完整接入（见下文）
-- `session:continuity` — 会话续接，上下文跨 Gateway 重启保留
+- 7 个 Hook 完整接入（见下文）
+- `session_continuity` — 会话续接，上下文跨 Gateway 重启保留
 - `compaction` 强化 — compaction 周期自动升级 peripheral / 强化 core
 
 ---
@@ -40,44 +41,47 @@ algo-memory 在以下事件触发时自动工作（无需配置）：
 | `before_prompt_build` | LLM 调用前 | 检索相关记忆，注入上下文 |
 | `before_compaction` | compaction 开始前 | 从 session transcript 预捕获，触发强化（fire-and-forget）|
 | `after_compaction` | compaction 结束后 | 强化 core / 清理低价值 peripheral |
-| `session_start` | 会话开始 | 检测会话切换，注入上会话摘要 |
-| `session_end` | 会话结束 | 写会话摘要到 workspace |
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
-| `llm_output` | LLM 回复后 | 记录 token 使用统计（可配置）|
+| `llm_output` | LLM 回复后 | 记录 token 使用统计 |
 | `gateway_stop` | Gateway 关闭 | 干净 flush 所有 buffer，关闭 DB |
+
+> `session_start` / `session_end` 是 Planned 事件，当前 OpenClaw 版本不触发，实际由 `agent_end` 统一处理 capture + 会话快照。
 
 ---
 
-## MCP 工具（16 个）
+## 工具（18 个）
 
-### 核心工具（推荐使用）
+algo-memory 通过 OpenClaw `registerTool()` 自动暴露工具，无需额外配置 MCP。
+
+### 核心工具
 | 工具 | 说明 |
 |------|------|
 | `algo_memory_search` | 搜索记忆，支持 FTS5 + scoring + MMR |
-| `algo_memory_list` | 列出记忆，支持 tier/scope 过滤 |
+| `algo_memory_list` | 列出记忆，支持分页 |
 | `algo_memory_stats` | 统计：数量、分 tier 分布、DB 大小 |
 | `algo_memory_get` | 获取单条记忆详情 |
 
 ### 管理工具
 | 工具 | 说明 |
 |------|------|
-| `algo_memory_update` | 更新记忆内容/importance/tier |
+| `algo_memory_update` | 更新记忆内容 |
 | `algo_memory_delete` | 删除单条记忆 |
 | `algo_memory_delete_bulk` | 批量删除 |
 | `algo_memory_clear` | 清空所有记忆 |
-| `algo_memory_import` | 从 JSON 文件导入 |
+| `algo_memory_import` | 从 JSON 批量导入 |
 | `algo_memory_export` | 导出为 JSON |
 
 ### 高级工具
 | 工具 | 说明 |
 |------|------|
-| `algo_memory_metrics` | 运行时指标（缓存命中率、LLM 调用统计）|
-| `algo_memory_diagnostics` | 诊断信息（DB 状态、MMR 配置、最后召回详情）|
+| `algo_memory_metrics` | 运行时指标（LLM 调用、缓存命中率）|
+| `algo_memory_diagnostics` | 诊断：DB 状态、MMR 配置、最后召回详情 |
 | `algo_memory_recall_reset` | 清除会话去重状态 |
-| `algo_memory_correct` | 修正记忆内容 |
-| `algo_memory_fts_rebuild` | 重建 FTS5 索引（修复 rowid 漂移）|
-| `algo_memory_compact` | 手动触发 compaction 强化流程 |
-| `algo_memory_health` | 完整健康检查（DB/FTS/buffer/LLM/配置）|
+| `algo_memory_correct` | 修正记忆（直接更新 or AI 辅助定位）|
+| `algo_memory_fts_rebuild` | 重建 FTS5 索引 |
+| `algo_memory_compact` | 手动触发 compaction 强化 |
+| `algo_memory_health` | 完整健康检查 |
+| `algo_memory_sync` | 导出 core 记忆（已禁用直接写 workspace）|
 
 ---
 
@@ -85,42 +89,22 @@ algo-memory 在以下事件触发时自动工作（无需配置）：
 
 ### 1. 安装
 ```bash
-npm install
-npm run build
+git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
+cd ~/.openclaw/extensions/algo-memory && npm install && npm run build
 ```
 
-### 2. 配置（`~/.openclaw/config.json`）
-```json
-{
-  "plugins": {
-    "entries": {
-      "memory": "algo-memory"
-    }
-  }
-}
+### 2. 启用插件
+```bash
+openclaw plugins enable algo-memory
 ```
 
-### 3. 插件配置（可选）
-```json
-{
-  "plugins": {
-    "algo-memory": {
-      "autoCapture": true,
-      "autoRecall": true,
-      "maxResults": 5,
-      "maxInjectTokens": 1500,
-      "cleanupDays": 180,
-      "sessionContinuity": { "enabled": true },
-      "mmr": { "enabled": true, "lambda": 0.7 },
-      "noiseFilter": { "dedup": true, "useLlmForDedup": false },
-      "llm": { "provider": "minimax" }
-    }
-  }
-}
+### 3. 重启
+```bash
+openclaw gateway restart
 ```
 
-### 4. LLM API Key（可选，核心检索不依赖 LLM）
-algo-memory 的 LLM **不是必选功能**。如需 LLM 关键词提取或去重，配置环境变量：
+### 4. LLM API Key（可选）
+algo-memory 的 LLM **不是必选功能**。如需关键词提取或去重：
 ```bash
 export MINIMAX_API_KEY="your-key"      # MiniMax
 export DEEPSEEK_API_KEY="your-key"    # DeepSeek
@@ -129,7 +113,6 @@ export DASHSCOPE_API_KEY="your-key"   # 阿里百炼/通义千问
 export ZHIPU_API_KEY="your-key"       # 智谱 GLM
 export OPENAI_API_KEY="your-key"      # OpenAI
 export ANTHROPIC_API_KEY="your-key"   # Anthropic
-export OLLAMA_BASE_URL="http://localhost:11434"  # Ollama 本地
 export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 ```
 
@@ -148,7 +131,9 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 }
 ```
 
-**支持模型（`model` 留空使用各 provider 默认）：**
+---
+
+## 支持模型
 
 | Provider | 默认模型 | 推荐 |
 |----------|---------|------|
@@ -162,9 +147,7 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 | `ollama` | `llama3` | 本地自定义 |
 | `siliconflow` | `deepseek-ai/deepseek-v3` | SiliconFlow 聚合 50+ 模型 |
 
-**模型动态化（无需更新插件即可支持新模型）：**
-
-内置 modelMap 只做日志展示用，模型名直接透传给 API。新增模型只需在配置中指定：
+**模型动态化**：内置 modelMap 只做日志展示用，模型名直接透传给 API。配置 `customModelNames` 可覆盖任意模型的显示名称：
 
 ```json
 {
@@ -174,16 +157,13 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
         "provider": "deepseek",
         "model": "deepseek-r2-latest",
         "customModelNames": {
-          "deepseek-r2-latest": "DeepSeek R2（最新内部测试版）",
-          "glm-next-gen": "下一代智谱模型（内测中）"
+          "deepseek-r2-latest": "DeepSeek R2（最新内部测试版）"
         }
       }
     }
   }
 }
 ```
-
-`customModelNames` 优先级高于内置映射，可覆盖任意模型的显示名称。
 
 ---
 
@@ -196,25 +176,30 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 | `autoRecall` | `true` | before_prompt_build 时自动召回 |
 | `maxResults` | `5` | 最多召回记忆条数 |
 | `maxInjectTokens` | `1500` | 注入上下文的最大 token 数 |
+| `cleanupDays` | `180` | peripheral 记忆超过此天数未访问则清理 |
+| `snapshotRetentionDays` | `30` | session_snapshots 保留天数 |
+| `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
 
 ### 清理与分层
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `cleanupDays` | `180` | peripheral 记忆超过此天数未访问则清理 |
-| `snapshotRetentionDays` | `30` | session_snapshots 保留天数 |
 | `tier.coreThreshold` | `10` | access_count ≥ 此值直接升为 core |
 | `tier.peripheralThreshold` | `0.15` | 复合评分低于此值为 peripheral |
+| `tier.ageDays` | `60` | 超过此天数的记忆不因高 importance 升 core |
+| `tier.weights.core` | `1.5` | core 层召回权重 |
+| `tier.weights.working` | `1.0` | working 层召回权重 |
+| `tier.weights.peripheral` | `0.5` | peripheral 层召回权重 |
 
 ### LLM
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm.provider` | `"minimax"` | LLM 提供商 |
+| `llm.enabled` | `false` | 是否启用 LLM（默认关闭，纯算法模式）|
+| `llm.provider` | `"auto"` | 提供商 |
 | `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
-| `llm.customModelNames` | `{}` | 自定义模型显示名映射，key=API模型名，value=显示名 |
-| `noiseFilter.useLlmForDedup` | `false` | 启用 LLM 辅助去重（额外 LLM 调用）|
-| `noiseFilter.useLlmForDedup` | `false` | 启用 LLM 辅助去重（额外 LLM 调用）|
-| `noiseFilter.useLlmForCore` | `false` | 启用 LLM 判断 core（额外 LLM 调用）|
-| `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
+| `llm.customModelNames` | `{}` | 自定义模型显示名映射 |
+| `threshold.useLlmForCore` | `false` | LLM 判断 core |
+| `threshold.useLlmForExtract` | `false` | LLM 提取关键词 |
+| `threshold.useLlmForDedup` | `false` | LLM 辅助去重 |
 
 ### MMR 多样化
 | 配置项 | 默认值 | 说明 |
@@ -227,8 +212,23 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `sessionContinuity.enabled` | `true` | 启用会话续接 |
+| `sessionContinuity.maxInjectTokens` | `800` | 注入上下文的最大 token 数 |
+| `sessionContinuity.maxMessagesForSummary` | `30` | 生成摘要最多使用多少条消息 |
 | `sessionSummary.enabled` | `true` | 结束时写摘要 |
-| `sessionDedup.similarityThreshold` | `0.75` | 会话内相似查询跳过阈值 |
+| `sessionSummary.maxItems` | `50` | 摘要最大条数 |
+
+### 自适应召回
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `adaptiveRetrieval.minQueryLength` | `2` | 查询长度小于此值不触发召回 |
+| `adaptiveRetrieval.forceKeywords` | 见下方 | 含这些词强制触发召回 |
+| `sessionDedup.enabled` | `true` | 开启会话内去重 |
+| `sessionDedup.windowMs` | `30000` | 去重时间窗口（毫秒）|
+| `sessionDedup.similarityThreshold` | `0.75` | Jaccard 相似度阈值 |
+
+> **forceKeywords 默认值**
+> 中文：`['记住', '之前', '上次', '记得', 'what', 'why', 'how', '什么', '为什么', '怎么']`
+> 英文：`['remember', 'before', 'last', 'previously', 'earlier', 'what', 'why', 'how']`
 
 ---
 
@@ -242,12 +242,14 @@ CREATE TABLE memories (
   scope TEXT DEFAULT 'global',
   content TEXT NOT NULL,
   type TEXT DEFAULT 'other',
-  tier TEXT DEFAULT 'working',   -- core / working / peripheral
-  layer TEXT DEFAULT 'general', -- general / core-keyword
+  tier TEXT DEFAULT 'working',   -- core / working / peripheral / pending
+  layer TEXT DEFAULT 'general',
   keywords TEXT DEFAULT '',
   importance REAL DEFAULT 0.5,
   access_count INTEGER DEFAULT 1,
   cited_count INTEGER DEFAULT 0,
+  tier_confidence REAL DEFAULT 1.0,
+  last_tier_update INTEGER,
   created_at INTEGER NOT NULL,
   last_accessed INTEGER NOT NULL,
   content_hash TEXT NOT NULL,
@@ -281,8 +283,8 @@ algo-memory 和 OpenClaw 内置的 `memory-lancedb` **不可同时使用**（会
 algo-memory 的独有价值：
 - 无需 embedding API，离线/隐私友好
 - importance / cited_count / tier 分层
-- 结构化 import/export/correct 操作
 - Weibull 时间衰减 + reinforcement 强化机制
+- 结构化 import/export/correct 操作
 
 ---
 
@@ -291,22 +293,24 @@ algo-memory 的独有价值：
 ```
 algo-memory/
 ├── src/
-│   ├── index.ts          # MemoryPlugin 主类 + MCP 工具注册 + Hook 绑定
+│   ├── index.ts          # MemoryPlugin 主类 + 工具注册 + Hook 绑定
 │   ├── types.ts          # TypeScript 类型定义 + 配置默认值
 │   ├── utils.ts          # 工具函数（Weibull/Jaccard/MMR/token估算）
 │   ├── engine/
 │   │   ├── store.ts     # 写入引擎（Buffer/LLM队列/批处理）
 │   │   ├── retrieve.ts  # 检索引擎（FTS5/评分/MMR）
 │   │   ├── recall.ts    # 召回决策（shouldRetrieve/sessionDedup）
-│   │   └── llm.ts      # LLM 客户端（8个provider/重试/缓存）
+│   │   └── llm.ts       # LLM 客户端（多provider/重试/缓存）
 │   ├── db/
 │   │   ├── schema.ts    # SQLite 建表 + FTS5 + 触发器
 │   │   └── queries.ts   # queryAll/queryOne/run 封装
 │   └── __tests__/       # 测试文件（228 个测试）
-├── dist/                  # TypeScript 编译输出
-├── CHANGELOG.md          # 版本变更历史
-├── ARCHITECTURE.md        # 系统架构设计文档
-└── openclaw.plugin.json  # OpenClaw 插件配置
+├── dist/                # TypeScript 编译输出
+├── CHANGELOG.md         # 版本变更历史
+├── ARCHITECTURE.md      # 系统架构设计文档
+├── CONFIG.md            # 完整配置参考
+├── INSTALL.md           # 安装指南
+└── openclaw.plugin.json # OpenClaw 插件配置
 ```
 
 ---

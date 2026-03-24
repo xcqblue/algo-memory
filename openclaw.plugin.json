@@ -1,7 +1,7 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "Structured SQLite-based memory for OpenClaw — tier scoring (core/working/peripheral), FTS5 full-text search, LLM keyword extraction, Weibull decay, session continuity, compaction reinforcement, and workspace sync. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
+  "description": "Structured SQLite-based memory for OpenClaw — tier scoring (core/working/peripheral), FTS5 full-text search, Weibull decay, session continuity, compaction reinforcement. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
   "version": "2.6.0",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
@@ -604,7 +604,8 @@
       "label": "启用摘要写入"
     },
     "sessionSummary.dir": {
-      "label": "摘要目录"
+      "label": "摘要目录",
+      "description": "已禁用（v2.6.0），写 workspace 文件会导致冲突，请使用 algo_memory_export 导出"
     },
     "sessionSummary.maxItems": {
       "label": "最大条数"
