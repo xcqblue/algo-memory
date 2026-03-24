@@ -1429,33 +1429,24 @@ export default {
 
     // === Hooks ===
     // IMPORTANT: All OpenClaw hooks pass (event, ctx) — ctx.agentId is the source of truth.
-    // event.agentId is only set for agent-related hooks, not session hooks.
-    if (config.autoCapture) {
-      api.on('agent_end', async (event: any, ctx: any) => {
-        try {
-          const agentId = ctx?.agentId || 'default';
-          const messages = event?.messages || [];
-          await plugin.store(agentId, messages);
-        } catch (err: any) {
-          log.error('[algo-memory] agent_end 钩子错误:', err?.message ?? err, err?.stack);
-        }
-      });
-    }
-
     // 注意：session_start / session_end 是 Planned/Future 事件，当前 OpenClaw 版本不触发
-    // 会话续接功能通过 session_snapshots 表和 session_key 追踪实现，暂不依赖这些 hook
-    // 但 agent_end 保存会话快照仍依赖 sessionContinuity 配置
-    if (config.sessionContinuity?.enabled) {
+    // agent_end 同时处理 capture + 会话快照，两个操作合并到一个 hook 减少开销
+    if (config.autoCapture || config.sessionContinuity?.enabled) {
       api.on('agent_end', async (event: any, ctx: any) => {
-        try {
-          const agentId = ctx?.sessionKey || ctx?.agentId || 'default';
-          const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
-          const messages = event?.messages || [];
-          if (messages.length > 0) {
-            plugin.saveSessionSnapshot(agentId, sessionKey, messages);
-          }
-        } catch (err: any) {
-          log.error('[algo-memory] agent_end 会话快照保存钩子错误:', err?.message ?? err, err?.stack);
+        const agentId = ctx?.agentId || 'default';
+        const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
+        const messages = event?.messages || [];
+
+        // 1. capture 用户消息到记忆（autoCapture）
+        if (config.autoCapture && messages.length > 0) {
+          plugin.store(agentId, messages).catch((err: any) => {
+            log.error('[algo-memory] agent_end store 错误:', err?.message ?? err);
+          });
+        }
+
+        // 2. 保存会话快照（sessionContinuity）
+        if (config.sessionContinuity?.enabled && messages.length > 0) {
+          plugin.saveSessionSnapshot(agentId, sessionKey, messages);
         }
       });
     }
@@ -1639,46 +1630,21 @@ export default {
       })();
     });
 
-    // === LLM output: capture raw assistant responses ===
-    // llm_output: fires after LLM responds, before the response goes to transcript.
-    // Captures raw assistantTexts for important-fact detection (e.g. "已记住" confirmations).
+    // === LLM output: record token usage for metrics ===
+    // llm_output: fires after LLM responds. Captures usage stats (input/output/cache tokens).
+    // Note: OpenClaw may already collect this; algo-memory stores it for memory-level analytics.
     api.on('llm_output', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
-      if (!plugin.isActive()) return;
+      if (!plugin.isActive() || !config.metricsEnabled) return;
+      if (!event?.usage) return;
 
-      // Fire-and-forget
-      (async () => {
-        try {
-          // Capture usage stats for memory metadata
-          if (event.usage && config.metricsEnabled) {
-            plugin.recordLlmUsage(agentId, {
-              inputTokens: event.usage.input,
-              outputTokens: event.usage.output,
-              cacheRead: event.usage.cacheRead,
-              cacheWrite: event.usage.cacheWrite,
-              totalTokens: event.usage.total,
-            });
-          }
-
-          // Detect memory-worthy assistant confirmations from raw output
-          // e.g., "好的，我记住了" / "已记住" / "I've noted that"
-          const confirmPatterns = [
-            /^(好的|我已|已|记住了|笔记下来)/,
-            /^(ok|okay|i'?ve (noted|remember|got it|recorded)|saved|noted)/i
-          ];
-
-          for (const text of (event.assistantTexts || [])) {
-            const str = typeof text === 'string' ? text : JSON.stringify(text);
-            if (confirmPatterns.some(p => p.test(str.trim()))) {
-              // Assistant confirmed something was stored — this is high-value signal
-              // Log it for debugging; actual capture happens via agent_end messages
-              log.info(`[algo-memory] [llm_output] 检测到助手确认信号: ${str.substring(0, 50)}`);
-            }
-          }
-        } catch (err: any) {
-          log.error('[algo-memory] llm_output 钩子错误:', err?.message ?? err);
-        }
-      })();
+      plugin.recordLlmUsage(agentId, {
+        inputTokens: event.usage.input ?? 0,
+        outputTokens: event.usage.output ?? 0,
+        cacheRead: event.usage.cacheRead,
+        cacheWrite: event.usage.cacheWrite,
+        totalTokens: event.usage.total ?? 0,
+      });
     });
 
     // === Gateway lifecycle: ensure buffers flushed and DB closed cleanly ===
@@ -1791,78 +1757,48 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
         capabilities: { tools: {} },
       });
 
-      // 注册所有工具到 MCP
+      // 注册核心工具到 MCP（精简到 8 个，调试/危险工具通过 CLI 使用）
       server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: [
           {
-            name: 'algo_memory_list',
-            description: '列出记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, limit: { type: 'number' }, offset: { type: 'number' } } },
-          },
-          {
             name: 'algo_memory_search',
-            description: '全文搜索记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, query: { type: 'string' } } },
+            description: '全文搜索记忆（FTS5），返回相关记忆列表',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, query: { type: 'string' } }, required: ['agentId', 'query'] },
           },
           {
             name: 'algo_memory_stats',
-            description: '查看统计',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
+            description: '查看记忆统计：总数、core/working/peripheral 分层数量',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } }, required: ['agentId'] },
+          },
+          {
+            name: 'algo_memory_list',
+            description: '列出记忆（支持分页）',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, limit: { type: 'number' }, offset: { type: 'number' } }, required: ['agentId'] },
           },
           {
             name: 'algo_memory_get',
-            description: '获取单条记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } } },
-          },
-          {
-            name: 'algo_memory_delete',
-            description: '删除记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } } },
+            description: '获取单条记忆详情',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } }, required: ['agentId', 'memoryId'] },
           },
           {
             name: 'algo_memory_update',
-            description: '更新记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, content: { type: 'string' } } },
+            description: '更新记忆内容',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' }, content: { type: 'string' } }, required: ['agentId', 'memoryId', 'content'] },
+          },
+          {
+            name: 'algo_memory_delete',
+            description: '删除单条记忆',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryId: { type: 'string' } }, required: ['agentId', 'memoryId'] },
           },
           {
             name: 'algo_memory_correct',
-            description: '记忆修正。用法一（已知 memoryId）：correct(agentId, "", memoryId, newContent)；用法二（自然语言）：correct(agentId, correctionText)',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, correction: { type: 'string' }, memoryId: { type: 'string' }, newContent: { type: 'string' } } },
+            description: '记忆修正。用法一：已知 memoryId → 直接更新；用法二：自然语言 → AI 定位并修正',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, correction: { type: 'string' }, memoryId: { type: 'string' }, newContent: { type: 'string' } }, required: ['agentId', 'correction'] },
           },
           {
             name: 'algo_memory_export',
-            description: '导出记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, maxExport: { type: 'number' } } },
-          },
-          {
-            name: 'algo_memory_import',
-            description: '导入记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memories: { type: 'array' } } },
-          },
-          {
-            name: 'algo_memory_metrics',
-            description: '运行时指标',
-            inputSchema: { type: 'object', properties: {} },
-          },
-          {
-            name: 'algo_memory_diagnostics',
-            description: '召回诊断：DB状态 + 缓存命中率 + MMR配置 + 最近召回详情',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
-          },
-          {
-            name: 'algo_memory_recall_reset',
-            description: '清除会话去重状态',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
-          },
-          {
-            name: 'algo_memory_delete_bulk',
-            description: '批量删除记忆',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, memoryIds: { type: 'array', items: { type: 'string' } } } },
-          },
-          {
-            name: 'algo_memory_clear',
-            description: '清空记忆（keepCore=true 时保留 core 层）',
-            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, keepCore: { type: 'boolean' } } },
+            description: '导出记忆为 JSON',
+            inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, maxExport: { type: 'number' } }, required: ['agentId'] },
           },
         ],
       }));
@@ -1875,26 +1811,13 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             case 'algo_memory_list': result = plugin.listMemories(args.agentId, args.limit || 20, args.offset || 0); break;
             case 'algo_memory_search': result = plugin.searchMemories(args.agentId, args.query); break;
             case 'algo_memory_stats': result = plugin.getStats(args.agentId); break;
+            case 'algo_memory_list': result = plugin.listMemories(args.agentId, args.limit || 20, args.offset || 0); break;
             case 'algo_memory_get': result = plugin.getMemory(args.agentId, args.memoryId); break;
-            case 'algo_memory_delete': result = { success: plugin.deleteMemory(args.agentId, args.memoryId) }; break;
-            case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(args.agentId, args.memoryIds) }; break;
-            case 'algo_memory_clear': result = { deleted: plugin.clearMemories(args.agentId, args.keepCore !== false) }; break;
             case 'algo_memory_update': result = { success: await plugin.updateMemory(args.agentId, args.memoryId, args.content) }; break;
+            case 'algo_memory_delete': result = { success: plugin.deleteMemory(args.agentId, args.memoryId) }; break;
             case 'algo_memory_correct': result = await plugin.correct(args.agentId, args.correction, args.memoryId, args.newContent); break;
             case 'algo_memory_export': result = plugin.exportMemories(args.agentId, args.maxExport || 1000); break;
-            case 'algo_memory_import': result = { imported: plugin.importMemories(args.agentId, args.memories) }; break;
-            case 'algo_memory_metrics': result = plugin.getMetrics(); break;
-            case 'algo_memory_diagnostics': {
-              const stats = plugin.getRecallStats(args.agentId);
-              const info = plugin.getLastRecallInfo(args.agentId);
-              result = { ...stats, lastRecall: info };
-              break;
-            }
-            case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(args.agentId); break;
-            case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
-            case 'algo_memory_compact': result = await plugin.manualCompact(args.agentId); break;
-            case 'algo_memory_health': result = plugin.getHealth(); break;
-            default: result = { error: 'Unknown tool' };
+            default: result = { error: `algo_memory: tool '${name}' not available — use algo_memory_stats or algo_memory_search` };
           }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         } catch (err: any) {
