@@ -575,7 +575,8 @@ confidence 是 0-1 的置信度。
                agent_id=excluded.agent_id, scope=excluded.scope, content=excluded.content,
                type=excluded.type, tier=excluded.tier, layer=excluded.layer,
                keywords=excluded.keywords, importance=excluded.importance,
-               access_count=excluded.access_count, cited_count=excluded.cited_count,
+               access_count=MAX(excluded.access_count, memories.access_count),
+               cited_count=MAX(excluded.cited_count, memories.cited_count),
                created_at=excluded.created_at, last_accessed=excluded.last_accessed,
                content_hash=excluded.content_hash, metadata=excluded.metadata`,
             [
@@ -597,6 +598,8 @@ confidence 是 0-1 的置信度。
     }
     if (imported > 0) {
       this.clearRecallCache(AgentId);
+      // Rebuild FTS index after bulk import to ensure FTS entries are in sync
+      this.rebuildFTS();
     }
     return imported;
   }
@@ -619,16 +622,16 @@ confidence 是 0-1 的置信度。
     return this.metrics;
   }
 
-  /** 重建 FTS5 索引，修复 rowid 漂移导致的 "missing row" 错误 */
+  /** 重建 FTS5 索引，修复 id 飘移导致的 "missing row" 错误 */
   rebuildFTS(): { success: boolean; message: string } {
     if (!this.db) return { success: false, message: '数据库未初始化' };
     if (!this.ftsAvailable) return { success: false, message: 'FTS5 不可用' };
     try {
-      // 重建 FTS 索引：删除并重新插入所有行
+      // 重建 FTS 索引：清空后用 id（稳定键）重新插入所有行
       this._db().exec(`
         DELETE FROM memories_fts;
-        INSERT INTO memories_fts(rowid, id, content, keywords)
-          SELECT rowid, id, content, keywords FROM memories;
+        INSERT INTO memories_fts(id, content, keywords)
+          SELECT id, content, keywords FROM memories;
       `);
       const count = (this._db().prepare('SELECT COUNT(*) as cnt FROM memories_fts').get() as any)?.cnt || 0;
       this.log.info(`[algo-memory] FTS5 索引重建完成，共 ${count} 条记录`);

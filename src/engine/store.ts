@@ -30,6 +30,7 @@ interface MemoryBuffer {
   lastFlush: number; // 上次刷新时间
   baseBufferMs: number; // 基础buffer时间
   messageCount: number; // 消息计数（用于动态调整）
+  flushing: boolean; // 互斥标志，防止 flush 期间 schedule 冲突
 }
 
 const memoryBuffers: Map<string, MemoryBuffer> = new Map();
@@ -44,7 +45,8 @@ function getBuffer(AgentId: string, config: Config): MemoryBuffer {
       timer: null,
       lastFlush: Date.now(),
       baseBufferMs: config.batchWrite?.bufferMs || DEFAULT_VALUES.BATCH_BUFFER_MS,
-      messageCount: 0
+      messageCount: 0,
+      flushing: false
     });
   }
   return memoryBuffers.get(AgentId)!;
@@ -320,7 +322,7 @@ async function processLlmQueue(): Promise<void> {
  */
 function checkIdleAndFlush(db: DbLike, AgentId: string, config: Config, log: any): void {
   const buffer = getBuffer(AgentId, config);
-  if (buffer.memories.length === 0) return;
+  if (buffer.memories.length === 0 || buffer.flushing) return;
 
   const idleTime = Date.now() - buffer.lastFlush;
   const dynamicBufferMs = getDynamicBufferMs(buffer);
@@ -339,35 +341,43 @@ function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any
   const buffer = memoryBuffers.get(AgentId);
   if (!buffer || buffer.memories.length === 0) return 0;
 
-  // 清除定时器
-  if (buffer.timer) {
-    clearTimeout(buffer.timer);
-    buffer.timer = null;
-  }
+  // 互斥锁：防止 flush 期间 scheduleBatchWrite 写入旧数据
+  if (buffer.flushing) return 0;
+  buffer.flushing = true;
 
-  const memoriesToWrite = buffer.memories;
-  buffer.memories = [];
-  buffer.lastFlush = Date.now();
-
-  if (memoriesToWrite.length === 0) return 0;
-
-  let inserted = 0;
   try {
-    // 统一SQL构建
-    const { placeholders, params } = buildMemoryBatchInsert(memoriesToWrite);
+    // 清除定时器
+    if (buffer.timer) {
+      clearTimeout(buffer.timer);
+      buffer.timer = null;
+    }
 
-    run(db,
-      `INSERT INTO memories (${MEMORY_COLUMNS.join(', ')}) VALUES ${placeholders}`,
-      params
-    );
+    const memoriesToWrite = buffer.memories;
+    buffer.memories = [];
+    buffer.lastFlush = Date.now();
 
-    inserted = memoriesToWrite.length;
-    log.info(`[algo-memory] 批量写入完成: ${inserted} 条记忆`);
-  } catch (err) {
-    log.error('[algo-memory] 批量写入失败:', err);
+    if (memoriesToWrite.length === 0) return 0;
+
+    let inserted = 0;
+    try {
+      // 统一SQL构建
+      const { placeholders, params } = buildMemoryBatchInsert(memoriesToWrite);
+
+      run(db,
+        `INSERT INTO memories (${MEMORY_COLUMNS.join(', ')}) VALUES ${placeholders}`,
+        params
+      );
+
+      inserted = memoriesToWrite.length;
+      log.info(`[algo-memory] 批量写入完成: ${inserted} 条记忆`);
+    } catch (err) {
+      log.error('[algo-memory] 批量写入失败:', err);
+    }
+
+    return inserted;
+  } finally {
+    buffer.flushing = false;
   }
-
-  return inserted;
 }
 
 /**
@@ -395,8 +405,8 @@ function recordTierChange(db: DbLike, memoryId: string, oldTier: string, newTier
 function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: any): void {
   const buffer = getBuffer(AgentId, config);
 
-  // 如果已经有定时器在运行，不重复创建
-  if (buffer.timer) return;
+  // 如果正在 flush 或已有定时器，不重复创建
+  if (buffer.flushing || buffer.timer) return;
 
   // 增加消息计数（用于动态调整）
   incrementMessageCount(AgentId);
@@ -404,6 +414,7 @@ function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: an
   // 计划在动态bufferMs后执行批量写入
   const dynamicBufferMs = getDynamicBufferMs(buffer);
   buffer.timer = setTimeout(() => {
+    buffer.timer = null;
     flushMemoryBuffer(db, AgentId, config, log);
   }, dynamicBufferMs);
 }
@@ -507,7 +518,10 @@ type TierRow = { id: string; tier: string; importance: number; access_count: num
 
 // Normalize content before storing: strip @mentions, compress whitespace, remove markdown noise
 export function normalizeForStorage(content: string): string {
-  let text = content
+  let text = typeof content === 'string' ? content : String(content ?? '');
+  // Strip Conversation info metadata injected by OpenClaw
+  text = stripInboundMetadata(text);
+  text = text
     // Strip @mentions
     .replace(/@\w+/g, '')
     // Compress multiple whitespace to single space

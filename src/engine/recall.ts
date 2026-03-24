@@ -132,10 +132,15 @@ export async function recall(
     memories = mmrDeduplicate(memories, config.mmr);
   }
 
-  // cited_count: update all items that went through scoring (pre-MMR scoredCandidates).
-  // This includes items MMR filtered out (still relevant, just not diverse enough).
-  // Items eliminated by hardMinScore had LOW scores — do NOT count those.
-  const candidateIds = scoredCandidates.map((m: Memory) => m.id);
+  // HardMinScore filter BEFORE cited_count update
+  // Only items that actually passed to the user count as "cited"
+  if (config.hardMinScore.enabled) {
+    memories = memories.filter(m => (m._score || m.importance) >= config.hardMinScore.threshold);
+  }
+  const limited = memories.slice(0, config.maxResults);
+
+  // cited_count: only update items that were actually returned to the user
+  const candidateIds = limited.map((m: Memory) => m.id);
   if (candidateIds.length > 0) {
     const placeholders = candidateIds.map(() => '?').join(',');
     run(db,
@@ -143,12 +148,6 @@ export async function recall(
       candidateIds
     );
   }
-
-  // HardMinScore filter (after cited_count update)
-  if (config.hardMinScore.enabled) {
-    memories = memories.filter(m => (m._score || m.importance) >= config.hardMinScore.threshold);
-  }
-  const limited = memories.slice(0, config.maxResults);
 
   const result: RecallResult = { hasMemory: limited.length > 0, memories: limited };
 

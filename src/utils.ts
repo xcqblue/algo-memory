@@ -79,7 +79,10 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   if (/^[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?\s]+$/.test(content)) return true;
 
   if (config.skipGreetings) {
-    const greetings = ['hi', 'hello', 'hey', '你好', '您好', '嗨', '嗨你好', '你好呀', 'hiya'];
+    const greetings = ['hi', 'hello', 'hey', '你好', '您好', '嗨', '嗨你好', '你好呀', 'hiya',
+      '早上好', '早安', '上午好', '中午好', '下午好', '晚安', '晚上好', '夜好',
+      '初次见面', '很高兴认识', '幸会', '打扰了', '请问', '劳驾', '在吗', '在不在',
+      '哈喽', '嗨喽', 'tks', 'thx', 'thanks', 'thank you'];
     if (greetings.some(g => lower === g || lower.startsWith(g + ' '))) return true;
   }
 
@@ -431,8 +434,22 @@ export function jaccardSimilarity(text1: string, text2: string): number {
 }
 
 // ============= Scoring Functions =============
+/**
+ * Weibull decay: f(t) = exp(-(t/scale)^shape)
+ *
+ * shape < 1:  "早期快" — 前期衰减迅速，后期趋于平稳（类似指数衰减）
+ * shape = 1:  纯指数衰减
+ * shape > 1:  "后期快" — 前期保护（记忆巩固期），后期加速遗忘
+ *
+ * 默认 shape=1.5 > 1，所以：
+ *   0-30天  衰减很少（0.94+），保护新记忆
+ *   30-60天 衰减加快（0.94 → 0.71）
+ *   90天+   快速遗忘（0.37 → 0.06），实现"越久越容易忘"
+ *
+ * 这与 tier 分层配合：core 层访问≥10次进入永久保留；peripheral 按此曲线自然消亡。
+ */
 export function weibullDecay(daysOld: number, shape: number, scale: number): number {
-  return Math.exp(-Math.pow(daysOld / scale, shape));
+  return Math.exp(-Math.pow(Math.max(0, daysOld) / scale, shape));
 }
 
 export function lengthNorm(content: string, anchor: number): number {

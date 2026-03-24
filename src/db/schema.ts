@@ -90,19 +90,21 @@ export function initSchema(db: AnyDatabase, log: any): void {
     try { db.prepare(idx).run(); } catch (_) { /* index creation is non-fatal */ }
   }
 
-  // FTS5 virtual table — better-sqlite3 supports FTS5 natively
-  // WAL mode disabled to avoid file locking issues
+  // FTS5 virtual table — use id as primary join key instead of rowid
+  // rowid drifts after VACUUM/REINDEX, so we manage FTS manually via triggers
+  // and join by id (stable) rather than rowid (volatile)
   try {
     db.prepare("PRAGMA journal_mode = DELETE").run();
     db.prepare(`
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-        id, content, keywords, content='memories', content_rowid='rowid'
+        id UNINDEXED, content, keywords
       )
     `).run();
-    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, id, content, keywords) VALUES (new.rowid, new.id, new.content, new.keywords); END`).run();
+    // Manually sync: no content=... content_rowid=... — we manage FTS rows explicitly
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(id, content, keywords) VALUES (new.id, new.content, new.keywords); END`).run();
     db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id = old.id; END`).run();
-    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN DELETE FROM memories_fts WHERE id = old.id; INSERT INTO memories_fts(rowid, id, content, keywords) VALUES (new.rowid, new.id, new.content, new.keywords); END`).run();
-    log.info('[algo-memory] FTS5 全文搜索已启用（含 INSERT/DELETE/UPDATE 触发器）');
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN DELETE FROM memories_fts WHERE id = old.id; INSERT INTO memories_fts(id, content, keywords) VALUES (new.id, new.content, new.keywords); END`).run();
+    log.info('[algo-memory] FTS5 全文搜索已启用（id 稳定键，无 rowid 漂移）');
   } catch (err: any) {
     log.warn('[algo-memory] FTS5 创建失败，搜索将降级为 LIKE:', err.message);
   }

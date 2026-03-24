@@ -253,7 +253,7 @@ export const DEFAULT_CONFIG: Config = {
     enabled: true,
     minQueryLength: 2,
     forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次', 'what', 'why', 'how', '什么', '为什么', '怎么'],
-    sessionDedup: { enabled: true, windowMs: 30_000, similarityThreshold: 0.6 }
+    sessionDedup: { enabled: true, windowMs: 30_000, similarityThreshold: 0.75 }
   },
   weibullDecay: { enabled: true, shape: 1.5, scale: 90 },
   reinforcement: { enabled: true, factor: 0.5, maxMultiplier: 3 },
