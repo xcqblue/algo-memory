@@ -1076,8 +1076,8 @@ export default {
           const agentId = event?.agentId || 'default';
           const messages = event?.messages || [];
           await plugin.store(agentId, messages);
-        } catch (err) {
-          log.error('[algo-memory] agent_end 钩子错误:', err);
+        } catch (err: any) {
+          log.error('[algo-memory] agent_end 钩子错误:', err?.message ?? err, err?.stack);
         }
       });
     }
@@ -1124,8 +1124,8 @@ export default {
           if (messages.length > 0) {
             plugin.saveSessionSnapshot(agentId, sessionKey, messages);
           }
-        } catch (err) {
-          log.error('[algo-memory] agent_end 会话快照保存钩子错误:', err);
+        } catch (err: any) {
+          log.error('[algo-memory] agent_end 会话快照保存钩子错误:', err?.message ?? err, err?.stack);
         }
       });
     }
@@ -1235,8 +1235,8 @@ export default {
             }
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
           } catch (err: any) {
-            log.error(`[algo-memory] 工具执行失败 ${tool.name}:`, err);
-            return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+            log.error(`[algo-memory] 工具执行失败 ${tool.name}:`, err?.message ?? err, err?.stack);
+            return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err?.message ?? String(err) }) }] };
           }
         }
       });
@@ -1377,7 +1377,7 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
           }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         } catch (err: any) {
-          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err?.message ?? String(err) }) }] };
         }
       });
 
