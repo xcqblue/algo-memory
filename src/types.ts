@@ -9,6 +9,7 @@ export interface Config {
   maxResults: number;
   maxInjectTokens: number;
   cleanupDays: number;
+  metricsEnabled: boolean; // enable llm_output hook to record LLM usage stats
   language: string;
   coreKeywords: string[];
   recencyDecay: boolean;
@@ -242,6 +243,7 @@ export const DEFAULT_CONFIG: Config = {
   maxResults: 5,
   maxInjectTokens: 1500,
   cleanupDays: 180,
+  metricsEnabled: true,  // enable llm_output hook to record LLM usage stats
   language: 'auto',
   coreKeywords: ['记住', '牢记', '重要', '不要忘记', '记住它', 'remember', 'important', 'never forget'],
   recencyDecay: true,

@@ -103,7 +103,9 @@ class MemoryPlugin {
   public metrics = {
     llmErrors: { core: 0, extract: 0, dedup: 0 },
     dbErrors: 0,
-    lastErrorAt: null as number | null
+    lastErrorAt: null as number | null,
+    llmApiCalls: 0,
+    totalTokens: 0
   };
 
   constructor(config: Partial<Config>, log: any = console) {
@@ -837,12 +839,50 @@ confidence 是 0-1 的置信度。
       return {
         success: true,
         message: 'compaction 强化完成',
-        promoted: 0,   // 简化统计
+        promoted: 0,
         reinforced: 0,
         pruned: 0
       };
     } catch (err: any) {
       return { success: false, message: `compaction 失败: ${err.message}` };
+    }
+  }
+
+  /**
+   * 立即强化被工具调用召回的记忆（after_tool_call hook 专用）
+   * 比 agent_end 更早更新 cited_count，实现实时强化
+   */
+  async reinforceCitedMemories(AgentId: string, citedIds: string[]): Promise<void> {
+    if (!this.db || citedIds.length === 0) return;
+    try {
+      const placeholders = citedIds.map(() => '?').join(',');
+      run(this._db(),
+        `UPDATE memories SET cited_count = cited_count + 1, last_accessed = ?
+         WHERE id IN (${placeholders}) AND agent_id = ?`,
+        [Date.now(), ...citedIds, AgentId]
+      );
+      this.log.info(`[algo-memory] [after_tool_call] 强化 ${citedIds.length} 条被召回记忆`);
+    } catch (err) {
+      this.log.error('[algo-memory] reinforceCitedMemories 失败:', err);
+    }
+  }
+
+  /**
+   * 记录 LLM 调用统计（llm_output hook 专用）
+   * 用于 memory metrics，不影响记忆存储
+   */
+  recordLlmUsage(AgentId: string, usage: {
+    inputTokens?: number; outputTokens?: number;
+    cacheRead?: number; cacheWrite?: number; totalTokens?: number;
+  }): void {
+    try {
+      this.metrics.llmApiCalls = (this.metrics.llmApiCalls || 0) + 1;
+      if (usage.totalTokens) {
+        this.metrics.totalTokens = (this.metrics.totalTokens || 0) + usage.totalTokens;
+      }
+      this.log.info(`[algo-memory] [llm_output] LLM tokens: in=${usage.inputTokens}, out=${usage.outputTokens}, cacheR=${usage.cacheRead}`);
+    } catch (err) {
+      this.log.error('[algo-memory] recordLlmUsage 失败:', err);
     }
   }
 
@@ -1362,6 +1402,85 @@ export default {
       } catch (err: any) {
         log.error('[algo-memory] after_compaction 钩子错误:', err?.message ?? err, err?.stack);
       }
+    });
+
+    // === Tool lifecycle: after tool execution ===
+    // after_tool_call: fires immediately after any tool executes (before agent_end).
+    // This gives us real-time feedback on what memories were cited via algo_memory_search.
+    api.on('after_tool_call', async (event: any, ctx: any) => {
+      const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
+      if (!plugin.isActive()) return;
+
+      // Fire-and-forget: do not await to avoid blocking the tool response pipeline.
+      (async () => {
+        try {
+          // When algo_memory_search returns results, immediately reinforce cited memories.
+          // This is better than waiting for agent_end — cited_count is updated in real-time.
+          if (event.toolName === 'algo_memory_search' && event.result) {
+            const resultStr = typeof event.result === 'string'
+              ? event.result
+              : JSON.stringify(event.result);
+
+            // Extract memory IDs from search results (format: [{id, content, ...}])
+            // The tool result text looks like: "[记忆] content..." or structured JSON
+            const memoryIdPattern = /"id"\s*:\s*"([^"]+)"/g;
+            const citedIds: string[] = [];
+            let match;
+            while ((match = memoryIdPattern.exec(resultStr)) !== null) {
+              citedIds.push(match[1]);
+            }
+
+            if (citedIds.length > 0) {
+              // Immediately update cited_count and last_accessed for cited memories
+              plugin.reinforceCitedMemories(agentId, citedIds).catch(() => {});
+            }
+          }
+        } catch (err: any) {
+          log.error('[algo-memory] after_tool_call 错误:', err?.message ?? err);
+        }
+      })();
+    });
+
+    // === LLM output: capture raw assistant responses ===
+    // llm_output: fires after LLM responds, before the response goes to transcript.
+    // Captures raw assistantTexts for important-fact detection (e.g. "已记住" confirmations).
+    api.on('llm_output', async (event: any, ctx: any) => {
+      const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
+      if (!plugin.isActive()) return;
+
+      // Fire-and-forget
+      (async () => {
+        try {
+          // Capture usage stats for memory metadata
+          if (event.usage && config.metricsEnabled) {
+            plugin.recordLlmUsage(agentId, {
+              inputTokens: event.usage.input,
+              outputTokens: event.usage.output,
+              cacheRead: event.usage.cacheRead,
+              cacheWrite: event.usage.cacheWrite,
+              totalTokens: event.usage.total,
+            });
+          }
+
+          // Detect memory-worthy assistant confirmations from raw output
+          // e.g., "好的，我记住了" / "已记住" / "I've noted that"
+          const confirmPatterns = [
+            /^(好的|我已|已|记住了|笔记下来)/,
+            /^(ok|okay|i'?ve (noted|remember|got it|recorded)|saved|noted)/i
+          ];
+
+          for (const text of (event.assistantTexts || [])) {
+            const str = typeof text === 'string' ? text : JSON.stringify(text);
+            if (confirmPatterns.some(p => p.test(str.trim()))) {
+              // Assistant confirmed something was stored — this is high-value signal
+              // Log it for debugging; actual capture happens via agent_end messages
+              log.info(`[algo-memory] [llm_output] 检测到助手确认信号: ${str.substring(0, 50)}`);
+            }
+          }
+        } catch (err: any) {
+          log.error('[algo-memory] llm_output 钩子错误:', err?.message ?? err);
+        }
+      })();
     });
 
     // === Gateway lifecycle: ensure buffers flushed and DB closed cleanly ===
