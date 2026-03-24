@@ -17,7 +17,11 @@ All notable changes to algo-memory are documented here.
   - `llm_output` — 记录 LLM token 使用统计
   - `gateway_stop` — 干净关闭，flush buffer
 
-- **Compaction 强化机制**
+- **模型列表动态化**
+  - 模型名直接透传给 API，内置 modelMap 只做日志展示用
+  - 新增 `llm.customModelNames` 配置项：用户可自行添加新模型，无需修改插件代码
+  - 解决模型频繁更新导致插件代码不断维护的问题
+  - 示例：`{ "glm-4.7-flash": "智谱免费模型", "my-model": "私有模型" }`
   - `before_compaction`: `promotePeripheralOnCompaction()` — 将频繁访问的 peripheral 升级
   - `after_compaction`: `reinforceOnCompaction()` — 强化 core importance，清理低价值 peripheral
 
@@ -42,7 +46,8 @@ All notable changes to algo-memory are documented here.
 - **Critical**
   - `updateMemory`: `WHERE agent_id=?` 的参数漏传（只有 `[memoryId]`），任何用户可修改任何记忆
   - `updateMemory`: `metadata` 对象未 `JSON.stringify`，SQLite 存成 `"[object Object]"`
-  - `before_prompt_build`: sessionDedup 配置传了 `config.adaptiveRetrieval`（不存在），**session 去重功能从未生效**
+  - `before_prompt_build`: sessionDedup 配置传了 `config.adaptiveRetrieval`（不存在），**session 去重功能从未生效**（v2.5.0 修复后首次生效）
+  - `snapshotRetentionDays`: 在 `cleanup()` 里使用但未加入 Config 接口，无法配置（v2.5.0 修复）
   - `getMemory`: 引用未定义的 `MEMORY_COLUMNS` 常量，运行时崩溃
   - `snapshotRetentionDays`: 在 `cleanup()` 里使用但未加入 Config 接口，无法配置
 

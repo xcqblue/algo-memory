@@ -2,7 +2,7 @@
   "id": "algo-memory",
   "name": "algo-memory",
   "description": "Structured SQLite-based memory for OpenClaw — tier scoring (core/working/peripheral), FTS5 full-text search, LLM keyword extraction, Weibull decay, session continuity, compaction reinforcement, and workspace sync. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "installDependencies": true,
@@ -234,6 +234,11 @@
             "type": "string",
             "default": "",
             "description": "API地址"
+          },
+          "customModelNames": {
+            "type": "object",
+            "default": {},
+            "description": "自定义模型名称映射（key=API模型名，value=显示名）。用于新增模型或覆盖内置映射，无需更新插件代码即可支持新模型。示例: {\"glm-4.7-flash\": \"智谱免费模型\"}"
           }
         }
       },
@@ -449,6 +454,10 @@
     "llm.baseURL": {
       "label": "API地址",
       "placeholder": "https://api.minimax.chat/v1"
+    },
+    "llm.customModelNames": {
+      "label": "自定义模型名称",
+      "description": "新增模型时无需更新插件，key=API模型名，value=显示名"
     },
     "threshold": {
       "label": "阈值配置",

@@ -119,13 +119,71 @@ npm run build
 }
 ```
 
-### 4. LLM API Key
-设置环境变量：
+### 4. LLM API Key（可选，核心检索不依赖 LLM）
+algo-memory 的 LLM **不是必选功能**。如需 LLM 关键词提取或去重，配置环境变量：
 ```bash
-export MINIMAX_API_KEY="your-key"
-# 或
-export OPENAI_API_KEY="your-key"
+export MINIMAX_API_KEY="your-key"      # MiniMax
+export DEEPSEEK_API_KEY="your-key"    # DeepSeek
+export KIMI_API_KEY="your-key"        # Kimi/Moonshot
+export DASHSCOPE_API_KEY="your-key"   # 阿里百炼/通义千问
+export ZHIPU_API_KEY="your-key"       # 智谱 GLM
+export OPENAI_API_KEY="your-key"      # OpenAI
+export ANTHROPIC_API_KEY="your-key"   # Anthropic
+export OLLAMA_BASE_URL="http://localhost:11434"  # Ollama 本地
+export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 ```
+
+然后在插件配置中指定 provider：
+
+```json
+{
+  "plugins": {
+    "algo-memory": {
+      "llm": {
+        "provider": "zhipu",
+        "model": "glm-4.7-flash"
+      }
+    }
+  }
+}
+```
+
+**支持模型（`model` 留空使用各 provider 默认）：**
+
+| Provider | 默认模型 | 推荐 |
+|----------|---------|------|
+| `minimax` | `MiniMax-Text-01` | MiniMax-Text-01（最新MoE）/ minimaxi（高性价比）|
+| `deepseek` | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1推理）|
+| `kimi` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k（长上下文）|
+| `zhipu` | `glm-4.7-flash` | glm-4.7-flash（免费）/ glm-4-plus（最强）|
+| `qwen` | `qwen-plus` | qwen-plus（推荐）/ qwen-max（最强）/ qwen2.5-72b-instruct（超大杯）|
+| `openai` | `gpt-4o-mini` | gpt-4o-mini（快）/ gpt-4o（强）|
+| `anthropic` | `claude-3-haiku` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
+| `ollama` | `llama3` | 本地自定义 |
+| `siliconflow` | `deepseek-ai/deepseek-v3` | SiliconFlow 聚合 50+ 模型 |
+
+**模型动态化（无需更新插件即可支持新模型）：**
+
+内置 modelMap 只做日志展示用，模型名直接透传给 API。新增模型只需在配置中指定：
+
+```json
+{
+  "plugins": {
+    "algo-memory": {
+      "llm": {
+        "provider": "deepseek",
+        "model": "deepseek-r2-latest",
+        "customModelNames": {
+          "deepseek-r2-latest": "DeepSeek R2（最新内部测试版）",
+          "glm-next-gen": "下一代智谱模型（内测中）"
+        }
+      }
+    }
+  }
+}
+```
+
+`customModelNames` 优先级高于内置映射，可覆盖任意模型的显示名称。
 
 ---
 
@@ -152,6 +210,8 @@ export OPENAI_API_KEY="your-key"
 |--------|--------|------|
 | `llm.provider` | `"minimax"` | LLM 提供商 |
 | `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
+| `llm.customModelNames` | `{}` | 自定义模型显示名映射，key=API模型名，value=显示名 |
+| `noiseFilter.useLlmForDedup` | `false` | 启用 LLM 辅助去重（额外 LLM 调用）|
 | `noiseFilter.useLlmForDedup` | `false` | 启用 LLM 辅助去重（额外 LLM 调用）|
 | `noiseFilter.useLlmForCore` | `false` | 启用 LLM 判断 core（额外 LLM 调用）|
 | `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
