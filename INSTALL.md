@@ -7,7 +7,7 @@
 
 ---
 
-## 快速开始（3步）
+## 快速开始（3 步）
 
 ```bash
 # 1. 克隆并安装
@@ -49,8 +49,6 @@ algo-memory 和内置 memory-core 共用同一插槽，需要切换：
 ```bash
 openclaw plugins enable algo-memory
 ```
-
-> ⚠️ **每次 OpenClaw 重启后都需要执行此命令**
 
 ### 4. 配置（如需自定义）
 
@@ -114,8 +112,6 @@ cd ~/.openclaw/extensions/algo-memory
 4. 重启 OpenClaw
 
 如果编译失败，会自动回滚到旧版本。
-
-详细说明见 [update.sh](update.sh)
 
 ### 手动更新
 
