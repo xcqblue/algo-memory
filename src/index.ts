@@ -814,6 +814,17 @@ confidence 是 0-1 的置信度。
     return this.db !== null;
   }
 
+  /** 暴露内部 DB 引用给外部调用（如 hook） */
+  getDb(): ReturnType<typeof this._db> | null {
+    return this.db;
+  }
+
+  /** 手动刷新所有 agent 的 buffer 到 DB */
+  flushAll(): void {
+    if (!this.db) return;
+    flushAllBuffers(this._db(), this.config, this.log);
+  }
+
   /**
    * 手动触发 compaction 强化流程（对应 session:compact:before + after 的合并调用）
    * 等价于 OpenClaw 压缩周期中的强化步骤
@@ -1092,6 +1103,8 @@ confidence 是 0-1 的置信度。
   /** 将会话期间新增的记忆写入 Markdown 摘要文件（跨 session 延续） */
   writeSessionSummary(): void {
     if (!this.config.sessionSummary.enabled) return;
+    // Flush all agent buffers first so latest memories are in DB before we read them
+    this.flushAll();
     try {
       const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
       const stateDir = this.dbPath.replace(/[/\\][^/\\]+$/, '');
@@ -1154,6 +1167,8 @@ confidence 是 0-1 的置信度。
     this.cache.clear();
     if (this.db) {
       try {
+        // Flush all buffers before closing so no data is lost on shutdown
+        flushAllBuffers(this._db(), this.config, this.log);
         const pidPath = this.dbPath.replace(/[/\\][^/\\]+$/, '') + '/algo-memory.pid';
         fs.unlinkSync(pidPath);
       } catch (_) { /* ignore */ }
@@ -1180,10 +1195,12 @@ export default {
       path.join(process.env.HOME || '/home/x', '.openclaw', 'state', 'algo-memory'));
 
     // === Hooks ===
+    // IMPORTANT: All OpenClaw hooks pass (event, ctx) — ctx.agentId is the source of truth.
+    // event.agentId is only set for agent-related hooks, not session hooks.
     if (config.autoCapture) {
-      api.on('agent_end', async (event: any) => {
+      api.on('agent_end', async (event: any, ctx: any) => {
         try {
-          const agentId = event?.agentId || 'default';
+          const agentId = ctx?.agentId || 'default';
           const messages = event?.messages || [];
           await plugin.store(agentId, messages);
         } catch (err: any) {
@@ -1197,19 +1214,13 @@ export default {
       // 在 session_start 时检测会话切换并注入上会话上下文
       api.on('session_start', async (event: any, ctx: any) => {
         try {
-          // 尝试从多个来源获取 agentId
-          const agentId = ctx?.agentId || event?.agentId || ctx?.sessionKey?.split(':')[2] || 'default';
+          const agentId = ctx?.agentId || event?.sessionKey?.split(':')[2] || 'default';
           const sessionKey = event?.sessionKey || 'unknown';
-
-          // 记录获取到的 agentId，便于调试多 Agent 问题
           if (log.info) {
-            const actualAgentId = ctx?.agentId || 'undefined';
-            log.info(`[algo-memory] session_start - agentId=${actualAgentId}, resolved=${agentId}, sessionKey=${sessionKey}`);
+            log.info(`[algo-memory] session_start - agentId=${agentId}, sessionKey=${sessionKey}, resumedFrom=${event.resumedFrom}`);
           }
-
           // 检测会话是否切换，获取上会话快照
           const snapshot = plugin.detectSessionChangeAndGetSnapshot(agentId, sessionKey);
-
           if (snapshot) {
             const { text, tokens } = plugin.buildSessionContinuityContext(snapshot);
             if (text && tokens > 0) {
@@ -1217,20 +1228,17 @@ export default {
               api.prependSystemContext('\n\n' + text + '\n');
             }
           }
-        } catch (err) {
-          log.error('[algo-memory] session_start 会话续接钩子错误:', err);
+        } catch (err: any) {
+          log.error('[algo-memory] session_start 会话续接钩子错误:', err?.message ?? err, err?.stack);
         }
       });
 
       // 在 agent_end 时保存会话快照
       api.on('agent_end', async (event: any, ctx: any) => {
         try {
-          // 尝试从多个来源获取 agentId
-          const agentId = ctx?.agentId || event?.agentId || ctx?.sessionKey?.split(':')[2] || 'default';
-          // 优先从 ctx 获取 sessionKey，也尝试从 event 获取作为兜底
+          const agentId = ctx?.agentId || event?.sessionKey?.split(':')[2] || 'default';
           const sessionKey = ctx?.sessionKey || event?.sessionKey || 'unknown';
           const messages = event?.messages || [];
-
           if (messages.length > 0) {
             plugin.saveSessionSnapshot(agentId, sessionKey, messages);
           }
@@ -1241,9 +1249,9 @@ export default {
     }
 
     if (config.autoRecall) {
-      api.on('before_prompt_build', async (event: any) => {
+      api.on('before_prompt_build', async (event: any, ctx: any) => {
         try {
-          const agentId = event?.agentId || 'default';
+          const agentId = ctx?.agentId || 'default';
           const messages = event?.messages || [];
           // Handle Feishu array-format messages like [{type, text}] in addition to plain strings
           const userMessages = (messages as any[])
@@ -1290,27 +1298,71 @@ export default {
       }
     });
 
-    // === Compaction lifecycle (March 5 2026: session:compact:before / after) ===
-    // compaction 周期触发时，对 peripheral 层做强化/衰减处理
-    api.on('session:compact:before', async (event: any) => {
+    // === Compaction lifecycle (March 5 2026: before_compaction / after_compaction hooks) ===
+    // OpenClaw calls these during context compression cycles.
+    // before_compaction: has event.sessionFile (JSONL transcript) and event.messages — capture
+    //                    memories BEFORE compaction truncates them.
+    // after_compaction:  has event.compactedCount, event.sessionFile — reinforce post-compaction.
+    api.on('before_compaction', async (event: any, ctx: any) => {
       try {
-        const agentId = event?.agentId || 'default';
+        const agentId = ctx?.agentId || 'default';
         if (!plugin.isActive()) return;
-        // compaction 开始前：提升被频繁访问的 peripheral 记忆
+        if (!config.autoCapture) return; // Only capture if autoCapture is enabled
+
+        // Read session transcript from disk (event.sessionFile points to JSONL on disk,
+        // which has ALL messages before compaction truncation).
+        let sessionMessages: any[] = [];
+        if (event.sessionFile && typeof event.sessionFile === 'string') {
+          try {
+            const content = fs.readFileSync(event.sessionFile, 'utf-8');
+            sessionMessages = content.trim().split('\n')
+              .filter(Boolean)
+              .map((line: string) => {
+                try { return JSON.parse(line); } catch { return null; }
+              })
+              .filter(Boolean);
+          } catch (readErr) {
+            log.warn(`[algo-memory] before_compaction: 无法读取 sessionFile: ${event.sessionFile}`);
+          }
+        }
+        // Also use event.messages as fallback
+        if (sessionMessages.length === 0 && Array.isArray(event.messages)) {
+          sessionMessages = event.messages;
+        }
+
+        if (sessionMessages.length > 0) {
+          // Flush buffer first so recent memories are included
+          plugin.flushAll();
+          await plugin.store(agentId, sessionMessages);
+          log.info(`[algo-memory] before_compaction: 从 sessionFile 捕获 ${sessionMessages.length} 条消息写入记忆`);
+        }
+
+        // Also trigger peripheral promotion during compaction cycle
         await plugin.promotePeripheralOnCompaction(agentId);
       } catch (err: any) {
-        log.error('[algo-memory] session:compact:before 钩子错误:', err?.message ?? err, err?.stack);
+        log.error('[algo-memory] before_compaction 钩子错误:', err?.message ?? err, err?.stack);
       }
     });
 
-    api.on('session:compact:after', async (event: any) => {
+    api.on('after_compaction', async (event: any, ctx: any) => {
       try {
-        const agentId = event?.agentId || 'default';
+        const agentId = ctx?.agentId || 'default';
         if (!plugin.isActive()) return;
-        // compaction 结束后：对旧 peripheral 记忆执行强化/降级
+        // Reinforce memories after compaction completes
         await plugin.reinforceOnCompaction(agentId);
+        log.info(`[algo-memory] after_compaction: 完成强化，compactedCount=${event.compactedCount}, messageCount=${event.messageCount}`);
       } catch (err: any) {
-        log.error('[algo-memory] session:compact:after 钩子错误:', err?.message ?? err, err?.stack);
+        log.error('[algo-memory] after_compaction 钩子错误:', err?.message ?? err, err?.stack);
+      }
+    });
+
+    // === Gateway lifecycle: ensure buffers flushed and DB closed cleanly ===
+    api.on('gateway_stop', async () => {
+      try {
+        plugin.close();
+        log.info('[algo-memory] gateway_stop: 插件已干净关闭');
+      } catch (err: any) {
+        log.error('[algo-memory] gateway_stop 钩子错误:', err?.message ?? err, err?.stack);
       }
     });
 
