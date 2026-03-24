@@ -115,7 +115,7 @@ cd ~/.openclaw/extensions/algo-memory
 
 如果编译失败，会自动回滚到旧版本。
 
-详细说明见 [update.sh.md](update.sh.md)
+详细说明见 [update.sh](update.sh)
 
 ### 手动更新
 
