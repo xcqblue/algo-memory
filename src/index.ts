@@ -981,49 +981,75 @@ confidence 是 0-1 的置信度。
   }
 
   /**
-   * 将重要记忆（core tier）同步到 workspace 的 MEMORY.md
-   * 被 before_compaction / after_compaction 调用，保持记忆在 OpenClaw 全局可用
+   * 将重要记忆（core tier）同步到 workspace 的 memory/algo-memory/ 目录
+   *
+   * IMPORTANT: Do NOT write to MEMORY.md directly — the workspace plugin uses a
+   * JSON format (### algo-memory section with JSON payload). Writing Markdown
+   * format there would corrupt the workspace plugin's data structure.
+   *
+   * Instead, write to memory/algo-memory/YYYY-MM-DD.md — a separate file that
+   * the workspace plugin can optionally pick up via its file scanning logic.
+   * This avoids file locking conflicts with the workspace plugin.
    */
   async syncCoreToWorkspace(): Promise<{ synced: number; skipped: number }> {
-    const workspace = process.env.OPENCLAW_WORKSPACE || path.join(process.env.HOME || '/tmp', '.openclaw', 'workspace');
-    const memoryFile = path.join(workspace, 'MEMORY.md');
-    const date = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    const workspace = process.env.OPENCLAW_WORKSPACE
+      || path.join(process.env.HOME || '/tmp', '.openclaw', 'workspace');
+    const memoryDir = path.join(workspace, 'memory', 'algo-memory');
 
     let synced = 0, skipped = 0;
     try {
-      // 读取现有 MEMORY.md 内容，用于去重
-      let existing = '';
-      if (fs.existsSync(memoryFile)) {
-        existing = fs.readFileSync(memoryFile, 'utf-8');
+      if (!fs.existsSync(memoryDir)) {
+        fs.mkdirSync(memoryDir, { recursive: true });
       }
 
-      // 读取所有 core 层记忆
       if (!this.db) return { synced: 0, skipped: 0 };
-      const cores = queryAll(this._db(),
-        `SELECT id, content, importance, access_count, created_at FROM memories
-         WHERE agent_id = 'default' AND tier = 'core' AND layer = 'general'
-         ORDER BY importance DESC, access_count DESC LIMIT 50`
-      ) as unknown as Array<{ id: string; content: string; importance: number; access_count: number; created_at: number }>;
 
-      const lines: string[] = [];
-      for (const m of cores) {
-        // 简单去重：如果 existing 已经包含这条记忆的内容片段，跳过
-        if (existing.includes(m.content.substring(0, 20))) {
-          skipped++;
-          continue;
+      // 读取所有 core 层记忆（最近 30 天有新访问的）
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const cores = queryAll(this._db(),
+        `SELECT id, content, importance, access_count, cited_count, created_at, last_accessed FROM memories
+         WHERE agent_id = 'default' AND tier = 'core' AND layer = 'general'
+         AND (last_accessed > ? OR cited_count > 0)
+         ORDER BY importance DESC, access_count DESC LIMIT 30`,
+        [cutoff]
+      ) as unknown as Array<{
+        id: string; content: string; importance: number;
+        access_count: number; cited_count: number; created_at: number; last_accessed: number;
+      }>;
+
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const dateFile = path.join(memoryDir, `${today}.md`);
+      let existingIds = new Set<string>();
+
+      // 读取已存在的记录（去重）
+      if (fs.existsSync(dateFile)) {
+        const content = fs.readFileSync(dateFile, 'utf-8');
+        const idMatches = content.match(/^## memory:id:([a-zA-Z0-9_-]+)/gm) || [];
+        for (const m of idMatches) {
+          existingIds.add(m.split(':')[2]);
         }
+      }
+
+      const newLines: string[] = [];
+      for (const m of cores) {
+        if (existingIds.has(m.id)) { skipped++; continue; }
         const dateStr = new Date(m.created_at).toLocaleDateString('zh-CN');
-        lines.push(`- [core] ${m.content} *(importance: ${m.importance}, 访问: ${m.access_count}, ${dateStr})*`);
+        const lastAccessStr = new Date(m.last_accessed).toLocaleDateString('zh-CN');
+        newLines.push(
+          `## memory:id:${m.id}\n` +
+          `content: ${m.content}\n` +
+          `importance: ${m.importance} | access: ${m.access_count} | cited: ${m.cited_count}\n` +
+          `created: ${dateStr} | last_accessed: ${lastAccessStr}\n`
+        );
         synced++;
       }
 
-      if (lines.length > 0) {
-        const header = !existing.includes('## Core Memories')
-          ? `\n\n## Core Memories\n`
-          : `\n`;
-        const entry = header + lines.join('\n') + `\n`;
-        fs.appendFileSync(memoryFile, entry, 'utf-8');
-        this.log.info(`[algo-memory] workspace 同步: ${synced} 条 core 记忆写入 MEMORY.md`);
+      if (newLines.length > 0) {
+        const header = fs.existsSync(dateFile)
+          ? `\n${newLines.join('\n')}\n`
+          : `# algo-memory core memories — ${today}\n\n${newLines.join('\n')}\n`;
+        fs.appendFileSync(dateFile, header, 'utf-8');
+        this.log.info(`[algo-memory] workspace 同步: ${synced} 条 core 记忆写入 ${dateFile}`);
       }
     } catch (err: any) {
       this.log.warn(`[algo-memory] syncCoreToWorkspace 失败: ${err?.message ?? err}`);
