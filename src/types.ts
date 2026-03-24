@@ -35,6 +35,37 @@ export interface Config {
   batchWrite: BatchWriteConfig;
   /** 记忆压缩配置 */
   compression: CompressionConfig;
+  /** 向量搜索配置（默认关闭）*/
+  vectorSearch: VectorSearchConfig;
+}
+
+export interface FeedbackConfig {
+  enabled: boolean;
+  maxMemories: number;
+  matchThreshold: number;
+}
+
+/**
+ * 向量搜索配置
+ * 默认关闭，需要配置 embedding API 才能启用
+ */
+export interface VectorSearchConfig {
+  /** 是否启用向量搜索 */
+  enabled: boolean;
+  /** 向量搜索服务提供商 */
+  provider: 'openai' | 'minimaxi' | 'bge' | 'ollama' | 'siliconflow';
+  /** Embedding 模型名称 */
+  model: string;
+  /** API Key（可从环境变量 MINIMAX_API_KEY 等读取）*/
+  apiKey: string;
+  /** 自定义 API 地址（如使用代理）*/
+  baseURL: string;
+  /** 向量维度（留空则自动检测）*/
+  dimensions: number;
+  /** FTS5 和向量搜索的融合权重（0=全向量，1=全FTS5）*/
+  ftsWeight: number;
+  /** 向量相似度检索返回的最大条数 */
+  topK: number;
 }
 
 export interface FeedbackConfig {
@@ -262,4 +293,14 @@ export const DEFAULT_CONFIG: Config = {
   mcp: { enabled: false, transport: 'stdio', port: 8181 },
   batchWrite: { enabled: true, bufferMs: 500, maxBatchSize: 20 },
   compression: { enabled: true, maxLength: 200, extractKeywords: true },
+  vectorSearch: {
+    enabled: false,
+    provider: 'minimaxi',
+    model: 'embo-01-large',
+    apiKey: '',
+    baseURL: '',
+    dimensions: 0,
+    ftsWeight: 0.5,
+    topK: 20,
+  },
 };

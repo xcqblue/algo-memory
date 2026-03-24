@@ -20,8 +20,9 @@ import {
   MAX_MESSAGE_LENGTH,
   MAX_SIMILAR_CHECK
 } from '../utils.js';
-import { queryAll, queryOne, run, runOrThrow } from '../db/queries.js';
+import { queryAll, queryOne, run, runOrThrow, upsertEmbedding } from '../db/queries.js';
 import { LLMClient } from './llm.js';
+import { embedText } from './embed.js';
 import type { DbLike } from '../db/queries.js';
 
 // ============= Batch Write Buffer（动态调整优化）=============
@@ -372,6 +373,18 @@ function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any
 
       inserted = memoriesToWrite.length;
       log.info(`[algo-memory] 批量写入完成: ${inserted} 条记忆`);
+
+      // Fire-and-forget: 计算并存储向量（不阻塞主写入流程）
+      if (config.vectorSearch?.enabled && config.vectorSearch.model) {
+        for (const mem of memoriesToWrite) {
+          // 使用 Promise 陷阱避免 async/await 阻塞
+          embedText(mem.content, config.vectorSearch).then(result => {
+            upsertEmbedding(db, mem.id, result.embedding, result.dimensions, result.provider);
+          }).catch(() => {
+            // 向量计算失败不影响主流程，静默忽略
+          });
+        }
+      }
     } catch (err) {
       log.error('[algo-memory] 批量写入失败:', err);
     }

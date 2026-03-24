@@ -4,19 +4,21 @@
  * Pipeline:
  *   FTS5 search (with Query Expansion)  OR  LIKE fallback
  *   → Score (time decay / reinforcement / lengthNorm)
+ *   → Vector hybrid fusion (optional, if vectorSearch enabled)
  *   → MMR (optional)
  *   → HardMinScore filter
  *   → return sorted memories
  */
 
 import type { Database as DatabaseType } from 'better-sqlite3';
-import { queryAll } from '../db/queries.js';
+import { queryAll, getEmbeddings } from '../db/queries.js';
 import type { Config, Memory } from '../types.js';
 import {
   mmrDeduplicate,
   weibullDecay,
   reinforcementFactor,
   lengthNorm,
+  cosineSimilarity,
 } from '../utils.js';
 
 export type DbLike = DatabaseType;
@@ -35,6 +37,8 @@ export interface RetrievalOptions {
   limit: number;
   /** Whether FTS5 is available (passed from plugin, not from config) */
   ftsEnabled: boolean;
+  /** Pre-computed query embedding (if vectorSearch enabled) */
+  queryEmbedding?: number[];
 }
 
 const FIELDS = `id, agent_id, scope, content, type, tier, layer, keywords,
@@ -42,10 +46,55 @@ const FIELDS = `id, agent_id, scope, content, type, tier, layer, keywords,
   created_at, last_accessed, content_hash, metadata`;
 
 /**
- * Main retrieval function — handles FTS5 → score → MMR → filter.
+ * Apply vector search hybrid fusion to scored memories.
+ * Fuses FTS5 score and cosine similarity using weighted normalization.
+ * Returns original scored results if vector search is disabled.
+ */
+function applyVectorFusion(
+  scored: (Memory & { _score: number })[],
+  queryEmbedding: number[] | undefined,
+  vectorConfig: { enabled: boolean; ftsWeight: number; topK: number },
+  db: DbLike,
+): (Memory & { _score: number })[] {
+  if (!vectorConfig.enabled || !queryEmbedding || queryEmbedding.length === 0 || scored.length === 0) {
+    return scored;
+  }
+
+  const ftsWeight = vectorConfig.ftsWeight ?? 0.5;
+  const vectorWeight = 1 - ftsWeight;
+
+  // Get embeddings for all candidates from DB
+  const memoryIds = scored.map(m => m.id);
+  const embMap = getEmbeddings(db, memoryIds);
+  if (embMap.size === 0) return scored;
+
+  // Compute cosine similarity for each memory that has an embedding
+  const vectorScores = new Map<string, number>();
+  let maxSim = 0;
+  for (const [memId, embedding] of embMap) {
+    const sim = cosineSimilarity(queryEmbedding, embedding);
+    vectorScores.set(memId, sim);
+    if (sim > maxSim) maxSim = sim;
+  }
+
+  if (maxSim === 0) return scored;
+
+  // Normalize and fuse: FTS score * ftsWeight + cosine * vectorWeight
+  const maxFtsScore = scored[0]?._score || 1;
+  return scored.map(m => {
+    const vecScore = vectorScores.get(m.id) || 0;
+    const normFts = maxFtsScore > 0 ? m._score / maxFtsScore : 0;
+    const normVec = maxSim > 0 ? vecScore / maxSim : 0;
+    const fusedScore = normFts * ftsWeight + normVec * vectorWeight;
+    return { ...m, _score: fusedScore };
+  }).sort((a, b) => b._score - a._score);
+}
+
+/**
+ * Main retrieval function — handles FTS5 → score → vector fusion → MMR → filter.
  */
 export function retrieve(options: RetrievalOptions): Memory[] {
-  const { db, config, log, agentId, visibleAgentIds, query, mmrEnabled, limit, ftsEnabled } = options;
+  const { db, config, log, agentId, visibleAgentIds, query, mmrEnabled, limit, ftsEnabled, queryEmbedding } = options;
 
   const safeLimit = Math.min(limit, 100);
   const agentFilter = visibleAgentIds !== null
@@ -118,10 +167,13 @@ export function retrieve(options: RetrievalOptions): Memory[] {
     return { ...m, _score: score };
   }).sort((a, b) => b._score - a._score);
 
+  // ---- Vector hybrid fusion (optional) ----
+  const finalCandidates = applyVectorFusion(scored, options.queryEmbedding, options.config.vectorSearch, db);
+
   // ---- MMR (optional) ----
   const mmrCandidates = mmrEnabled && config.mmr.enabled
-    ? mmrDeduplicate(scored, config.mmr)
-    : scored;
+    ? mmrDeduplicate(finalCandidates, config.mmr)
+    : finalCandidates;
 
   // ---- HardMinScore filter ----
   const filtered = config.hardMinScore.enabled

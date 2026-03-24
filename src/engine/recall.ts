@@ -11,7 +11,9 @@ import {
   mmrDeduplicate,
   lengthNorm
 } from '../utils.js';
-import { queryAll, run } from '../db/queries.js';
+import { queryAll, run, getEmbeddings } from '../db/queries.js';
+import { embedText } from './embed.js';
+import { cosineSimilarity } from '../utils.js';
 import type { DbLike } from '../db/queries.js';
 
 export interface RecallDeps {
@@ -122,6 +124,41 @@ export async function recall(
     memories = memories.map(m => {
       return { ...m, _score: m.importance };
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
+  }
+
+  // ---- Vector hybrid fusion (optional) ----
+  if (config.vectorSearch?.enabled && config.vectorSearch.model) {
+    try {
+      const queryEmbedding = await embedText(query, config.vectorSearch);
+      const memoryIds = memories.map(m => m.id);
+      const embMap = getEmbeddings(db, memoryIds);
+      if (embMap.size > 0) {
+        const ftsWeight = config.vectorSearch.ftsWeight ?? 0.5;
+        const vectorWeight = 1 - ftsWeight;
+        const maxFtsScore = memories[0]?._score || 1;
+        let maxSim = 0;
+        const sims = new Map<string, number>();
+        for (const m of memories) {
+          const emb = embMap.get(m.id);
+          if (emb) {
+            const sim = cosineSimilarity(queryEmbedding.embedding, emb);
+            sims.set(m.id, sim);
+            if (sim > maxSim) maxSim = sim;
+          }
+        }
+        if (maxSim > 0) {
+          memories = memories.map(m => {
+            const vecScore = sims.get(m.id) || 0;
+            const normFts = maxFtsScore > 0 ? m._score / maxFtsScore : 0;
+            const normVec = maxSim > 0 ? vecScore / maxSim : 0;
+            const fusedScore = normFts * ftsWeight + normVec * vectorWeight;
+            return { ...m, _score: fusedScore };
+          }).sort((a, b) => b._score - a._score);
+        }
+      }
+    } catch (err) {
+      log.warn('[algo-memory] 向量搜索失败，静默降级:', err);
+    }
   }
 
   // Build the final returned set: MMR → hardMinScore → truncate
