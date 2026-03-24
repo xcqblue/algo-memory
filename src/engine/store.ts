@@ -736,6 +736,8 @@ export async function store(
         importance,
         access_count: 1,
         cited_count: 0,
+        tier_confidence: 1.0,
+        last_tier_update: Date.now(),
         created_at: Date.now(),
         last_accessed: Date.now(),
         content_hash: contentHash,

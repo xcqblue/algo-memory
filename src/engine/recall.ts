@@ -34,13 +34,21 @@ export interface RecallResult {
   memories: Memory[];
 }
 
+export interface RecallOptions {
+  /** 跳过 session dedup 检查（用于 proactive recall） */
+  skipDedup?: boolean;
+  /** 限制返回条数（默认使用 config.maxResults） */
+  limit?: number;
+}
+
 /**
  * Retrieve and rank relevant memories for a given query.
  */
 export async function recall(
   deps: RecallDeps,
   AgentId: string,
-  query: string
+  query: string,
+  options?: RecallOptions
 ): Promise<RecallResult> {
   const { db, config, log, getVisibleAgentIds, cache, configHash, lastRecallQuery, lastRecallTime, ftsEnabled } = deps;
 
@@ -51,7 +59,8 @@ export async function recall(
 
   const recallStartTime = Date.now();
 
-  if (!shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: lastRecallQuery ?? '', lastRecallTime: lastRecallTime ?? 0 })) {
+  const shouldRetrieveResult = shouldRetrieve(query, config.adaptiveRetrieval, { lastQuery: lastRecallQuery ?? '', lastRecallTime: lastRecallTime ?? 0 });
+  if (!shouldRetrieveResult && !options?.skipDedup) {
     return { hasMemory: false, memories: [] };
   }
 
@@ -59,7 +68,7 @@ export async function recall(
 
   // Session dedup is active — do NOT use cache, because same query at different times
   // should produce different results (one eligible, one skipped). Cache would bypass dedup.
-  const useCache = !config.adaptiveRetrieval.sessionDedup?.enabled;
+  const useCache = (!config.adaptiveRetrieval.sessionDedup?.enabled || !!options?.skipDedup) && !options?.skipDedup;
 
   const cacheKey = `recall:${AgentId}:${configHash}:${query}`;
   if (useCache && cache.has(cacheKey)) {
@@ -68,7 +77,7 @@ export async function recall(
     return cached;
   }
 
-  const safeLimit = Math.min(config.maxResults * 3, 100);
+  const safeLimit = Math.min((options?.limit ?? config.maxResults) * 3, 100);
 
   let memories: Memory[];
   if (visibleAgentIds === null) {

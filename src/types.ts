@@ -109,6 +109,16 @@ export interface AdaptiveRetrievalConfig {
   minQueryLength: number;
   forceKeywords: string[];
   sessionDedup: SessionDedupConfig;
+  /** 话题漂移检测 + 预加载（v2.5.0: proactive recall） */
+  topicDrift: {
+    enabled: boolean;
+    /** 检测窗口：最近 N 条消息判断话题 */
+    windowSize: number;
+    /** 话题变化多少比例触发预加载（0-1，越小越敏感）*/
+    driftThreshold: number;
+    /** 预加载时额外召回的记忆条数 */
+    preloadCount: number;
+  };
 }
 
 export interface SessionDedupConfig {
@@ -160,6 +170,24 @@ export interface TierConfig {
   coreThreshold: number;
   peripheralThreshold: number;
   ageDays: number;
+  /** pending 状态的自动升级/降级策略（v2.5.0: post-capture classification） */
+  pending: {
+    /** pending 状态超过此天数未触发 recall/cited 则降级或删除 */
+    maxPendingDays: number;
+    /** pending 状态下被 recall 一次即升为 working */
+    recallUpgrade: boolean;
+  };
+  /** tier 衰减配置（v2.5.0: smarter tier decay） */
+  decay: {
+    /** 启用 tier 置信度衰减 */
+    enabled: boolean;
+    /** core 记忆无 citations 的情况下，每 N 天 confidence 降低 */
+    coreStaleDays: number;
+    /** confidence 每次降低多少（0-1）*/
+    decayPerStep: number;
+    /** confidence 低于此值时降级 */
+    demoteThreshold: number;
+  };
   weights: {
     core: number;      // recall score multiplier for core memories
     working: number;   // recall score multiplier for working memories
@@ -200,12 +228,14 @@ export interface Memory {
   scope: string;
   content: string;
   type: string;
-  tier: 'core' | 'working' | 'peripheral';
+  tier: 'core' | 'working' | 'peripheral' | 'pending';
   layer: string;
   keywords: string;
   importance: number;
   access_count: number;
   cited_count: number;
+  tier_confidence: number;  // 0-1，tier 置信度（v2.5.0）
+  last_tier_update: number; // 上次 tier 变更时间戳（v2.5.0）
   created_at: number;
   last_accessed: number;
   content_hash: string;
@@ -257,14 +287,36 @@ export const DEFAULT_CONFIG: Config = {
     enabled: true,
     minQueryLength: 2,
     forceKeywords: ['记住', '之前', '上次', '记得', 'remember', 'before', 'last', '前', '上次', 'what', 'why', 'how', '什么', '为什么', '怎么'],
-    sessionDedup: { enabled: true, windowMs: 30_000, similarityThreshold: 0.75 }
+    sessionDedup: { enabled: true, windowMs: 30_000, similarityThreshold: 0.75 },
+    topicDrift: {
+      enabled: true,
+      windowSize: 5,
+      driftThreshold: 0.4,
+      preloadCount: 3,
+    },
   },
   weibullDecay: { enabled: true, shape: 1.5, scale: 90 },
   reinforcement: { enabled: true, factor: 0.5, maxMultiplier: 3 },
   mmr: { enabled: true, threshold: 0.85, lambda: 0.7 },
   lengthNorm: { enabled: true, anchor: 500 },
   hardMinScore: { enabled: true, threshold: 0.35 },
-  tier: { enabled: true, coreThreshold: 10, peripheralThreshold: 0.15, ageDays: 60, weights: { core: 1.5, working: 1.0, peripheral: 0.5 } },
+  tier: {
+    enabled: true,
+    coreThreshold: 10,
+    peripheralThreshold: 0.15,
+    ageDays: 60,
+    pending: {
+      maxPendingDays: 7,        // pending 超过 7 天未 recall → 降 peripheral 或删除
+      recallUpgrade: true,     // pending 被 recall → 直接升 working
+    },
+    decay: {
+      enabled: true,
+      coreStaleDays: 14,       // core 14 天无 citation → confidence 开始衰减
+      decayPerStep: 0.1,      // 每次衰减 0.1
+      demoteThreshold: 0.3,    // confidence < 0.3 → 降为 working
+    },
+    weights: { core: 1.5, working: 1.0, peripheral: 0.5 }
+  },
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
   llm: { enabled: false, provider: 'auto', apiKey: '', model: '', baseURL: '', batchWindowMs: 200 },

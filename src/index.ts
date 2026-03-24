@@ -13,6 +13,7 @@ import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
 import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers, getBufferStats } from './engine/store.js';
+import { detectTopicDrift, extractSimpleKeywords, jaccardSimilarity } from './utils.js';
 import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
@@ -212,7 +213,7 @@ class MemoryPlugin {
     await doStore(deps, AgentId, messages);
   }
 
-  async recall(AgentId: string, query: string): Promise<{ hasMemory: boolean; memories: any[] }> {
+  async recall(AgentId: string, query: string, options?: { limit?: number; skipDedup?: boolean }): Promise<{ hasMemory: boolean; memories: any[] }> {
     const deps = {
       db: this._db(),
       config: this.config,
@@ -224,7 +225,7 @@ class MemoryPlugin {
       lastRecallTime: this.lastRecallTime.get(AgentId) ?? 0,
       ftsEnabled: this.ftsAvailable,
     };
-    const result = await doRecall(deps, AgentId, query);
+    const result = await doRecall(deps, AgentId, query, options);
     // 只有真正召回到了记忆才更新会话去重状态
     // shouldRetrieve 跳过时（query太短/重复）不更新，让下次同类查询仍能触发
     if (result.hasMemory) {
@@ -810,6 +811,24 @@ confidence 是 0-1 的置信度。
       }
     } catch (err) {
       this.log.error('[algo-memory] reinforceOnCompaction 失败:', err);
+    }
+  }
+
+  /**
+   * 将 pending tier 升级为 working（v2.5.0: post-capture classification）
+   * 被 recall 命中的 pending 记忆说明有实际价值，立即升级
+   */
+  async upgradePendingMemories(AgentId: string, memoryIds: string[]): Promise<void> {
+    if (!this.db || memoryIds.length === 0) return;
+    try {
+      const placeholders = memoryIds.map(() => '?').join(',');
+      run(this._db(),
+        `UPDATE memories SET tier = 'working', tier_confidence = 1.0, last_tier_update = ?, importance = MIN(1.0, importance + 0.1) WHERE id IN (${placeholders}) AND tier = 'pending'`,
+        [Date.now(), ...memoryIds]
+      );
+      this.log.info(`[algo-memory] [upgrade_pending] 升级 ${memoryIds.length} 条 pending → working`);
+    } catch (err) {
+      this.log.error('[algo-memory] upgradePendingMemories 失败:', err);
     }
   }
 
@@ -1456,6 +1475,34 @@ export default {
           // Session dedup is handled inside shouldRetrieve via per-agent dedup state
           if (!shouldRetrieve(query, config as any, { lastQuery: plugin.getLastRecallQuery(agentId), lastRecallTime: plugin.getLastRecallTime(agentId) })) return;
 
+          // Direction 3: 话题漂移检测 → 触发预加载（proactive recall）
+          if ((config.adaptiveRetrieval as any)?.topicDrift?.enabled) {
+            const td = (config.adaptiveRetrieval as any).topicDrift;
+            const allUserMessages = (messages as any[])
+              .filter((m: any) => m.role === 'user')
+              .map((m: any) => extractMessageText(m.content))
+              .filter(Boolean);
+            if (allUserMessages.length >= td.windowSize * 2) {
+              const drifted = detectTopicDrift(allUserMessages, td);
+              if (drifted) {
+                // 提取当前话题关键词，作为 proactive 检索词
+                const currentKw = extractSimpleKeywords(query, 5);
+                if (currentKw.length > 0) {
+                  const proactiveQuery = currentKw.join(' ');
+                  log.info(`[algo-memory] [topic_drift] 检测到话题漂移，预加载关键词: ${proactiveQuery}`);
+                  const preloadCount = td.preloadCount ?? 3;
+                  // proactive 检索走独立路径，不走 session dedup
+                  const { hasMemory: pHas, memories: pMem } = await plugin.recall(agentId, proactiveQuery, { limit: preloadCount, skipDedup: true });
+                  if (pHas && pMem.length > 0) {
+                    const pSelected = pMem.slice(0, preloadCount).map((m: any) => `[预加载记忆] ${m.content}`).join('\n');
+                    api.prependSystemContext(`\n\n${pSelected}\n`);
+                    log.info(`[algo-memory] [topic_drift] 预加载 ${pMem.length} 条记忆`);
+                  }
+                }
+              }
+            }
+          }
+
           const { hasMemory, memories } = await plugin.recall(agentId, query);
           if (hasMemory && memories.length > 0) {
             const MAX_INJECT_TOKENS = config.maxInjectTokens;
@@ -1474,6 +1521,12 @@ export default {
             const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
             log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
             api.prependSystemContext(selected.join('\n') + suffix + '\n');
+
+            // Direction 1: post-capture classification — recall 成功 → pending tier 升 working
+            const pendingIds = memories.filter((m: any) => m.tier === 'pending').map((m: any) => m.id);
+            if (pendingIds.length > 0) {
+              plugin.upgradePendingMemories(agentId, pendingIds).catch(() => {});
+            }
           }
         } catch (err: any) {
           log.error('[algo-memory] before_prompt_build 钩子错误:', err?.message ?? err, err?.stack);

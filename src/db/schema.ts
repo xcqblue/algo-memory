@@ -18,9 +18,11 @@ export function initSchema(db: AnyDatabase, log: any): void {
   required(`
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, scope TEXT DEFAULT 'agent',
-      content TEXT NOT NULL, type TEXT DEFAULT 'other', tier TEXT DEFAULT 'working',
+      content TEXT NOT NULL, type TEXT DEFAULT 'other', tier TEXT DEFAULT 'pending',
       layer TEXT DEFAULT 'general', keywords TEXT, importance REAL DEFAULT 0.5,
       access_count INTEGER DEFAULT 0, cited_count INTEGER DEFAULT 0,
+      tier_confidence REAL DEFAULT 1.0,
+      last_tier_update INTEGER DEFAULT (strftime('%s', 'now') * 1000),
       created_at INTEGER, last_accessed INTEGER, content_hash TEXT,
       metadata TEXT
     )
@@ -78,6 +80,10 @@ export function initSchema(db: AnyDatabase, log: any): void {
   // Migration: drop deprecated urgency column (removed in v2.3.0)
   try { db.prepare('ALTER TABLE memories DROP COLUMN IF EXISTS urgency').run(); } catch (_) { /* ignore */ }
 
+  // Migration: add tier_confidence + last_tier_update (v2.5.0: smarter tier system)
+  try { db.prepare('ALTER TABLE memories ADD COLUMN tier_confidence REAL DEFAULT 1.0').run(); } catch (_) { /* ignore */ }
+  try { db.prepare('ALTER TABLE memories ADD COLUMN last_tier_update INTEGER DEFAULT (strftime(\'%s\', \'now\') * 1000)').run(); } catch (_) { /* ignore */ }
+
   // Indexes (non-fatal if they fail)
   for (const idx of [
     'CREATE INDEX IF NOT EXISTS idx_agent ON memories(agent_id)',
@@ -86,6 +92,7 @@ export function initSchema(db: AnyDatabase, log: any): void {
     'CREATE INDEX IF NOT EXISTS idx_agent_hash ON memories(agent_id, content_hash)',
     'CREATE INDEX IF NOT EXISTS idx_agent_tier_importance ON memories(agent_id, tier, importance DESC)',
     'CREATE INDEX IF NOT EXISTS idx_agent_last_accessed ON memories(agent_id, last_accessed DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_tier_confidence ON memories(tier, tier_confidence)',
   ]) {
     try { db.prepare(idx).run(); } catch (_) { /* index creation is non-fatal */ }
   }
