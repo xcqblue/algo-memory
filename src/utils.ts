@@ -511,28 +511,87 @@ export function isChinese(text: string): boolean {
 }
 
 /**
- * 简单中文分词（正向最大正向最大匹配 + 数字字母合并）
- * 相比 jieba：零依赖，纯 JS，轻量快速
+ * 从纯中文文本中提取能在 SYNONYMS 表中找到的子词
+ * 用于解决"屏幕碎了"这类连续中文无法切分的核心问题
+ * 方法：检查 2-gram/3-gram 子串是否命中 SYNONYMS 表的任意词
  */
-export function simpleChineseTokenize(text: string): string[] {
-  // 先做基础分词：按空格和标点
-  const rawTokens = text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
+function extractSynonymTokensFromChinese(text: string): string[] {
+  const found: string[] = [];
+  const upper = text.toUpperCase();
 
-  // 合并连续的数字和字母（iPhone -> iphone, MacBook -> macbook）
-  const merged: string[] = [];
-  for (const token of rawTokens) {
-    if (merged.length > 0 && /^[a-z0-9]+$/i.test(token) && /[a-z0-9]+$/i.test(merged[merged.length - 1])) {
-      merged[merged.length - 1] += token;
-    } else {
-      merged.push(token);
+  // 检查整个词或子串是否命中 SYNONYMS
+  for (const [key, vals] of Object.entries(SYNONYMS)) {
+    const all = [key, ...vals];
+    // 检查 text 中是否包含 key（子串匹配）
+    if (upper.includes(key.toUpperCase())) {
+      if (!found.includes(key)) found.push(key);
+      for (const v of vals) {
+        if (!STOP_WORDS.has(v) && v.length > 1 && !found.includes(v)) found.push(v);
+      }
+    }
+    // 检查 text 的子串是否与 SYNONYMS 的 value 有包含关系
+    for (const v of all) {
+      if (v.length < 2) continue;
+      // v 是否在 text 中（子串）
+      if (upper.includes(v.toUpperCase())) {
+        if (!found.includes(v)) found.push(v);
+      }
     }
   }
 
-  return merged.filter(t => t.length > 1 && !STOP_WORDS.has(t));
+  return found; // 去重，由调用方保证唯一性
+}
+
+/**
+ * 智能中英分词（脚本感知切分）
+ * - 英文/数字段：保留原样（iPhone, Mac, 123）
+ * - 中文段：提取 SYNONYMS 子词（解决"屏幕碎了"整词无切分问题）
+ * - 合并连续英文字母和数字
+ */
+export function simpleChineseTokenize(text: string): string[] {
+  // 第一步：按脚本类型切分（Latin vs CJK）
+  const segments: { text: string; lang: 'latin' | 'cjk' }[] = [];
+  let current = '';
+  let currentScript: 'latin' | 'cjk' | null = null;
+
+  for (const char of text) {
+    const isLatin = /[a-zA-Z0-9]/.test(char);
+    const isPunct = /[^\p{L}\p{N}\s]/u.test(char);
+    if (isPunct) {
+      if (current) { segments.push({ text: current, lang: currentScript! }); current = ''; currentScript = null; }
+      continue;
+    }
+    const script: 'latin' | 'cjk' = isLatin ? 'latin' : 'cjk';
+    if (currentScript === null) {
+      current = char; currentScript = script;
+    } else if (script === currentScript) {
+      current += char;
+    } else {
+      segments.push({ text: current, lang: currentScript });
+      current = char; currentScript = script;
+    }
+  }
+  if (current) segments.push({ text: current, lang: currentScript! });
+
+  const tokens = new Set<string>();
+  for (const seg of segments) {
+    if (STOP_WORDS.has(seg.text.toLowerCase())) continue;
+    if (seg.lang === 'latin') {
+      // 合并连续英文/数字
+      const cleaned = seg.text.toLowerCase().replace(/\s+/g, '');
+      if (cleaned.length > 1) tokens.add(cleaned);
+    } else {
+      // 纯中文：提取 SYNONYMS 子词
+      const subs = extractSynonymTokensFromChinese(seg.text);
+      if (subs.length > 0) {
+        subs.forEach(s => tokens.add(s));
+      } else if (seg.text.length > 1 && !STOP_WORDS.has(seg.text)) {
+        tokens.add(seg.text);
+      }
+    }
+  }
+
+  return [...tokens];
 }
 
 /**
