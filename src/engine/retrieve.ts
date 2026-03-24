@@ -38,8 +38,8 @@ export interface RetrievalOptions {
 }
 
 const FIELDS = `id, agent_id, scope, content, type, tier, layer, keywords,
-  importance, access_count, cited_count, urgency, created_at, last_accessed,
-  content_hash, metadata`;
+  importance, access_count, cited_count, tier_confidence, last_tier_update,
+  created_at, last_accessed, content_hash, metadata`;
 
 /**
  * Main retrieval function — handles FTS5 → score → MMR → filter.

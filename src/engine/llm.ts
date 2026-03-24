@@ -26,25 +26,25 @@ const LLM_PROVIDERS = {
   // 阿里云百炼
   bailian: {
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen-long'],
+    models: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen-long', 'qwen2.5-72b-instruct'],
     defaultModel: 'qwen-plus'
   },
   // DeepSeek
   deepseek: {
     baseURL: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-coder'],
+    models: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'],
     defaultModel: 'deepseek-chat'
   },
   // Kimi (月之暗面)
   kimi: {
     baseURL: 'https://api.moonshot.cn/v1',
-    models: ['kimi-chat', 'kimi-chat-latest'],
-    defaultModel: 'kimi-chat'
+    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'kimi-chat', 'kimi-chat-latest'],
+    defaultModel: 'moonshot-v1-8k'
   },
   // 智谱 AI
   zhipu: {
     baseURL: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4', 'glm-4-flash', 'glm-3-turbo'],
+    models: ['glm-4', 'glm-4-flash', 'glm-4-plus', 'glm-3-turbo'],
     defaultModel: 'glm-4-flash'
   },
   // 腾讯混元
@@ -93,7 +93,15 @@ export function resolveLLMConfig(config: LLMConfig): LLMConfig {
   }
 
   const provider = config.provider.toLowerCase();
-  const providerConfig = (LLM_PROVIDERS as Record<string, { baseURL?: string; defaultModel?: string }>)[provider];
+  // Provider name aliases
+  const providerMap: Record<string, string> = {
+    qwen: 'bailian',
+    'dashscope': 'bailian',
+    moonshot: 'kimi',
+    silicon: 'siliconflow',
+  };
+  const mapped = providerMap[provider] || provider;
+  const providerConfig = (LLM_PROVIDERS as Record<string, { baseURL?: string; defaultModel?: string }>)[mapped];
 
   if (!providerConfig) {
     return { ...config, provider: 'minimax', ...LLM_PROVIDERS.minimax };

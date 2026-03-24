@@ -137,15 +137,17 @@ export SILICONFLOW_API_KEY="your-key" # SiliconFlow 聚合平台
 
 | Provider | 默认模型 | 推荐 |
 |----------|---------|------|
-| `minimax` | `MiniMax-Text-01` | MiniMax-Text-01（最新MoE）/ minimaxi（高性价比）|
+| `minimax` | `abab6.5s-chat` | abab6.5s-chat（推荐）/ abab6.5g-chat |
 | `deepseek` | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1推理）|
 | `kimi` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k（长上下文）|
-| `zhipu` | `glm-4.7-flash` | glm-4.7-flash（免费）/ glm-4-plus（最强）|
+| `zhipu` | `glm-4-flash` | glm-4-flash（免费）/ glm-4-plus（最强）|
 | `qwen` | `qwen-plus` | qwen-plus（推荐）/ qwen-max（最强）/ qwen2.5-72b-instruct（超大杯）|
 | `openai` | `gpt-4o-mini` | gpt-4o-mini（快）/ gpt-4o（强）|
 | `anthropic` | `claude-3-haiku` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
 | `ollama` | `llama3` | 本地自定义 |
-| `siliconflow` | `deepseek-ai/deepseek-v3` | SiliconFlow 聚合 50+ 模型 |
+| `siliconflow` | `Qwen/Qwen2-7B-Instruct` | SiliconFlow 聚合 50+ 模型 |
+
+> `qwen` / `dashscope` / `moonshot` 是别名，自动映射到内部 provider key。
 
 **模型动态化**：内置 modelMap 只做日志展示用，模型名直接透传给 API。配置 `customModelNames` 可覆盖任意模型的显示名称：
 

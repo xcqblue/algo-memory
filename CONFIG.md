@@ -193,7 +193,7 @@ working:    everything in between
 | 配置 | 默认 | 说明 |
 |------|------|------|
 | `llm.enabled` | `false` | 是否启用 LLM 调用 |
-| `llm.provider` | `"auto"` | 提供商：minimax / deepseek / kimi / zhipu / qwen / openai / anthropic / ollama / siliconflow |
+| `llm.provider` | `"auto"` | 提供商：minimax / deepseek / kimi / zhipu / qwen（等价于dashscope）/ openai / anthropic / ollama / siliconflow |
 | `llm.apiKey` | `""` | API Key |
 | `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
 | `llm.baseURL` | `""` | API Base URL（可选）|

@@ -129,6 +129,7 @@ function getLlmCacheKey(type: string, content: string): string {
 const MEMORY_COLUMNS = [
   'id', 'agent_id', 'scope', 'content', 'type', 'tier', 'layer',
   'keywords', 'importance', 'access_count', 'cited_count',
+  'tier_confidence', 'last_tier_update',
   'created_at', 'last_accessed', 'content_hash', 'metadata'
 ] as const;
 
