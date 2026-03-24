@@ -4,22 +4,36 @@ All notable changes to algo-memory are documented here.
 
 ## [2.7.0] - 2026-03-24
 
-### Breaking Changes（Session 续接功能移除，请检查旧配置）
+### Features（FTS5 同义词扩展 + 多路召回）
 
-- 移除 `sessionContinuity` 配置项及所有相关代码
-- 移除 `sessionSummary` 配置项及所有相关代码
-- 移除 `session_snapshots` 数据库表（init 时不再创建）
-- 移除 `session_metadata` 数据库表
-- 移除 `snapshotRetentionDays` 配置项
-- 移除 `before_prompt_build` 中的会话续接注入逻辑
-- 移除 `generateSessionSummary()`、`extractContextSnapshot()`、`saveSessionSnapshot()`、`getLastSessionSnapshot()`、`detectSessionChangeAndGetSnapshot()`、`buildSessionContinuityContext()`、`writeSessionSummary()`、`restoreLastSessionKey()` 方法
-- 移除 `lastSessionKey` Map 状态管理
+#### FTS5 同义词扩展检索（离线，零依赖）
+- **脚本感知分词**：Latin 与 CJK（中文）分段处理，解决中英混合文本整词无法切分问题
+  - `"iPhone屏幕碎了"` → `["iPhone", "屏幕", "碎", "坏", "苹果手机", "苹果", "手机", "裂", "爆", "故障"]`
+- **SYNONYMS 双向子串提取**：Query 中的任意子串命中同义词表 key 或 value 时，自动提取并展开为 OR 查询
+  - `"Mac系统崩了"` → `"Mac" OR "苹果电脑" OR "Apple" OR "崩" OR "死机" OR "蓝屏" OR "黑屏" OR "崩溃"`
+- **同义词表覆盖范围（200+ 条）**：
+  - 生活：老婆↔媳妇↔妻子 / 记住↔记得 / 讨厌↔不喜欢↔抵触↔不想
+  - 设备：iPhone↔苹果手机↔手机 / Mac↔苹果电脑↔Apple / 坏↔碎↔裂↔爆 / 崩↔死机↔蓝屏↔黑屏
+  - 地点/时间：上海↔魔都 / 北京↔帝都 / 明天↔次日 / 午饭↔午餐
+  - **金融（新增 90+ 条）**：买↔建仓↔开仓 / 卖↔清仓↔平仓↔止损↔割肉 / 加仓↔增持 / 美联储↔FOMC / 加息↔提息 / 降准↔MLF / CPI↔通胀 / 茅台↔600519 / 腾讯↔00700 / 苹果↔AAPL
+  - 宏观：GDP↔增速 / 汇率↔外汇 / 房价↔楼市
 
-### Refactor
+#### 多路召回（Multi-Path Recall）
+- 单次 Query 生成 4 条检索路径，合并去重后统一 MMR
+- 路径1：原始 Query（优先）
+- 路径2：前缀 3-token
+- 路径3：后缀 2-token
+- 路径4：首尾 token 组合
+- **冲突处理**：MMR 改为在多路合并后统一做一次，cited_count 更新去重后只更新一次
 
-- `agent_end` hook 简化为仅处理消息 capture，不再调用 session snapshot
-- 清理 `index.ts` 约 280 行 session 相关代码
-- 文档全面更新（README/CONFIG/ARCHITECTURE/INSTALL）
+#### BM25+ 评分增强
+- 在 SQLite BM25 基础上加 δ=1.0 偏移，避免短文本评分过低
+
+### Bug Fixes
+
+- 修复 `simpleChineseTokenize` 中文字符无法切分的根本性缺陷（重写为脚本感知切分 + SYNONYMS 子串提取）
+- 修复 SYNONYMS 表 duplicate key `'生日'` 重复定义（TS error TS1117）
+- 修复 CPI/cpi 大小写不敏感的同义词展开
 
 ## [2.6.0] - 2026-03-24
 
