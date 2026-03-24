@@ -1,7 +1,7 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "纯算法长期记忆插件 - 智能自动召回 / 无需 LLM 也能工作",
+  "description": "Structured SQLite memory with tier/importance scoring, FTS5, LLM-augmented capture and retrieval. When active, set plugins.slots.memory='algo-memory' and disable memory-lancedb to avoid duplicate auto-capture.",
   "version": "2.4.0",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
@@ -346,7 +346,7 @@
               },
               "similarityThreshold": {
                 "type": "number",
-                "default": 0.6
+                "default": 0.75
               }
             }
           }
