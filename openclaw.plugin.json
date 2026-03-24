@@ -1,7 +1,7 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "Structured SQLite memory with tier/importance scoring, FTS5, LLM-augmented capture and retrieval. When active, set plugins.slots.memory='algo-memory' and disable memory-lancedb to avoid duplicate auto-capture.",
+  "description": "Structured SQLite-based memory for OpenClaw — tier scoring (core/working/peripheral), FTS5 full-text search, LLM keyword extraction, Weibull decay, session continuity, compaction reinforcement, and workspace sync. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
   "version": "2.4.0",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",

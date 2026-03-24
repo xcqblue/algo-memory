@@ -1,255 +1,267 @@
-# 🧠 algo-memory
+# algo-memory
 
-> **OpenClaw 记忆管理插件** — 纯算法召回，零 API 费用，零外部依赖
+> Structured SQLite-based memory plugin for OpenClaw — tier scoring, FTS5 search, LLM-augmented capture, and full OpenClaw lifecycle integration.
 
-![Version](https://img.shields.io/badge/version-2.4.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Node](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen)
+**版本：** v2.5.0 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
 
 ---
 
-## ✨ 核心能力
+## 核心特性
 
-| | 能力 | 说明 |
-|:---:|------|------|
-| 🤖 | **全自动存储** | 对话结束自动存储，无需手动操作 |
-| 💰 | **零成本** | 纯算法（Jaccard + BM25），LLM 可选 |
-| 🔍 | **精准召回** | FTS5 全文搜索 + 智能排序 |
-| 📊 | **智能分层** | peripheral → working → core 自动晋升 |
-| 🔄 | **会话续接** | 解决"第二天忘记昨天聊什么" |
-| ⚡ | **批量写入** | 500ms 缓冲，减少 DB IO |
-| 🗜️ | **自动压缩** | 长内容自动压缩，节省空间 |
+### 记忆分层（三级自动管理）
+- **core** — 高 importance × log(access_count)，被频繁召回的重要记忆
+- **working** — 中等重要度，日常信息
+- **peripheral** — 低重要度，随时间自然衰减（Weibull, shape=1.5, scale=90天）
 
----
+### 全文检索（FTS5）
+- SQLite FTS5 虚拟表，无需外部 embedding API
+- BM25 排序，支持 Query Expansion 降级
+- **MMR 多样化检索**（λ=0.7）— 避免重复结果
 
-## 🛠️ 工具列表（14个）
+### LLM 增强（可选，默认为 MiniMax）
+- 自动提取关键词（批量，O(1) 次 LLM 调用 per store）
+- LLM 辅助去重（jaccard 阈值 0.85）
+- 语义压缩（按句子截断，保留关键信息）
 
-### 📖 基础操作
-| 工具 | 功能 |
-|------|------|
-| `algo_memory_list` | 📋 列出记忆 |
-| `algo_memory_search` | 🔎 搜索记忆 |
-| `algo_memory_stats` | 📈 统计数量 |
-| `algo_memory_get` | 👁️ 查看单条 |
-
-### ✏️ 管理操作
-| 工具 | 功能 |
-|------|------|
-| `algo_memory_update` | 📝 更新内容 |
-| `algo_memory_delete` | 🗑️ 删除单条 |
-| `algo_memory_delete_bulk` | 📦 批量删除 |
-| `algo_memory_clear` | 🧹 清空记忆 |
-
-### 📤 导入导出
-| 工具 | 功能 |
-|------|------|
-| `algo_memory_import` | 📥 批量导入 |
-| `algo_memory_export` | 📤 导出 JSON |
-
-### 🔧 高级功能
-| 工具 | 功能 |
-|------|------|
-| `algo_memory_metrics` | 📊 运行指标 |
-| `algo_memory_diagnostics` | 🔧 召回诊断 |
-| `algo_memory_recall_reset` | 🔄 重置召回去重 |
-| `algo_memory_correct` | ✏️ 自然语言修正 |
+### OpenClaw 全生命周期接入
+- 9 个 Hook 完整接入（见下文）
+- `session:continuity` — 会话续接，上下文跨 Gateway 重启保留
+- `compaction` 强化 — compaction 周期自动升级 peripheral / 强化 core
 
 ---
 
-## 🚀 快速开始
+## OpenClaw Hook 接入
 
+algo-memory 在以下事件触发时自动工作（无需配置）：
+
+| Hook | 时机 | 行为 |
+|------|------|------|
+| `agent_end` | 每次对话结束 | capture 用户消息，写入 buffer |
+| `before_prompt_build` | LLM 调用前 | 检索相关记忆，注入上下文 |
+| `before_compaction` | compaction 开始前 | 从 session transcript 预捕获，触发强化（fire-and-forget）|
+| `after_compaction` | compaction 结束后 | 强化 core / 清理低价值 peripheral |
+| `session_start` | 会话开始 | 检测会话切换，注入上会话摘要 |
+| `session_end` | 会话结束 | 写会话摘要到 workspace |
+| `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
+| `llm_output` | LLM 回复后 | 记录 token 使用统计（可配置）|
+| `gateway_stop` | Gateway 关闭 | 干净 flush 所有 buffer，关闭 DB |
+
+---
+
+## MCP 工具（16 个）
+
+### 核心工具（推荐使用）
+| 工具 | 说明 |
+|------|------|
+| `algo_memory_search` | 搜索记忆，支持 FTS5 + scoring + MMR |
+| `algo_memory_list` | 列出记忆，支持 tier/scope 过滤 |
+| `algo_memory_stats` | 统计：数量、分 tier 分布、DB 大小 |
+| `algo_memory_get` | 获取单条记忆详情 |
+
+### 管理工具
+| 工具 | 说明 |
+|------|------|
+| `algo_memory_update` | 更新记忆内容/importance/tier |
+| `algo_memory_delete` | 删除单条记忆 |
+| `algo_memory_delete_bulk` | 批量删除 |
+| `algo_memory_clear` | 清空所有记忆 |
+| `algo_memory_import` | 从 JSON 文件导入 |
+| `algo_memory_export` | 导出为 JSON |
+
+### 高级工具
+| 工具 | 说明 |
+|------|------|
+| `algo_memory_metrics` | 运行时指标（缓存命中率、LLM 调用统计）|
+| `algo_memory_diagnostics` | 诊断信息（DB 状态、MMR 配置、最后召回详情）|
+| `algo_memory_recall_reset` | 清除会话去重状态 |
+| `algo_memory_correct` | 修正记忆内容 |
+| `algo_memory_fts_rebuild` | 重建 FTS5 索引（修复 rowid 漂移）|
+| `algo_memory_compact` | 手动触发 compaction 强化流程 |
+| `algo_memory_health` | 完整健康检查（DB/FTS/buffer/LLM/配置）|
+
+---
+
+## 快速开始
+
+### 1. 安装
 ```bash
-# 1️⃣ 克隆插件
-git clone https://github.com/xcqblue/algo-memory.git ~/.openclaw/extensions/algo-memory
-
-# 2️⃣ 安装依赖
-cd ~/.openclaw/extensions/algo-memory && npm install && npm run build
-
-# 3️⃣ 启用插件
-openclaw plugins enable algo-memory
-
-# 4️⃣ 重启
-openclaw gateway restart
+npm install
+npm run build
 ```
 
-📖 详细安装说明 → [INSTALL.md](INSTALL.md)
-
----
-
-## ⚙️ 工作流程
-
-### 💾 存储流程
-
-```
-┌─────────────┐
-│  用户消息   │
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  噪声过滤   │  ← 过滤 hi/ok/好的 等
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  智能查重   │  ← Jaccard 相似度
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  核心判断   │  ← 命中关键词直接 core
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  压缩存储   │  ← 自动压缩长内容
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  SQLite 数据库 │
-└─────────────┘
-```
-
-### 🔍 召回流程
-
-```
-┌─────────────┐
-│  用户提问   │
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  意图判断   │  ← 是否需要召回
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  FTS5 检索  │  ← 全文搜索
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  MMR 去重   │  ← 多样性排序
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│  注入上下文  │  ← 返回给 AI
-└─────────────┘
-```
-
----
-
-## 📊 存储层级
-
-```
-     ┌─────────────────────────────────────────┐
-     │              🔥 CORE                    │
-     │         高频访问（≥10次）               │
-     │           权重 ×1.5                    │
-     │         永久保留，不清理               │
-     └─────────────────┬───────────────────────┘
-                       │ 晋升
-     ┌─────────────────┴───────────────────────┐
-     │            ⚡ WORKING                   │
-     │          普通对话记忆                   │
-     │            权重 ×1.0                    │
-     │           动态调整                      │
-     └─────────────────┬───────────────────────┘
-                       │ 降级
-     ┌─────────────────┴───────────────────────┐
-     │           🌫️ PERIPHERAL                │
-     │         低频或超期记忆                  │
-     │           权重 ×0.5                    │
-     │       180天后自动清理                  │
-     └─────────────────────────────────────────┘
-```
-
----
-
-## 🔄 会话续接
-
-解决"晚上聊完，第二天早上忘了"的问题：
-
-```
-🌙 昨天 18:00
-────────────────────────────
- 用户: 帮我订明天去北京的机票
- AI:  已记录，明天去北京
-────────────────────────────
-
-🌅 今天 07:00
-────────────────────────────
- 用户: 继续
-────────────────────────────
-       ↓ 检测到会话切换
-       ↓ 注入上会话摘要
-       
- AI: 好的，继续昨天的任务。
-     您要订明天去北京的机票，
-     请问有指定航空公司吗？ ✈️
-```
-
----
-
-## 📝 配置示例
-
+### 2. 配置（`~/.openclaw/config.json`）
 ```json
 {
-  "enabled": true,
-  "autoCapture": true,
-  "autoRecall": true,
-  "maxResults": 5,
-  
-  "coreKeywords": ["记住", "重要", "别忘"],
-  
-  "tier": {
-    "enabled": true,
-    "coreThreshold": 10
-  },
-  
-  "sessionContinuity": {
-    "enabled": true,
-    "maxInjectTokens": 800
+  "plugins": {
+    "entries": {
+      "memory": "algo-memory"
+    }
   }
 }
 ```
 
-📖 完整配置 → [CONFIG.md](CONFIG.md)
-
----
-
-## 📌 更新日志
-
-| 版本 | 日期 | 内容 |
-|------|------|------|
-| 🆕 2.4.0 | 2026-03 | 会话续接（解决上下文丢失） |
-| 2.3.0 | 2026-03 | 语言感知召回、MMR优化 |
-| 2.2.0 | 2026-02 | 统一检索引擎、BM25F权重 |
-| 2.1.0 | 2026-02 | 批量写入、记忆压缩 |
-| 2.0.0 | 2026-01 | 智能分层、反馈修正 |
-
-📖 完整更新日志 → [CHANGELOG.md](CHANGELOG.md)
-
----
-
-## 🔧 更新插件
-
-```bash
-# 一键更新（推荐）
-cd ~/.openclaw/extensions/algo-memory
-./update.sh
+### 3. 插件配置（可选）
+```json
+{
+  "plugins": {
+    "algo-memory": {
+      "autoCapture": true,
+      "autoRecall": true,
+      "maxResults": 5,
+      "maxInjectTokens": 1500,
+      "cleanupDays": 180,
+      "sessionContinuity": { "enabled": true },
+      "mmr": { "enabled": true, "lambda": 0.7 },
+      "noiseFilter": { "dedup": true, "useLlmForDedup": false },
+      "llm": { "provider": "minimax" }
+    }
+  }
+}
 ```
 
-📖 详细说明 → [update.sh.md](update.sh.md)
+### 4. LLM API Key
+设置环境变量：
+```bash
+export MINIMAX_API_KEY="your-key"
+# 或
+export OPENAI_API_KEY="your-key"
+```
 
 ---
 
-## ⭐ 项目特点
+## 配置项说明
 
-| 特点 | 说明 |
-|------|------|
-| 🆓 **零成本** | 纯算法模式，LLM 可选 |
-| 🤖 **可选 LLM** | 需要时开启，不需要零成本运行 |
-| ⚡ **高性能** | 批量写入 + 缓存 + 异步队列 |
-| 🔒 **安全可靠** | 本地 SQLite，数据不外泄 |
-| 📦 **开箱即用** | 默认配置已足够好 |
-| 🧹 **自动清理** | 180天自动清理垃圾记忆 |
+### 核心配置
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `autoCapture` | `true` | agent_end 时自动捕获消息 |
+| `autoRecall` | `true` | before_prompt_build 时自动召回 |
+| `maxResults` | `5` | 最多召回记忆条数 |
+| `maxInjectTokens` | `1500` | 注入上下文的最大 token 数 |
+
+### 清理与分层
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `cleanupDays` | `180` | peripheral 记忆超过此天数未访问则清理 |
+| `snapshotRetentionDays` | `30` | session_snapshots 保留天数 |
+| `tier.coreThreshold` | `10` | access_count ≥ 此值直接升为 core |
+| `tier.peripheralThreshold` | `0.15` | 复合评分低于此值为 peripheral |
+
+### LLM
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `llm.provider` | `"minimax"` | LLM 提供商 |
+| `llm.model` | `"auto"` | 模型名称 |
+| `noiseFilter.useLlmForDedup` | `false` | 启用 LLM 辅助去重（额外 LLM 调用）|
+| `noiseFilter.useLlmForCore` | `false` | 启用 LLM 判断 core（额外 LLM 调用）|
+| `metricsEnabled` | `true` | 记录 LLM token 使用统计 |
+
+### MMR 多样化
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `mmr.enabled` | `true` | 启用 MMR 多样化检索 |
+| `mmr.threshold` | `0.85` | MMR 截断阈值 |
+| `mmr.lambda` | `0.7` | 相关性/多样性平衡（1=全相关，0=全多样）|
+
+### 会话
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `sessionContinuity.enabled` | `true` | 启用会话续接 |
+| `sessionSummary.enabled` | `true` | 结束时写摘要 |
+| `sessionDedup.similarityThreshold` | `0.75` | 会话内相似查询跳过阈值 |
 
 ---
 
-<p align="center">
-  <strong>如果这个项目对你有帮助，请点个 ⭐ 支持一下！</strong>
-</p>
+## 数据结构
+
+### memories 表
+```sql
+CREATE TABLE memories (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  scope TEXT DEFAULT 'global',
+  content TEXT NOT NULL,
+  type TEXT DEFAULT 'other',
+  tier TEXT DEFAULT 'working',   -- core / working / peripheral
+  layer TEXT DEFAULT 'general', -- general / core-keyword
+  keywords TEXT DEFAULT '',
+  importance REAL DEFAULT 0.5,
+  access_count INTEGER DEFAULT 1,
+  cited_count INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_accessed INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  metadata TEXT
+);
+```
+
+### memories_fts 表（FTS5）
+```sql
+CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, content, keywords);
+-- 触发器自动同步 INSERT/DELETE/UPDATE
+```
+
+---
+
+## 与 memory-lancedb 的关系
+
+algo-memory 和 OpenClaw 内置的 `memory-lancedb` **不可同时使用**（会导致重复 capture）。
+
+如果使用 algo-memory，在 OpenClaw 配置中设置：
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "algo-memory"
+    }
+  }
+}
+```
+
+algo-memory 的独有价值：
+- 无需 embedding API，离线/隐私友好
+- importance / cited_count / tier 分层
+- 结构化 import/export/correct 操作
+- Weibull 时间衰减 + reinforcement 强化机制
+
+---
+
+## 项目结构
+
+```
+algo-memory/
+├── src/
+│   ├── index.ts          # MemoryPlugin 主类 + MCP 工具注册 + Hook 绑定
+│   ├── types.ts          # TypeScript 类型定义 + 配置默认值
+│   ├── utils.ts          # 工具函数（Weibull/Jaccard/MMR/token估算）
+│   ├── engine/
+│   │   ├── store.ts     # 写入引擎（Buffer/LLM队列/批处理）
+│   │   ├── retrieve.ts  # 检索引擎（FTS5/评分/MMR）
+│   │   ├── recall.ts    # 召回决策（shouldRetrieve/sessionDedup）
+│   │   └── llm.ts      # LLM 客户端（8个provider/重试/缓存）
+│   ├── db/
+│   │   ├── schema.ts    # SQLite 建表 + FTS5 + 触发器
+│   │   └── queries.ts   # queryAll/queryOne/run 封装
+│   └── __tests__/       # 测试文件（228 个测试）
+├── dist/                  # TypeScript 编译输出
+├── CHANGELOG.md          # 版本变更历史
+├── ARCHITECTURE.md        # 系统架构设计文档
+└── openclaw.plugin.json  # OpenClaw 插件配置
+```
+
+---
+
+## 兼容性
+
+| 版本 | 最低要求 |
+|------|----------|
+| OpenClaw | v2026.3.23+ |
+| Node | ≥ 20.0.0 |
+| SQLite | FTS5 支持（Node ≥ 20 内置）|
+| better-sqlite3 | ≥ 11.0.0 |
+
+---
+
+## License
+
+MIT
