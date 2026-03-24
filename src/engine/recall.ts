@@ -115,26 +115,14 @@ export async function recall(
         score *= lengthNorm(m.content, config.lengthNorm.anchor);
       }
 
-      // cited_count log 曲线加成：被引用次数越多评分越高，但不会无限膨胀
-      if (m.cited_count > 0) {
-        score *= (1 + Math.log10(m.cited_count + 1) * 0.15);
-      }
-
       return { ...m, _score: score };
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
   } else {
-    // No recency decay: base score from importance, then cited_count boost
+    // No recency decay: base score from importance only
     memories = memories.map(m => {
-      let score = m.importance;
-      if (m.cited_count > 0) {
-        score *= (1 + Math.log10(m.cited_count + 1) * 0.15);
-      }
-      return { ...m, _score: score };
+      return { ...m, _score: m.importance };
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
   }
-
-  // Save all scored candidates before MMR mutates the reference (used for cited_count)
-  const scoredCandidates = memories;
 
   // Build the final returned set: MMR → hardMinScore → truncate
   if (config.mmr.enabled) {
