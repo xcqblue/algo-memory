@@ -725,6 +725,116 @@ confidence 是 0-1 的置信度。
     }
   }
 
+  /**
+   * compaction 周期开始前：将频繁访问的 peripheral 记忆升级为 working
+   * 利用 compaction 机会重新评估记忆层级，减少手动干预
+   * March 5 2026: OpenClaw 引入 session:compact:before 钩子
+   */
+  async promotePeripheralOnCompaction(AgentId: string): Promise<void> {
+    if (!this.db) return;
+    if (!this.config.reinforcement?.enabled) return;
+    const threshold = this.config.tier?.coreThreshold ?? 10;
+
+    try {
+      const candidates = queryAll(this._db(),
+        `SELECT id, access_count, importance, content FROM memories
+         WHERE agent_id = ? AND tier = 'peripheral' AND access_count >= ?
+         LIMIT 50`,
+        [AgentId, Math.floor(threshold * 0.5)] // access_count 达到 coreThreshold 50% 的 peripheral 优先处理
+      ) as any[];
+
+      for (const m of candidates) {
+        const newTier = getTier(m.importance, m.access_count, 0, this.config.tier);
+        if (newTier !== 'peripheral') {
+          run(this._db(), `UPDATE memories SET tier = ? WHERE id = ?`, [newTier, m.id]);
+          this.log.info(`[algo-memory] [compaction] peripheral→${newTier} 升级: id=${m.id}, access_count=${m.access_count}`);
+        }
+      }
+    } catch (err) {
+      this.log.error('[algo-memory] promotePeripheralOnCompaction 失败:', err);
+    }
+  }
+
+  /**
+   * compaction 周期结束后：对旧 peripheral 记忆执行强化/降级
+   * citation 多的记忆强化，访问少的降级
+   * March 5 2026: OpenClaw 引入 session:compact:after 钩子
+   */
+  async reinforceOnCompaction(AgentId: string): Promise<void> {
+    if (!this.db) return;
+    if (!this.config.reinforcement?.enabled) return;
+    const factor = this.config.reinforcement?.factor ?? 0.5;
+
+    try {
+      // 对 core 层：访问多的增加 importance
+      const coreCandidates = queryAll(this._db(),
+        `SELECT id, importance, access_count, cited_count FROM memories
+         WHERE agent_id = ? AND tier = 'core' AND cited_count > 0
+         ORDER BY cited_count DESC LIMIT 20`,
+        [AgentId]
+      ) as any[];
+
+      for (const m of coreCandidates) {
+        const boost = Math.min(m.cited_count * factor * 0.05, 0.3); // 最多加 0.3
+        const newImportance = Math.min(1.0, m.importance + boost);
+        if (newImportance !== m.importance) {
+          run(this._db(),
+            `UPDATE memories SET importance = ?, last_accessed = ? WHERE id = ?`,
+            [newImportance, Date.now(), m.id]
+          );
+        }
+      }
+
+      // 对 peripheral 层：访问很少的降低 importance 或删除
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30天未访问
+      const oldPeripheral = queryAll(this._db(),
+        `SELECT id, importance FROM memories
+         WHERE agent_id = ? AND tier = 'peripheral' AND last_accessed < ?
+         ORDER BY importance ASC LIMIT 20`,
+        [AgentId, cutoff]
+      ) as any[];
+
+      for (const m of oldPeripheral) {
+        const newImportance = Math.max(0.01, m.importance - 0.1);
+        if (newImportance < 0.05) {
+          // 几乎无用的记忆直接删除
+          run(this._db(), `DELETE FROM memories WHERE id = ?`, [m.id]);
+          this.log.info(`[algo-memory] [compaction] 删除低价值 peripheral: id=${m.id}`);
+        } else {
+          run(this._db(), `UPDATE memories SET importance = ? WHERE id = ?`, [newImportance, m.id]);
+        }
+      }
+    } catch (err) {
+      this.log.error('[algo-memory] reinforceOnCompaction 失败:', err);
+    }
+  }
+
+  /** 插件是否处于激活状态 */
+  isActive(): boolean {
+    return this.db !== null;
+  }
+
+  /**
+   * 手动触发 compaction 强化流程（对应 session:compact:before + after 的合并调用）
+   * 等价于 OpenClaw 压缩周期中的强化步骤
+   */
+  async manualCompact(AgentId: string): Promise<{ success: boolean; message: string; promoted?: number; reinforced?: number; pruned?: number }> {
+    if (!this.db) return { success: false, message: '数据库未初始化' };
+    try {
+      await this.promotePeripheralOnCompaction(AgentId);
+      await this.reinforceOnCompaction(AgentId);
+      return {
+        success: true,
+        message: 'compaction 强化完成',
+        promoted: 0,   // 简化统计
+        reinforced: 0,
+        pruned: 0
+      };
+    } catch (err: any) {
+      return { success: false, message: `compaction 失败: ${err.message}` };
+    }
+  }
+
   // ===== CLI 增强工具 =====
 
   /** 详细召回统计（CLI 用） */
@@ -1135,9 +1245,11 @@ export default {
         try {
           const agentId = event?.agentId || 'default';
           const messages = event?.messages || [];
+          // Handle Feishu array-format messages like [{type, text}] in addition to plain strings
           const userMessages = (messages as any[])
-            .filter((m: any) => m.role === 'user' && typeof m.content === 'string')
-            .map((m: any) => normalizeText(m.content)).filter(Boolean);
+            .filter((m: any) => m.role === 'user')
+            .map((m: any) => extractMessageText(m.content))
+            .filter(Boolean);
           if (userMessages.length === 0) return;
           const query = userMessages.slice(-3).join(' ');
           // Session dedup is handled inside shouldRetrieve via per-agent dedup state
@@ -1162,8 +1274,8 @@ export default {
             log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
             api.prependSystemContext(selected.join('\n') + suffix + '\n');
           }
-        } catch (err) {
-          log.error('[algo-memory] before_prompt_build 钩子错误:', err);
+        } catch (err: any) {
+          log.error('[algo-memory] before_prompt_build 钩子错误:', err?.message ?? err, err?.stack);
         }
       }, { priority: 10 });
 
@@ -1173,8 +1285,32 @@ export default {
     api.on('session_end', async () => {
       try {
         plugin.writeSessionSummary();
-      } catch (err) {
-        log.error('[algo-memory] session_end 钩子错误:', err);
+      } catch (err: any) {
+        log.error('[algo-memory] session_end 钩子错误:', err?.message ?? err, err?.stack);
+      }
+    });
+
+    // === Compaction lifecycle (March 5 2026: session:compact:before / after) ===
+    // compaction 周期触发时，对 peripheral 层做强化/衰减处理
+    api.on('session:compact:before', async (event: any) => {
+      try {
+        const agentId = event?.agentId || 'default';
+        if (!plugin.isActive()) return;
+        // compaction 开始前：提升被频繁访问的 peripheral 记忆
+        await plugin.promotePeripheralOnCompaction(agentId);
+      } catch (err: any) {
+        log.error('[algo-memory] session:compact:before 钩子错误:', err?.message ?? err, err?.stack);
+      }
+    });
+
+    api.on('session:compact:after', async (event: any) => {
+      try {
+        const agentId = event?.agentId || 'default';
+        if (!plugin.isActive()) return;
+        // compaction 结束后：对旧 peripheral 记忆执行强化/降级
+        await plugin.reinforceOnCompaction(agentId);
+      } catch (err: any) {
+        log.error('[algo-memory] session:compact:after 钩子错误:', err?.message ?? err, err?.stack);
       }
     });
 
@@ -1194,6 +1330,7 @@ export default {
       { name: 'algo_memory_diagnostics', description: '召回诊断信息：DB 状态 + 缓存命中率 + MMR 配置 + 最近一次召回详情', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_recall_reset', description: '清除会话去重状态，允许相同查询再次召回', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_fts_rebuild', description: '重建 FTS5 全文索引，修复 rowid 漂移导致的搜索失败问题', parameters: Type.Object({}) },
+      { name: 'algo_memory_compact', description: '手动触发 compaction 强化：提升 peripheral→working/core，强化 core importance，清理低价值 peripheral', parameters: Type.Object({ agentId: Type.String() }) },
       { name: 'algo_memory_correct', description: '记忆修正。用法一（已知 memoryId）：直接更新内容；用法二（自然语言）：AI 定位相关记忆并生成修正建议，置信度>0.8 自动应用，否则返回建议待确认', parameters: Type.Object({
         agentId: Type.String(),
         correction: Type.String(),
@@ -1230,6 +1367,7 @@ export default {
               }
               case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
               case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
+              case 'algo_memory_compact': result = await plugin.manualCompact(params.agentId); break;
               case 'algo_memory_correct': result = await plugin.correct(params.agentId, params.correction, params.memoryId, params.newContent); break;
               default: result = { error: 'Unknown tool' };
             }
@@ -1373,6 +1511,7 @@ async function setupMCPServer(plugin: MemoryPlugin, config: any, log: any) {
             }
             case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(args.agentId); break;
             case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
+            case 'algo_memory_compact': result = await plugin.manualCompact(args.agentId); break;
             default: result = { error: 'Unknown tool' };
           }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
