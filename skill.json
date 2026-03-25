@@ -1,0 +1,46 @@
+{
+  "name": "algo-memory",
+  "version": "2.7.5",
+  "description": "SQLite 拉取式长期记忆插件。支持 FTS5 全文搜索、MMR 去重、Weibull 衰减、记忆分层（core/working/peripheral）。LLM 可选（关键词提取/语义去重）。",
+  "homepage": "https://github.com/your-repo/algo-memory",
+  "requirements": [
+    {
+      "type": "env",
+      "name": "LLM_API_KEY",
+      "label": "LLM API Key（可选）",
+      "description": "用于关键词提取和语义去重。不填则使用规则判断。支持的 Provider：zhipu（推荐，免费额度高）、deepseek、minimax、qwen、kimi。",
+      "providers": ["zhipu", "deepseek", "minimax", "qwen", "kimi", "siliconflow"]
+    }
+  ],
+  "recipes": [
+    {
+      "type": "copy",
+      "label": "复制到 OpenClaw plugins 目录",
+      "steps": [
+        { "cmd": "cp -r /home/x/xiangmu/algo-memory ~/.openclaw/plugins/algo-memory" }
+      ]
+    }
+  ],
+  "configHints": {
+    "llm.provider": {
+      "label": "LLM Provider",
+      "description": "推荐 zhipu（免费额度高）",
+      "default": "zhipu"
+    },
+    "llm.model": {
+      "label": "模型",
+      "description": "zhipu 推荐 glm-4-flash；deepseek 推荐 deepseek-chat",
+      "default": "glm-4-flash"
+    },
+    "autoCapture": {
+      "label": "自动存储记忆",
+      "description": "开启后每轮对话自动存储重要内容到 SQLite",
+      "default": true
+    },
+    "autoRecall": {
+      "label": "自动召回记忆",
+      "description": "开启后每次回复前自动注入相关记忆到上下文",
+      "default": true
+    }
+  }
+}

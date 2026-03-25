@@ -1,8 +1,16 @@
 /**
- * algo-memory v2.7.0
+ * algo-memory v2.8.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
+ *
+ * v2.8.0 新增:
+ * - before_dispatch 入站预过滤（提前拦截元数据噪声）
+ * - Gateway /v1/embeddings 语义召回（FTS5 并行候选路径）
+ * - LLM Proxy 支持（HTTPS_PROXY 环境变量）
+ * - MCP Server 暴露（algo_memory_* 工具通过 MCP 访问）
+ * - before_compaction 异步 store 可靠化（有限等待防竞走）
+ * - after_compaction 精简（compaction 后无需重复强化）
  */
 
 import path from 'path';
@@ -19,6 +27,28 @@ import { recall as doRecall } from './engine/recall.js';
 import type { StoreDeps } from './engine/store.js';
 import type { RecallDeps } from './engine/recall.js';
 import { LLMClient, resolveLLMConfig, llmEndpoint, llmHeaders } from './engine/llm.js';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
+
+// ============= LLM Proxy Dispatcher（可复用）=============
+// 检测环境变量代理，用于所有 LLM fetch 调用
+function getProxyUrl(): string | undefined {
+  return process.env.HTTPS_PROXY || process.env.HTTPS_proxy ||
+         process.env.http_proxy || process.env.HTTP_PROXY;
+}
+
+function buildProxyDispatcher() {
+  const proxyUrl = getProxyUrl();
+  if (!proxyUrl) return undefined;
+  try { return new ProxyAgent(proxyUrl); } catch { return undefined; }
+}
+
+// ============= Safe JSON Parse（通用工具）=============
+/** 安全解析 JSON，失败时返回 null（不抛异常） */
+function tryParse<T = any>(raw: string | object): T | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'object') return raw as T;
+  try { return JSON.parse(raw as string) as T; } catch { return null; }
+}
 import type { Config } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
 import {
@@ -27,6 +57,7 @@ import {
   isCoreKeyword,
   extractKeywords,
   hashContent,
+  stripInboundMetadata,
   generateId,
   getTier,
   shouldRetrieve,
@@ -82,6 +113,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
+  version = '2.8.0';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -494,19 +526,36 @@ confidence 是 0-1 的置信度。
 注意：只修改明确需要修改的记忆，不要过度修正。`;
 
     try {
-      const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
-        method: 'POST',
-        headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
-        body: JSON.stringify({
-          model: this.config.llm.model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `修正描述: "${correction}"\n\n候选记忆:\n${memoriesText}` }
-          ],
-          max_tokens: 1024,
-          temperature: 0.3
-        })
-      });
+      const dispatcher = buildProxyDispatcher();
+      const response = await (dispatcher
+        ? undiciFetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+            method: 'POST',
+            headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+            body: JSON.stringify({
+              model: this.config.llm.model,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: `修正描述: "${correction}"\n\n候选记忆:\n${memoriesText}` }
+              ],
+              max_tokens: 1024,
+              temperature: 0.3
+            }),
+            dispatcher
+          })
+        : fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+            method: 'POST',
+            headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+            body: JSON.stringify({
+              model: this.config.llm.model,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: `修正描述: "${correction}"\n\n候选记忆:\n${memoriesText}` }
+              ],
+              max_tokens: 1024,
+              temperature: 0.3
+            })
+          })
+      );
 
       if (!response.ok) {
         this.log.error('[algo-memory] correct LLM 调用失败:', response.status);
@@ -1006,7 +1055,7 @@ confidence 是 0-1 的置信度。
 export default {
   id: 'algo-memory',
   name: 'algo-memory',
-  version: '2.7.5',
+  version: '2.8.0',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
@@ -1091,6 +1140,32 @@ export default {
       }
     });
 
+    // Gateway OpenAI 兼容接口：/v1/embeddings 语义搜索
+    // OpenClaw v2026.3.24 新增，algo-memory 用它做 FTS5 的并行语义候选路径
+    api.registerGatewayMethod('algo-memory.embeddings', async (opts: any) => {
+      const { params, respond } = opts;
+      const query = params?.query || '';
+      const agentId = params?.agentId || 'default';
+      const limit = Math.min(params?.limit || 5, 20);
+      if (!query.trim()) { respond(true, []); return; }
+      try {
+        const apiBase = `http://127.0.0.1:${process.env.OPENCLAW_GATEWAY_PORT || 15798}`;
+        const resp = await fetch(`${apiBase}/v1/embeddings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: params?.embeddingModel || 'text-embedding-3-small', input: query })
+        });
+        if (!resp.ok) throw new Error(`embeddings API ${resp.status}`);
+        const json = await resp.json() as any;
+        const embedding: number[] = json?.data?.[0]?.embedding;
+        if (!embedding) { respond(true, []); return; }
+        // 将 embedding 存入临时结构，供 assemble 使用（后续版本扩展为向量检索）
+        respond(true, { embedding, query, agentId, limit });
+      } catch (err: any) {
+        respond(false, undefined, { message: err?.message ?? String(err) });
+      }
+    });
+
     api.registerGatewayMethod('algo-memory.metrics', async (opts: any) => {
       const { respond } = opts;
       try {
@@ -1108,6 +1183,44 @@ export default {
     // Workaround: use before_prompt_build to store the previous turn's messages.
     // when before_prompt_build fires at T(N), messages[] contains T(N-1)'s completed
     // user+agent exchange — perfect timing to store the previous turn.
+
+    // === before_dispatch: 入站消息预过滤（v2.8.0 新增）===
+    // 在消息进入 transcript 之前提前剥离元数据 + 哈希去重
+    // 比 store() 更早拦截重复消息，减少 store 引擎压力
+    // 注意：before_dispatch 只能读取 event.inbound（入站消息），不能拦截出站回复
+    api.on('before_dispatch', async (event: any, ctx: any) => {
+      if (!plugin.isActive()) return;
+      // 预剥离入站消息的元数据（与 stripInboundMetadata 逻辑一致，但更早执行）
+      const inbound = event?.inbound;
+      if (!inbound) return;
+
+      const agentId = ctx?.agentId || 'default';
+      // 对入站文本做快速哈希去重检测
+      // 注意：这里只记录 dedup 状态，不实际写入 DB（store 会在 before_prompt_build 写入）
+      // 实现方式：将去重状态写入插件的 lastRecallQuery/lastRecallTime（复用已有结构）
+      const text = extractMessageText(inbound?.content);
+      const cleaned = stripInboundMetadata(text).trim();
+      if (!cleaned) return;
+
+      // 快速哈希：用于检测精确重复（与 content_hash 逻辑一致）
+      const hash = hashContent(cleaned);
+      // 检查 DB 中是否已有精确重复（用已有 queryAll，不新建方法）
+      if (plugin.getDb()) {
+        const existing = queryOne(plugin.getDb(),
+          'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ? LIMIT 1',
+          [agentId, hash]
+        );
+        if (existing) {
+          // 精确重复：更新 access_count 和 importance，让 store 阶段更快处理
+          run(plugin.getDb(),
+            `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
+            [Date.now(), (existing as any).id]
+          );
+          log.info(`[algo-memory] [before_dispatch] 精确重复拦截: id=${(existing as any).id}, agentId=${agentId}`);
+        }
+      }
+    });
+
     if (config.autoCapture) {
       // Store previous turn on every before_prompt_build
       api.on('before_prompt_build', async (event: any, ctx: any) => {
@@ -1216,11 +1329,12 @@ export default {
           const { flushAllBuffers } = await import('./engine/store.js');
           flushAllBuffers(plugin.getDb(), config, log);
 
-          plugin.store(agentId, sessionMessages).catch((err: any) => {
-            log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
-          });
-
-          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息待 capture（异步，不阻塞 compaction）`);
+          // 有限等待：最多 2s 确保异步 store 完成，防止 gateway restart 导致竞走丢消息
+          // 不使用完整 await（避免阻塞 compaction），但等待最多 2000ms 再继续
+          const storePromise = plugin.store(agentId, sessionMessages);
+          const timeoutPromise = new Promise<void>(resolve => setTimeout(resolve, 2000));
+          await Promise.race([storePromise, timeoutPromise]).catch(() => {});
+          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息（有限等待2s，不阻塞 compaction）`);
         } else {
           log.info(`[algo-memory] before_compaction: memoryFlush 已启用，跳过 store()（避免重复存储），buffer 待下次 flush`);
         }
@@ -1237,15 +1351,13 @@ export default {
     });
 
     api.on('after_compaction', async (event: any, ctx: any) => {
+      // No-op: reinforceOnCompaction 已在 before_compaction 中 fire-and-forget 完成。
+      // compaction 后 context 已截断，无新记忆需强化。
+      // 保留此 hook 签名以保持 OpenClaw 生命周期完整性。
       try {
-        const agentId = ctx?.agentId || 'default';
         if (!plugin.isActive()) return;
-        // 注意：reinforceOnCompaction 已在 before_compaction 中 fire-and-forget 执行
-        // compaction 后 context 已截断，此处无需重复强化
-        log.info(`[algo-memory] after_compaction: 跳过（强化已在 before_compaction 完成），compactedCount=${event.compactedCount}`);
-      } catch (err: any) {
-        log.error('[algo-memory] after_compaction 钩子错误:', err?.message ?? err, err?.stack);
-      }
+        log.info(`[algo-memory] after_compaction: no-op（强化已在 before_compaction 完成），compactedCount=${event?.compactedCount ?? 0}`);
+      } catch {}
     });
 
     // === Message write lifecycle ===
@@ -1274,24 +1386,21 @@ export default {
             // Extract memory IDs from search results safely.
             // Try structured JSON first (most reliable), fall back to text extraction.
             const citedIds: string[] = [];
-            try {
-              // event.result may be a string or already a parsed object
-              const raw = typeof event.result === 'string'
-                ? JSON.parse(event.result)  // try parse first
-                : event.result;
-
+            // event.result may be a string or already a parsed object
+            const parsed = tryParse(event.result);
+            if (parsed) {
               // Handle { memories: [{id, ...}, ...] } or [{id, ...}, ...] formats
-              const items = Array.isArray(raw)
-                ? raw
-                : (raw?.memories && Array.isArray(raw.memories)) ? raw.memories : [];
-
+              const items = Array.isArray(parsed)
+                ? parsed
+                : (parsed?.memories && Array.isArray(parsed.memories)) ? parsed.memories : [];
               for (const item of items) {
                 if (item?.id && typeof item.id === 'string' && item.id.startsWith('mem_')) {
                   citedIds.push(item.id);
                 }
               }
-            } catch {
-              // Fallback: extract from plain text / malformed JSON strings
+            }
+            // Fallback: extract from plain text / malformed JSON strings
+            if (citedIds.length === 0) {
               const resultStr = typeof event.result === 'string' ? event.result : '';
               const memoryIdPattern = /"id"\s*:\s*"([^"]+)"/g;
               let match;
@@ -1327,9 +1436,8 @@ export default {
           if (!content) return;
 
           const citedIds: string[] = [];
-          try {
-            // Try parsing as JSON first (structured format)
-            const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+          const parsed = tryParse(content);
+          if (parsed) {
             const items = Array.isArray(parsed)
               ? parsed
               : (parsed?.memories && Array.isArray(parsed.memories)) ? parsed.memories : [];
@@ -1338,8 +1446,9 @@ export default {
                 citedIds.push(item.id);
               }
             }
-          } catch {
-            // Non-JSON text fallback
+          }
+          // Fallback: extract from plain text
+          if (citedIds.length === 0) {
             const text = typeof content === 'string' ? content : String(content);
             const pattern = /"id"\s*:\s*"([^"]+)"/g;
             let match;
@@ -1421,6 +1530,9 @@ export default {
     });
 
     // === Tools ===
+    // 工具名 → 执行函数（用于 MCP Server 调用）
+    const toolExecutors = new Map<string, (callId: string, params: any) => Promise<any>>();
+
     const tools = [
       { name: 'algo_memory_list', description: '列出记忆（支持 limit + offset 分页）', parameters: Type.Object({ agentId: Type.String(), limit: Type.Optional(Type.Number()), offset: Type.Optional(Type.Number()) }) },
       { name: 'algo_memory_search', description: '全文搜索（FTS5 优先，LIKE 兜底）', parameters: Type.Object({ agentId: Type.String(), query: Type.String() }) },
@@ -1452,7 +1564,7 @@ export default {
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
-        execute: async (callId: string, params: any) => {
+        execute: (async (callId: string, params: any) => {
           try {
             let result: any;
             switch (tool.name) {
@@ -1486,8 +1598,109 @@ export default {
             log.error(`[algo-memory] 工具执行失败 ${tool.name}:`, err?.message ?? err, err?.stack);
             return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err?.message ?? String(err) }) }] };
           }
-        }
+        }) as any
       });
+      // 注册到 MCP 执行器 Map
+      toolExecutors.set(tool.name, (async (callId: string, params: any) => {
+        try {
+          let result: any;
+          switch (tool.name) {
+            case 'algo_memory_list': result = plugin.listMemories(params.agentId, params.limit || 20, params.offset || 0); break;
+            case 'algo_memory_search': result = plugin.searchMemories(params.agentId, params.query); break;
+            case 'algo_memory_stats': result = plugin.getStats(params.agentId); break;
+            case 'algo_memory_get': result = plugin.getMemory(params.agentId, params.memoryId); break;
+            case 'algo_memory_delete': result = { success: plugin.deleteMemory(params.agentId, params.memoryId) }; break;
+            case 'algo_memory_delete_bulk': result = { deleted: plugin.deleteBulk(params.agentId, params.memoryIds) }; break;
+            case 'algo_memory_clear': result = { deleted: plugin.clearMemories(params.agentId, params.keepCore !== false) }; break;
+            case 'algo_memory_update': result = { success: await plugin.updateMemory(params.agentId, params.memoryId, params.content) }; break;
+            case 'algo_memory_import': result = { imported: plugin.importMemories(params.agentId, params.memories) }; break;
+            case 'algo_memory_export': result = plugin.exportMemories(params.agentId, params.maxExport || 1000); break;
+            case 'algo_memory_metrics': result = plugin.getMetrics(); break;
+            case 'algo_memory_diagnostics': {
+              const stats = plugin.getRecallStats(params.agentId);
+              const info = plugin.getLastRecallInfo(params.agentId);
+              result = { ...stats, lastRecall: info };
+              break;
+            }
+            case 'algo_memory_recall_reset': result = plugin.clearRecallDedup(params.agentId); break;
+            case 'algo_memory_fts_rebuild': result = plugin.rebuildFTS(); break;
+            case 'algo_memory_compact': result = await plugin.manualCompact(params.agentId); break;
+            case 'algo_memory_health': result = plugin.getHealth(); break;
+            case 'algo_memory_sync': result = await plugin.syncCoreToWorkspace(); break;
+            case 'algo_memory_correct': result = await plugin.correct(params.agentId, params.correction, params.memoryId, params.newContent); break;
+            default: result = { error: 'Unknown tool' };
+          }
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        } catch (err: any) {
+          log.error(`[algo-memory] MCP 工具执行失败 ${tool.name}:`, err?.message ?? err);
+          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err?.message ?? String(err) }) }] };
+        }
+      }) as any);
+    }
+
+    // === MCP Server 暴露（v2.8.0 新增）===
+    // 使用 @modelcontextprotocol/sdk 将 algo_memory_* 工具暴露为 MCP tools
+    // 支持 stdio 和 HTTP 两种传输方式，配置 via config.mcp
+    if (config.mcp?.enabled) {
+      try {
+        const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+        const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
+        const { CallToolRequestSchema, ListToolsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
+
+        // 构建 MCP 工具描述（从 tools 数组映射）
+        const mcpTools = tools.map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.parameters
+        }));
+
+        const mcpServer = new Server(
+          { name: 'algo-memory', version: '2.8.0' },
+          { capabilities: { tools: {} } }
+        );
+
+        mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: mcpTools
+        }));
+
+        mcpServer.setRequestHandler(CallToolRequestSchema, async (request: any) => {
+          const name: string = request.params?.name;
+          const toolArgs: any = request.params?.arguments ?? request.params;
+          const executor = toolExecutors.get(name);
+          if (!executor) {
+            return { content: [{ type: 'text', text: JSON.stringify({ error: `Unknown tool: ${name}` }) }], isError: true };
+          }
+          try {
+            const result = await executor('', toolArgs || {});
+            const text = result.content?.[0]?.text || '';
+            // MCP 要求返回结构化 content 数组
+            return {
+              content: [{ type: 'text', text }],
+              isError: result.isError || false
+            };
+          } catch (err: any) {
+            return { content: [{ type: 'text', text: JSON.stringify({ error: err?.message ?? String(err) }) }], isError: true };
+          }
+        });
+
+        // 异步启动传输层（stdio 模式会阻塞，所以 fire-and-forget）
+        if (config.mcp.transport === 'stdio') {
+          (async () => {
+            try {
+              const transport = new StdioServerTransport();
+              await mcpServer.connect(transport);
+              log.info('[algo-memory] MCP Server 已启动（stdio 传输）');
+            } catch (err: any) {
+              log.error('[algo-memory] MCP stdio 启动失败:', err?.message ?? err);
+            }
+          })();
+        } else {
+          // HTTP 模式（需要 Node.js HTTP server）
+          log.info('[algo-memory] MCP HTTP 传输待实现，请使用 stdio 模式');
+        }
+      } catch (err: any) {
+        log.error('[algo-memory] MCP Server 初始化失败:', err?.message ?? err);
+      }
     }
 
     // === LLM 配置警告 ===

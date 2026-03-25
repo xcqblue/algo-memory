@@ -4,6 +4,26 @@
 
 import type { Config, LLMConfig } from '../types.js';
 import { jaccardSimilarity, extractKeywords, isCoreKeyword, sleep, RETRY_MAX_ATTEMPTS, RETRY_DELAY_MS } from '../utils.js';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
+
+// ============= Proxy Support（OpenClaw v2026.3.24 compatible）=============
+// 检测 OpenClaw Gateway 代理配置（HTTP_PROXY / HTTPS_PROXY 环境变量）
+// 企业网络环境下必须，调用 LLM API 时通过代理访问
+function getProxyUrl(): string | undefined {
+  return process.env.HTTPS_PROXY || process.env.HTTPS_proxy ||
+         process.env.http_proxy || process.env.HTTP_PROXY;
+}
+
+/** 为 fetch 调用构建带代理的 dispatcher（Node.js 24 + undici 内置） */
+function buildProxyDispatcher() {
+  const proxyUrl = getProxyUrl();
+  if (!proxyUrl) return undefined;
+  try {
+    return new ProxyAgent(proxyUrl);
+  } catch {
+    return undefined;
+  }
+}
 
 // ============= LLM Provider Configurations =============
 const LLM_PROVIDERS = {
@@ -172,20 +192,37 @@ export class LLMClient {
     if (!this.config.llm.enabled || !this.config.llm.apiKey) return { isCore: false, confidence: 0.5 };
 
     try {
+      const dispatcher = buildProxyDispatcher();
       const result = await llmCallWithRetry(async () => {
-        const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
-          method: 'POST',
-          headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
-          body: JSON.stringify({
-            model: this.config.llm.model,
-            messages: [
-              { role: 'system', content: '判断是否重要需要长期记住。回复JSON: {"isCore": true/false, "confidence": 0-1}' },
-              { role: 'user', content }
-            ],
-            max_tokens: 100,
-            temperature: 0.1
-          })
-        });
+        const response = await (dispatcher
+          ? undiciFetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: '判断是否重要需要长期记住。回复JSON: {"isCore": true/false, "confidence": 0-1}' },
+                  { role: 'user', content }
+                ],
+                max_tokens: 100,
+                temperature: 0.1
+              }),
+              dispatcher
+            })
+          : fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: '判断是否重要需要长期记住。回复JSON: {"isCore": true/false, "confidence": 0-1}' },
+                  { role: 'user', content }
+                ],
+                max_tokens: 100,
+                temperature: 0.1
+              })
+            })
+        );
         if (!response.ok) {
           throw new Error(`LLM API 错误: ${response.status} ${response.statusText}`);
         }
@@ -208,20 +245,37 @@ export class LLMClient {
     if (!this.config.llm.enabled || !this.config.llm.apiKey) return local;
 
     try {
+      const dispatcher = buildProxyDispatcher();
       const result = await llmCallWithRetry(async () => {
-        const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
-          method: 'POST',
-          headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
-          body: JSON.stringify({
-            model: this.config.llm.model,
-            messages: [
-              { role: 'system', content: '提取关键词，最多10个。回复JSON: {"keywords": ["k1", "k2"]}' },
-              { role: 'user', content }
-            ],
-            max_tokens: 200,
-            temperature: 0.2
-          })
-        });
+        const response = await (dispatcher
+          ? undiciFetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: '提取关键词，最多10个。回复JSON: {"keywords": ["k1", "k2"]}' },
+                  { role: 'user', content }
+                ],
+                max_tokens: 200,
+                temperature: 0.2
+              }),
+              dispatcher
+            })
+          : fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: '提取关键词，最多10个。回复JSON: {"keywords": ["k1", "k2"]}' },
+                  { role: 'user', content }
+                ],
+                max_tokens: 200,
+                temperature: 0.2
+              })
+            })
+        );
         if (!response.ok) {
           throw new Error(`LLM API 错误: ${response.status} ${response.statusText}`);
         }
@@ -249,20 +303,37 @@ export class LLMClient {
     if (!this.config.llm.enabled || !this.config.llm.apiKey) return { isDuplicate: false, similarity: sim };
 
     try {
+      const dispatcher = buildProxyDispatcher();
       const result = await llmCallWithRetry(async () => {
-        const response = await fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
-          method: 'POST',
-          headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
-          body: JSON.stringify({
-            model: this.config.llm.model,
-            messages: [
-              { role: 'system', content: '判断是否重复。回复JSON: {"isDuplicate": true/false, "similarity": 0-1}' },
-              { role: 'user', content: `内容1: ${c1}\n内容2: ${c2}` }
-            ],
-            max_tokens: 100,
-            temperature: 0.1
-          })
-        });
+        const response = await (dispatcher
+          ? undiciFetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: '判断是否重复。回复JSON: {"isDuplicate": true/false, "similarity": 0-1}' },
+                  { role: 'user', content: `内容1: ${c1}\n内容2: ${c2}` }
+                ],
+                max_tokens: 100,
+                temperature: 0.1
+              }),
+              dispatcher
+            })
+          : fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: '判断是否重复。回复JSON: {"isDuplicate": true/false, "similarity": 0-1}' },
+                  { role: 'user', content: `内容1: ${c1}\n内容2: ${c2}` }
+                ],
+                max_tokens: 100,
+                temperature: 0.1
+              })
+            })
+        );
         if (!response.ok) {
           throw new Error(`LLM API 错误: ${response.status} ${response.statusText}`);
         }

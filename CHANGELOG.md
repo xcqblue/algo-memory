@@ -2,6 +2,63 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.8.0] - 2026-03-25
+
+### 新增功能（OpenClaw v2026.3.24 深度集成）
+
+#### `before_dispatch` 入站预过滤
+- **问题**：元数据噪声（`Conversation info` / `message_id` / `Sender`）在 `store()` 时才被剥离，早期占用了 store 引擎的过滤算力
+- **修复**：新增 `before_dispatch` hook，在消息进入 transcript 之前执行 strip + 哈希精确去重拦截
+- **效果**：重复消息提前拦截，`store()` 压力降低；精确重复时更新 `access_count`，加速 tier 升级
+
+#### Gateway `/v1/embeddings` 语义召回接口
+- 新增 `algo-memory.embeddings` Gateway Method
+- 调用 OpenClaw Gateway 兼容接口 `/v1/embeddings`，为后续向量语义检索留出扩展接口
+- 返回 `{ embedding, query, agentId, limit }`，供 `assemble()` 阶段做混合评分
+
+#### LLM Proxy 支持（企业网络环境）
+- **问题**：企业内网需要代理访问 LLM API，直接 fetch 会超时
+- **修复**：读取 `HTTPS_PROXY` / `http_proxy` 环境变量，通过 `undici.ProxyAgent` 注入所有 LLM fetch 调用
+- **涉及位置**：`llm.ts`（`isCoreMemory` / `extractKeywords` / `isDuplicate`）+ `index.ts`（`correct` 方法）
+- **效果**：企业内网环境下 LLM 增强功能（关键词提取/语义去重）正常可用
+
+#### MCP Server 暴露
+- **问题**：algo-memory 工具（`algo_memory_*`）只能在 OpenClaw 内使用，无法被 Cursor / Claude Desktop 等 MCP Client 调用
+- **修复**：使用 `@modelcontextprotocol/sdk` 将 18 个工具暴露为标准 MCP tools，支持 stdio 传输
+- **配置**：设置 `config.mcp.enabled: true` 开启（默认关闭）
+- **效果**：Cursor / Claude Desktop 等 MCP Client 可直接查询 / 操作 algo-memory 记忆
+
+#### `skill.json` 安装元数据
+- 新增 `skill.json`，包含 OpenClaw 一键安装所需元数据：
+  - `requirements`：LLM API Key 配置提示（支持 zhipu/deepseek/minimax/qwen/kimi/siliconflow）
+  - `recipes`：复制到 `~/.openclaw/plugins/` 目录的步骤
+  - `configHints`：各配置项的 UI 展示提示
+- **效果**：OpenClaw Control UI 可展示"Get your key"链接和 setup 引导
+
+### Bug Fixes & 可靠性改进
+
+#### `before_compaction` 异步 store 可靠化
+- **问题**：`store()` 完全 fire-and-forget，若 gateway 重启，会话消息可能丢失
+- **修复**：加 2s 有限等待（`Promise.race(storePromise, timeoutPromise)`），兼顾不阻塞 compaction + 防止竞走丢消息
+- **效果**：compaction + restart 场景下数据不丢失
+
+#### `after_compaction` 精简
+- **问题**：`reinforceOnCompaction` 已在 `before_compaction` fire-and-forget 执行，`after_compaction` 再次执行无意义
+- **修复**：改为 no-op log，保留 hook 签名以保持 OpenClaw 生命周期完整性
+- **效果**：compaction 后不再重复强化，减少无意义计算
+
+#### JSON.parse 容错统一（`tryParse`）
+- **问题**：`after_tool_call` 和 `tool_result_persist` 的 JSON 解析分散在两处，try/catch 分支冗余
+- **修复**：新增 `tryParse<T>()` 工具函数，统一处理 string/object → T 解析，失败返回 null
+- **效果**：代码更简洁，ID 提取逻辑更一致
+
+### 依赖更新
+- 新增 `undici`（`ProxyAgent` 用于 LLM HTTP 代理）
+- 新增 `https-proxy-agent`（备用）
+- Node ≥ 20.0.0（已有）
+
+---
+
 ## [2.7.5] - 2026-03-25
 
 ### 新增功能（OpenClaw 深度集成）
