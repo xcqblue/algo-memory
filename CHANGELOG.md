@@ -4,6 +4,13 @@ All notable changes to algo-memory are documented here.
 
 ## [3.2.1] - 2026-03-25
 
+### Bug Fix
+
+#### Hook Promise 警告修复
+- **问题**：`before_message_write` 和 `tool_result_persist` 两个 hook 声明为 `async`，OpenClaw 的 hook 系统要求同步处理器，async 函数返回的 Promise 被忽略并产生警告
+- **修复**：两个 hook 改为同步函数，内部 fire-and-forget 的异步逻辑不变
+- **影响**：警告消除，功能不受影响
+
 ### 性能优化（代码审查修复）
 
 #### O1: 消除双重 stripInboundMetadata

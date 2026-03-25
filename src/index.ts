@@ -1507,7 +1507,7 @@ export default {
     // === Message write lifecycle ===
     // before_message_write: fires before a message is written to the transcript.
     // Use it to pre-process messages before they reach storage.
-    api.on('before_message_write', async (event: any, ctx: any) => {
+    api.on('before_message_write', (event: any, ctx: any) => {
       if (!plugin.isActive()) return;
       // The message is about to be written — this is a pre-processing opportunity.
       // algo-memory processes messages via store() in before_prompt_build/agent_end,
@@ -1570,12 +1570,12 @@ export default {
 
     // tool_result_persist: fires before tool result is written to transcript (earlier than after_tool_call).
     // event.message is an AgentMessage (structured), not a raw string — much more reliable for ID extraction.
-    api.on('tool_result_persist', async (event: any, ctx: any) => {
+    api.on('tool_result_persist', (event: any, ctx: any) => {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
       if (!plugin.isActive()) return;
       if (ctx?.toolName !== 'algo_memory_search') return;
 
-      // Fire-and-forget: do not await
+      // Fire-and-forget: spawn async task without blocking
       (async () => {
         try {
           // event.message is an AgentMessage — content is structured JSON or text
