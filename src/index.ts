@@ -36,6 +36,7 @@ import {
   CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
 } from './utils.js';
+import { AlgoMemoryContextEngine } from './engine/context-engine.js';
 
 // ============= Config merge helper =============
 // Uses explicit `!== undefined` so that `false`/`0` from userConfig are respected.
@@ -85,7 +86,7 @@ class MemoryPlugin {
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
   private cleanupInterval: NodeJS.Timeout | null = null;
-  private config: Config;
+  config: Config;
   /** 供外部 hook 调用，init 后 db 不为 null */
   getDb(): DatabaseType { return this.db!; }
   private _db(): DatabaseType { return this.db!; }
@@ -634,7 +635,7 @@ confidence 是 0-1 的置信度。
     }
   }
 
-  private clearRecallCache(AgentId: string): void {
+  clearRecallCache(AgentId: string): void {
     try {
       const store = (this.cache as any).store as Map<string, any> | undefined;
       if (store && typeof store.keys === 'function') {
@@ -1005,7 +1006,7 @@ confidence 是 0-1 的置信度。
 export default {
   id: 'algo-memory',
   name: 'algo-memory',
-  version: '2.7.1',
+  version: '2.7.5',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
@@ -1036,6 +1037,37 @@ export default {
 
     // Pass memoryFlush state to the plugin so before_compaction can reference it
     plugin.memoryFlushActive = memoryFlushActive;
+
+    // Register as a ContextEngine — enables deep OpenClaw integration
+    // algo-memory acts as the context management engine for the agent
+    api.registerContextEngine('algo-memory', () => {
+      return new AlgoMemoryContextEngine(plugin);
+    });
+
+    // Gateway RPC methods — allows CLI/HTTP access without LLM
+    api.registerGatewayMethod('algo-memory.stats', async (params: any, ctx: any) => {
+      const agentId = params?.agentId || ctx?.agentId || 'default';
+      return plugin.getStats(agentId);
+    });
+
+    api.registerGatewayMethod('algo-memory.search', async (params: any, ctx: any) => {
+      const agentId = params?.agentId || ctx?.agentId || 'default';
+      const query = params?.query || '';
+      return plugin.searchMemories(agentId, query);
+    });
+
+    api.registerGatewayMethod('algo-memory.list', async (params: any, ctx: any) => {
+      const agentId = params?.agentId || ctx?.agentId || 'default';
+      return plugin.listMemories(agentId, params?.limit || 20, params?.offset || 0);
+    });
+
+    api.registerGatewayMethod('algo-memory.health', async (_params: any, _ctx: any) => {
+      return plugin.getHealth();
+    });
+
+    api.registerGatewayMethod('algo-memory.metrics', async (_params: any, _ctx: any) => {
+      return plugin.getMetrics();
+    });
 
     // === Hooks ===
     // IMPORTANT: All OpenClaw hooks pass (event, ctx) — ctx.agentId is the source of truth.
@@ -1177,6 +1209,16 @@ export default {
       }
     });
 
+    // === Message write lifecycle ===
+    // before_message_write: fires before a message is written to the transcript.
+    // Use it to pre-process messages before they reach storage.
+    api.on('before_message_write', async (event: any, ctx: any) => {
+      if (!plugin.isActive()) return;
+      // The message is about to be written — this is a pre-processing opportunity.
+      // algo-memory processes messages via store() in before_prompt_build/agent_end,
+      // so no action needed here. This hook exists for future enhancements.
+    });
+
     // === Tool lifecycle: after tool execution ===
     // after_tool_call: fires immediately after any tool executes (before agent_end).
     // This gives us real-time feedback on what memories were cited via algo_memory_search.
@@ -1256,6 +1298,43 @@ export default {
       } catch (err: any) {
         log.error('[algo-memory] gateway_stop 钩子错误:', err?.message ?? err, err?.stack);
       }
+    });
+
+    // === Session lifecycle ===
+    api.on('session_start', async (event: any, ctx: any) => {
+      const agentId = ctx?.agentId || 'default';
+      if (!plugin.isActive()) return;
+      // Initialize per-session state — clear recall cache for this session
+      plugin.clearRecallCache(agentId);
+      log.info(`[algo-memory] session_start: agentId=${agentId}`);
+    });
+
+    api.on('session_end', async (event: any, ctx: any) => {
+      const agentId = ctx?.agentId || 'default';
+      if (!plugin.isActive()) return;
+      // Ensure all buffers are flushed at session end
+      const { flushAllBuffers } = await import('./engine/store.js');
+      flushAllBuffers(plugin.getDb(), config, log);
+      log.info(`[algo-memory] session_end: agentId=${agentId}, buffers flushed`);
+    });
+
+    // === Subagent lifecycle ===
+    api.on('subagent_spawning', async (event: any, ctx: any) => {
+      const parentAgentId = ctx?.agentId || 'default';
+      const childAgentId = event?.childAgentId || 'subagent';
+      log.info(`[algo-memory] subagent_spawning: parent=${parentAgentId} child=${childAgentId}`);
+      // Future: could prepare memory inheritance from parent to child
+    });
+
+    api.on('subagent_spawned', async (event: any, ctx: any) => {
+      log.info(`[algo-memory] subagent_spawned: child=${event?.childAgentId}`);
+    });
+
+    api.on('subagent_ended', async (event: any, ctx: any) => {
+      const childAgentId = event?.childAgentId || 'subagent';
+      const reason = event?.reason || 'completed';
+      log.info(`[algo-memory] subagent_ended: child=${childAgentId} reason=${reason}`);
+      // Future: could merge subagent memories back to parent scope
     });
 
     // === Tools ===

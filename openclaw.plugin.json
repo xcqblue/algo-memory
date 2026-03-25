@@ -1,8 +1,8 @@
 {
   "id": "algo-memory",
   "name": "algo-memory",
-  "description": "Structured SQLite-based memory for OpenClaw — tier scoring (core/working/peripheral), FTS5 full-text search, Weibull decay, session continuity, compaction reinforcement. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
-  "version": "2.7.1",
+  "description": "Structured SQLite-based memory for OpenClaw — ContextEngine interface (assemble/compact hooks), registerGatewayMethod RPC, tier scoring (core/working/peripheral), FTS5 full-text search, Weibull decay, session continuity, compaction reinforcement. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
+  "version": "2.7.5",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "installDependencies": true,
@@ -639,6 +639,7 @@
   },
   "requirements": {
     "node": ">=20.0.0",
-    "openclaw": ">=2026.3.0"
+    "openclaw": ">=2026.3.0",
+    "plugins.slots.memory": "~> 1.0"
   }
 }

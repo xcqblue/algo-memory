@@ -4,6 +4,33 @@ All notable changes to algo-memory are documented here.
 
 ## [2.7.5] - 2026-03-25
 
+### 新增功能（OpenClaw 深度集成）
+
+#### ContextEngine 接口实现
+- 新增 `src/engine/context-engine.ts` — 实现 OpenClaw `ContextEngine` 接口
+- `AlgoMemoryContextEngine` 类包装 `MemoryPlugin`，向 OpenClaw 暴露标准 `assemble()` / `compact()` / `ingest()` 接口
+- `assemble()` 调用 `plugin.recall()` 并将 `Memory[]` 转换为 `AgentMessage[]` 注入模型上下文
+- `compact()` 调用 `plugin.manualCompact()` 执行 tier 强化
+- 通过 `api.registerContextEngine('algo-memory', ...)` 注册
+
+#### Gateway RPC 方法
+- `algo-memory.stats` — 获取记忆统计
+- `algo-memory.search` — 搜索记忆
+- `algo-memory.list` — 分页列出记忆
+- `algo-memory.health` — 健康检查
+- `algo-memory.metrics` — 运行时指标
+- 通过 `api.registerGatewayMethod()` 注册，支持 CLI/HTTP 调用（无需 LLM）
+
+#### 会话生命周期 Hooks
+- `session_start` — 初始化会话状态，清除 recall 缓存
+- `session_end` — 确保所有 buffer flush 到 DB
+
+#### 消息写入 Hook
+- `before_message_write` — 消息写入 transcript 前的预处理钩子（为未来增强预留）
+
+#### 子 Agent 生命周期 Hooks
+- `subagent_spawning` / `subagent_spawned` / `subagent_ended` — 子 Agent 生命周期钩子（预留）
+
 ### Bug Fixes（代码审查 + OpenClaw 兼容性修复）
 
 #### before_compaction 移除同步读磁盘
