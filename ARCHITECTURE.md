@@ -1,36 +1,23 @@
 # 架构设计
 
-> algo-memory 的工作原理 — 设计决策、数据流与核心算法。
+algo-memory 的工作原理 — 设计决策、数据流与核心算法。
+
+完整配置参考 → [CONFIG.md](CONFIG.md)
 
 ---
 
 ## 系统概述
 
-algo-memory 是一个基于 SQLite 的**拉取式记忆系统**。不依赖外部 embedding 服务，使用 FTS5 BM25 进行检索，JavaScript 端计算评分。LLM 是可选功能，仅用于关键词提取和去重。不使用 MCP，工具通过 OpenClaw 原生 `registerTool()` API 暴露。
+algo-memory 是一个基于 SQLite 的**拉取式记忆系统**。不依赖外部 embedding 服务，使用 FTS5 BM25 进行检索，JavaScript 端计算评分。LLM 是可选功能，仅用于关键词提取和去重。工具通过 OpenClaw 原生 `registerTool()` API 暴露。
 
 ```
-用户消息
-    │
-    ▼
-agent_end Hook
-    │
-    ▼
-store(AgentId, messages[])
-    │
-    ├─ 阶段1（同步）：过滤噪声/重复/哈希 → 候选列表[]
-    │
-    ├─ 阶段2（异步）：批量 LLM — extractKeywords() × 1
-    │                   deduplicateByLLM() × n（如已启用）
-    │
-    └─ 阶段3（同步）：scheduleBatchWrite() → MemoryBuffer
-                                            │
-                                            ▼（500ms 防抖 或 消息数阈值）
-                                      flushMemoryBuffer()
-                                            │
-                                            ▼
-                                     SQLite memories 表
-                                            │
-                                            └─► FTS5 memories_fts（通过触发器）
+用户消息 → agent_end Hook → store()
+                                │
+                          MemoryBuffer（500ms 防抖 或 消息数阈值）
+                                │
+                          flush() → SQLite memories 表
+                                         │
+                              FTS5 触发器自动同步 → memories_fts
 ```
 
 ---
@@ -46,7 +33,7 @@ store(AgentId, messages[])
    - 哈希去重：`hashSet` 内存去重
    - 批量 Jaccard：与同一批次候选对比
    - 数据库 Jaccard：与最近 5 条 DB 记忆对比
-3. 阶段2：LLM 关键词提取（批次内 1 次调用）+ 可选 LLM 去重
+3. LLM 关键词提取（批次内 1 次调用）+ 可选 LLM 去重
 4. 计算 tier：`importance × (1 + log10(access_count + 1))`
 5. 进入 `MemoryBuffer`（500ms 防抖）
 6. 触发 flush：批量 INSERT 到 SQLite + FTS5 触发器自动同步
@@ -61,17 +48,14 @@ before_prompt_build 触发
     │
     ▼
 shouldRetrieve(query, config, sessionDedup)
-    │  - forceKeywords 检查（优先于 META_PATTERNS）
-    │  - META_PATTERNS 跳过
-    │  - 长度门槛（中文 ≥6，英文 ≥15）
-    │  - sessionDedup（30秒内相似度 ≥0.75 → 跳过）
+    │
     ▼
 ┌─ 多路召回（Multi-Path）— 4 条路径并行检索 ─┐
 │  路径1：原始 Query                             │
 │  路径2：前缀 3-token                          │
 │  路径3：后缀 2-token                          │
 │  路径4：首尾 token 组合                        │
-└────────────────────────────────────────────────┘
+└──────────────────────────────────────────────┘
     │
     ▼
 FTS5 搜索（BM25 + 同义词扩展）
@@ -95,11 +79,13 @@ cited_count += 1（去重后只更新一次）
 prependSystemContext() — 格式化记忆注入 LLM 上下文
 ```
 
-### FTS5 同义词扩展
+---
+
+## FTS5 同义词扩展
 
 algo-memory 在 Query 时对用户输入进行**同义词展开**，将单一 Query 扩展为多路 OR 查询，大幅提升召回率。
 
-#### 分词器（simpleChineseTokenize）
+### 分词器（simpleChineseTokenize）
 
 **脚本感知切分**：Latin 与 CJK（中文）分段处理，解决"iPhone屏幕碎了"这类中英混合文本无法切分的核心问题。
 
@@ -115,9 +101,9 @@ algo-memory 在 Query 时对用户输入进行**同义词展开**，将单一 Qu
     → "iPhone"（英文直接保留）
 ```
 
-#### SYNONYMS 同义词表
+### SYNONYMS 同义词表
 
-**双向子串提取**：Query 中的任意子串若命中 SYNONYMS 表的 key 或 value，均被提取并展开为 OR 查询。
+**双向子串提取**：Query 中任意子串命中 SYNONYMS 表的 key 或 value 时，均被提取并展开为 OR 查询。
 
 ```
 Query: "Mac系统崩了"
@@ -126,27 +112,25 @@ Query: "Mac系统崩了"
   Mac → 苹果电脑, Apple
   崩 → 死机, 蓝屏, 黑屏, 宕机, 崩溃
     ↓
-扩展查询:
-"Mac" OR "苹果电脑" OR "Apple" OR
-"崩" OR "死机" OR "蓝屏" OR "黑屏" OR "宕机" OR "崩溃"
+扩展: "Mac" OR "苹果电脑" OR "Apple" OR
+      "崩" OR "死机" OR "蓝屏" OR "黑屏" OR "宕机" OR "崩溃"
     ↓
-FTS5 MATCH:
   ✓ "苹果电脑蓝屏了" — 命中"苹果电脑" + "蓝屏"
   ✓ "Mac死机了" — 命中"Mac" + "死机"
 ```
 
-#### SYNONYMS 覆盖范围
+### SYNONYMS 覆盖范围
 
-| 分类 | 示例词条 |
-|------|---------|
-| 人物关系 | 老婆↔媳妇↔妻子↔爱人 / 老公↔丈夫 / 孩子↔儿子↔女儿 |
-| 地点/出差 | 北京↔帝都↔京城 / 出差↔商务出行 / 明天↔次日↔明日 |
-| 设备/故障 | iPhone↔苹果手机↔手机 / 坏↔碎↔裂↔故障↔爆 / 崩↔死机↔蓝屏↔黑屏 |
-| 情感态度 | 讨厌↔不喜欢↔厌恶↔抵触↔拒绝↔不想 / 喜欢↔爱↔偏爱↔喜好 |
-| 金融/股票 | 买↔建仓↔开仓↔增持 / 卖↔清仓↔平仓↔止损↔割肉 / 加仓↔增持 |
-| 宏观政策 | 美联储↔FOMC / 加息↔提息↔升息 / 降准↔MLF / CPI↔通胀 / GDP↔增速 |
+| 分类 | 示例 |
+|------|------|
+| 人物关系 | 老婆↔媳妇↔妻子 / 老公↔丈夫 / 孩子↔儿子↔女儿 |
+| 地点/出差 | 北京↔帝都 / 出差↔商务出行 / 明天↔次日 |
+| 设备/故障 | iPhone↔苹果手机 / 坏↔碎↔裂↔故障 / 崩↔死机↔蓝屏↔黑屏 |
+| 情感态度 | 讨厌↔不喜欢↔厌恶↔抵触 / 喜欢↔爱↔偏爱 |
+| 金融/股票 | 买↔建仓↔开仓 / 卖↔清仓↔平仓↔止损↔割肉 / 加仓↔增持 |
+| 宏观政策 | 美联储↔FOMC / 加息↔提息 / 降准↔MLF / CPI↔通胀 / GDP↔增速 |
 | 品牌/公司 | 茅台↔600519 / 腾讯↔00700 / 苹果↔AAPL / 宁德↔300750 |
-| 时间/餐饮 | 今天↔本日↔近日 / 午饭↔午餐↔中饭 / 辣↔川菜↔火锅 |
+| 时间/餐饮 | 今天↔本日 / 午饭↔午餐↔中饭 / 辣↔川菜↔火锅 |
 
 **总计：200+ 同义词条**，覆盖生活、数码、金融、宏观经济等场景。
 
@@ -155,7 +139,7 @@ FTS5 MATCH:
 ## 记忆分层系统
 
 ```
-tier score = importance × (1 + log10(access_count + 1))
+tier_score = importance × (1 + log10(access_count + 1))
 
 core:       access_count ≥ 10
             或 (score ≥ 0.7 且 age ≤ 60 天)
@@ -168,37 +152,27 @@ working:    其余情况
 
 Core 记忆不会被 cleanup 自动删除。Peripheral 记忆受 Weibull 衰减影响，超过 `cleanupDays` 未被访问则清理。
 
----
+### Weibull 衰减
 
-## 时间衰减
-
-### Weibull 衰减（shape=1.5, scale=90 天）
+shape > 1 意味着：**前期保护**（新记忆安全）→ 随后**加速遗忘**。
 
 ```
 decay(t) = exp(-(t / scale) ^ shape)
 
-t=0 天   → decay = 1.000  （新鲜，无衰减）
-t=30 天  → decay = 0.894  （轻微衰减）
-t=60 天  → decay = 0.710  （中等衰减）
-t=90 天  → decay = 0.368  （显著衰减）
-t=180 天 → decay = 0.018  （接近零）
+t=0 天   → 1.000  （新鲜，无衰减）
+t=30 天  → 0.894  （轻微衰减）
+t=60 天  → 0.710  （中等衰减）
+t=90 天  → 0.368  （显著衰减）
+t=180 天 → 0.018  （接近零）
 ```
-
-shape > 1 意味着：**前期保护**（新记忆安全）→ 随后**加速遗忘**。
 
 ### Reinforcement 强化
 
-记忆被召回（出现在 recall 结果中）时：
-- `cited_count += 1`
-- `last_accessed = now`
-
-Compaction 也会强化：core 记忆将 access_count 提升到 10，其他提升到 5。
+记忆被召回时：`cited_count += 1`，`last_accessed = now`。Compaction 也会强化 core 到 access_count=10，其他到 access_count=5。
 
 ---
 
 ## OpenClaw 生命周期 Hook
-
-### Hook 事件流
 
 ```
 gateway_start
@@ -219,34 +193,48 @@ registerHook()
     └─ gateway_stop ──► flushAll() ──► db.close()
 ```
 
-### 上下文优先级
-
-`api.prependSystemContext()` 用于注入记忆。`before_prompt_build` 中的 `priority: 10` 确保 algo-memory 在其他 memory 插件之后、LLM 调用之前执行。
+`before_prompt_build` 使用 `priority: 10`，确保在 LLM 调用之前、其他 memory 插件之后执行。
 
 ---
 
 ## LLM 模型支持
 
-### 国内模型
+algo-memory 的 LLM **不是必选功能**。如需关键词提取或去重，配置环境变量后指定 provider：
+
+```bash
+export MINIMAX_API_KEY="your-key"
+export DEEPSEEK_API_KEY="your-key"
+export ZHIPU_API_KEY="your-key"   # 推荐，免费额度高
+```
+
+```json
+{
+  "plugins": {
+    "algo-memory": {
+      "llm": {
+        "provider": "zhipu",
+        "model": "glm-4-flash"
+      }
+    }
+  }
+}
+```
 
 | Provider | 别名 | 默认模型 | 推荐 |
 |----------|------|---------|------|
-| `minimax` | — | `abab6.5s-chat` | abab6.5s-chat（推荐）/ abab6.5g-chat |
-| `deepseek` | — | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1推理）|
-| `kimi` | `moonshot` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k（长上下文）|
-| `zhipu` | — | `glm-4-flash` | glm-4-flash（免费）/ glm-4-plus（最强）|
-| `qwen` | `dashscope`、`bailian` | `qwen-plus` | qwen-plus（推荐）/ qwen-max（最强）/ qwen2.5-72b-instruct |
-| `hunyuan` | — | `hunyuan-standard` | hunyuan-pro（腾讯混元 Pro）|
-| `wenxin` | — | `ernie-3.5-8k` | ernie-4.0-8k（百度文心）|
+| `minimax` | — | `abab6.5s-chat` | abab6.5s-chat |
+| `deepseek` | — | `deepseek-chat` | deepseek-chat（V3）/ deepseek-reasoner（R1）|
+| `kimi` | `moonshot` | `moonshot-v1-8k` | moonshot-v1-8k（性价比）/ moonshot-v1-128k |
+| `zhipu` | — | `glm-4-flash` | glm-4-flash（免费）/ glm-4-plus |
+| `qwen` | `dashscope`、`bailian` | `qwen-plus` | qwen-plus / qwen-max / qwen2.5-72b-instruct |
+| `hunyuan` | — | `hunyuan-standard` | hunyuan-pro |
+| `wenxin` | — | `ernie-3.5-8k` | ernie-4.0-8k |
 | `siliconflow` | `silicon` | `Qwen/Qwen2-7B-Instruct` | SiliconFlow 聚合 50+ 模型 |
+| `openai` | — | `gpt-4o-mini` | gpt-4o-mini（快）/ gpt-4o（强）|
+| `anthropic` | — | `claude-3-haiku-20240307` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
+| `ollama` | — | `llama2` | 本地自定义模型 |
 
-### 国外模型
-
-| Provider | 默认模型 | 推荐 |
-|----------|---------|------|
-| `openai` | `gpt-4o-mini` | gpt-4o-mini（快）/ gpt-4o（强）|
-| `anthropic` | `claude-3-haiku-20240307` | claude-3-haiku（快）/ claude-3-5-sonnet（强）|
-| `ollama` | `llama2` | 本地自定义模型 |
+> 完整模型列表（含 MiniMax/智谱/阿里/腾讯/百度等）见 [CONFIG.md](CONFIG.md)。
 
 ---
 
@@ -273,8 +261,7 @@ registerHook()
 | MMR 去重 | O(k²)，k = maxResults | < 1ms |
 | Buffer flush（批量写入）| O(b)，b = 批次大小 | 10-50ms |
 
-n = DB 中总记忆数（通常 < 10,000）
-b = buffer 大小（通常 1-20）
+n = DB 中总记忆数（通常 < 10,000），b = buffer 大小（通常 1-20）
 
 ---
 
