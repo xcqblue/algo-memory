@@ -270,7 +270,7 @@ export const DEFAULT_VALUES = {
 export const DEFAULT_CONFIG: Config = {
   autoCapture: true,
   autoRecall: true,
-  openClawMemoryMode: 'auto',
+  openClawMemoryMode: 'standalone',
   syncToWorkspace: false,
   maxResults: 5,
   maxInjectTokens: 1500,
