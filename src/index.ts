@@ -1014,7 +1014,28 @@ export default {
 
     // === Hooks ===
     // IMPORTANT: All OpenClaw hooks pass (event, ctx) — ctx.agentId is the source of truth.
+    // In embedded agent mode, agent_end only fires when the embedded run formally ends
+    // (e.g. on gateway stop or /new), NOT between turns in a persistent session.
+    // Workaround: use before_prompt_build to store the previous turn's messages.
+    // when before_prompt_build fires at T(N), messages[] contains T(N-1)'s completed
+    // user+agent exchange — perfect timing to store the previous turn.
     if (config.autoCapture) {
+      // Store previous turn on every before_prompt_build
+      api.on('before_prompt_build', async (event: any, ctx: any) => {
+        try {
+          const agentId = ctx?.agentId || 'default';
+          const messages = event?.messages || [];
+          if (messages.length > 0) {
+            plugin.store(agentId, messages).catch((err: any) => {
+              log.error('[algo-memory] before_prompt_build store 错误:', err?.message ?? err);
+            });
+          }
+        } catch (err: any) {
+          log.error('[algo-memory] before_prompt_build store 异常:', err?.message ?? err);
+        }
+      });
+
+      // agent_end: still keep for session-end / gateway-stop scenarios
       api.on('agent_end', async (event: any, ctx: any) => {
         const agentId = ctx?.agentId || 'default';
         const messages = event?.messages || [];

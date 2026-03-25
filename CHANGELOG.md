@@ -2,6 +2,16 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.7.4] - 2026-03-25
+
+### Bug Fixes（agent_end 在嵌入式模式不触发per-turn的修复）
+
+#### agent_end 不触发：改用 before_prompt_build 存储
+- **问题根因**：`agent_end` 只在嵌入式 run 正式结束时触发（gateway stop 或 /new），不在每轮对话结束后触发。导致在持续对话中消息永远存不进去。
+- **修复**：在 `before_prompt_build` 钩子中也调用 `store()`（在 recall 之后）。`before_prompt_build` 在每轮 LLM 调用前触发，此时 messages[] 已包含上一轮的完整 user+agent 交换，是存储的完美时机。
+- **影响**：store() 每轮被调用一次，hash 去重确保不会重复写入。存储最多延迟 1 轮。
+- **副作用**：内存中 hash set 会随对话历史累积（可忽略，对话长度通常 <1000 条）
+
 ## [2.7.3] - 2026-03-25
 
 ### Bug Fixes（单元测试 + 集成测试发现问题并修复）
