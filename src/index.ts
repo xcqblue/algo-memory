@@ -148,7 +148,7 @@ class MemoryPlugin {
       if (fs.existsSync(pidPath)) {
         const oldPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
         try { process.kill(oldPid, 0); } catch (_) { return; }
-        this.log.warn(`[algo-memory] 检测到另一个实例正在运行 (PID ${oldPid})`);
+        this.log.info(`[algo-memory] 检测到另一个实例正在运行 (PID ${oldPid})，即将重启`);
       }
       fs.writeFileSync(pidPath, String(process.pid));
     } catch (_) { /* non-critical */ }
