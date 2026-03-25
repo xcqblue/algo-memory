@@ -179,7 +179,7 @@ gateway_start
     ▼
 registerHook()
     │
-    ├─ before_prompt_build ──► recall() ──► prependSystemContext()
+    ├─ before_prompt_build ──► recall() ──► return { prependSystemContext }
     │
     ├─ agent_end ──► store() ──► scheduleBatchWrite()
     │

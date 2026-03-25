@@ -2,7 +2,7 @@
   "id": "algo-memory",
   "name": "algo-memory",
   "description": "Structured SQLite-based memory for OpenClaw — tier scoring (core/working/peripheral), FTS5 full-text search, Weibull decay, session continuity, compaction reinforcement. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "installDependencies": true,
@@ -283,6 +283,23 @@
           "skipCommands": {
             "type": "boolean",
             "default": true
+          },
+          "skipPatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "^Conversation info",
+              "^\\`\\`\\`json",
+              "^\\`\\`\\`json\\{",
+              "^{.*\"message_id\"",
+              "^{.*\"sender_id\""
+            ]
+          },
+          "skipSystemSource": {
+            "type": "boolean",
+            "default": true
           }
         }
       },
@@ -336,6 +353,31 @@
                 "default": 0.75
               }
             }
+          }
+        }
+      },
+      "compression": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxLength": {
+            "type": "integer",
+            "default": 200
+          },
+          "extractKeywords": {
+            "type": "boolean",
+            "default": true
+          },
+          "minLengthForCompression": {
+            "type": "integer",
+            "default": 300
+          },
+          "skipMetadataCompression": {
+            "type": "boolean",
+            "default": true
           }
         }
       }
@@ -578,6 +620,7 @@
     "hardMinScore.threshold": {
       "label": "最低分阈值"
     },
+    "tier": {
       "label": "分层管理",
       "description": "核心/工作/外围记忆分层"
     },
