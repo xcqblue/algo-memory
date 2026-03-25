@@ -12,7 +12,7 @@ import LRUCache from 'lru-cache';
 import { Type } from '@sinclair/typebox';
 import { initSchema } from './db/schema.js';
 import { queryAll, queryOne, run, runOrThrow } from './db/queries.js';
-import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers, getBufferStats } from './engine/store.js';
+import { store as doStore, normalizeForStorage, safeContent, flushAllBuffers, getBufferStats, setClosing } from './engine/store.js';
 
 import { retrieve } from './engine/retrieve.js';
 import { recall as doRecall } from './engine/recall.js';
@@ -981,7 +981,9 @@ confidence 是 0-1 的置信度。
     this.cache.clear();
     if (this.db) {
       try {
-        // Flush all buffers — errors are logged but do not prevent DB close
+        // 1. Mark closing — prevents any new async store() from scheduling writes into closed DB
+        setClosing();
+        // 2. Flush all buffers synchronously — drain anything still pending
         flushAllBuffers(this._db(), this.config, this.log);
       } catch (err: any) {
         this.log.error('[algo-memory] close() flush 失败:', err?.message ?? err);
@@ -1090,9 +1092,9 @@ export default {
 
     // === Compaction lifecycle (March 5 2026: before_compaction / after_compaction hooks) ===
     // OpenClaw calls these during context compression cycles.
-    // before_compaction: has event.sessionFile (JSONL transcript) and event.messages —
-    //                   capture memories BEFORE compaction truncates them.
-    // after_compaction:  has event.compactedCount, event.sessionFile — reinforce.
+    // before_compaction: event.messages is pre-populated with the session history to be compacted.
+    //                    Use it directly — no need to read from disk (fs.readFileSync is sync-blocking!).
+    // after_compaction:  event.compactedCount — reinforce memories cited during compaction.
     //
     // NOTE: This hook runs IN PARALLEL with the compaction LLM call.
     // All operations are fire-and-forget (no await) so they do NOT block compaction.
@@ -1100,23 +1102,11 @@ export default {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
       if (!plugin.isActive() || !config.autoCapture) return;
 
-      // Read session transcript from disk without blocking
-      const readSessionFile = (filePath: string): any[] => {
-        try {
-          const content = fs.readFileSync(filePath, 'utf-8');
-          return content.trim().split('\n')
-            .filter(Boolean)
-            .map((line: string) => { try { return JSON.parse(line); } catch { return null; } })
-            .filter(Boolean);
-        } catch {
-          return [];
-        }
-      };
-
-      // 1. Fire-and-forget: read session file + store to DB
-      const sessionMessages = (event.sessionFile && typeof event.sessionFile === 'string')
-        ? readSessionFile(event.sessionFile)
-        : [];
+      // event.messages is provided directly by OpenClaw — use it instead of re-reading disk.
+      // This avoids a synchronous fs.readFileSync which would block the gateway event loop.
+      // event.sessionFile is available for plugins that need async disk access; algo-memory
+      // does NOT need it since messages are already in memory.
+      const sessionMessages: any[] = Array.isArray(event.messages) ? event.messages : [];
 
       if (sessionMessages.length > 0) {
         // 先立即强制 flush 当前 buffer，再异步 store（避免 compaction 开始前 buffer 未 flush 丢失）
@@ -1168,17 +1158,34 @@ export default {
           // When algo_memory_search returns results, immediately reinforce cited memories.
           // This is better than waiting for agent_end — cited_count is updated in real-time.
           if (event.toolName === 'algo_memory_search' && event.result) {
-            const resultStr = typeof event.result === 'string'
-              ? event.result
-              : JSON.stringify(event.result);
-
-            // Extract memory IDs from search results (format: [{id, content, ...}])
-            // The tool result text looks like: "[记忆] content..." or structured JSON
-            const memoryIdPattern = /"id"\s*:\s*"([^"]+)"/g;
+            // Extract memory IDs from search results safely.
+            // Try structured JSON first (most reliable), fall back to text extraction.
             const citedIds: string[] = [];
-            let match;
-            while ((match = memoryIdPattern.exec(resultStr)) !== null) {
-              citedIds.push(match[1]);
+            try {
+              // event.result may be a string or already a parsed object
+              const raw = typeof event.result === 'string'
+                ? JSON.parse(event.result)  // try parse first
+                : event.result;
+
+              // Handle { memories: [{id, ...}, ...] } or [{id, ...}, ...] formats
+              const items = Array.isArray(raw)
+                ? raw
+                : (raw?.memories && Array.isArray(raw.memories)) ? raw.memories : [];
+
+              for (const item of items) {
+                if (item?.id && typeof item.id === 'string' && item.id.startsWith('mem_')) {
+                  citedIds.push(item.id);
+                }
+              }
+            } catch {
+              // Fallback: extract from plain text / malformed JSON strings
+              const resultStr = typeof event.result === 'string' ? event.result : '';
+              const memoryIdPattern = /"id"\s*:\s*"([^"]+)"/g;
+              let match;
+              while ((match = memoryIdPattern.exec(resultStr)) !== null) {
+                const id = match[1];
+                if (id.startsWith('mem_') && !citedIds.includes(id)) citedIds.push(id);
+              }
             }
 
             if (citedIds.length > 0) {

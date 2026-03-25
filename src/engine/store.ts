@@ -37,6 +37,11 @@ interface MemoryBuffer {
 
 const memoryBuffers: Map<string, MemoryBuffer> = new Map();
 
+// Gateway stop guard: once true, no new batch writes can be scheduled.
+// Prevents race where async store() calls that start after close() is initiated
+// try to write into a closed DB.
+let closed = false;
+
 // 用户活动跟踪（用于idle检测）
 const userActivity: Map<string, number> = new Map();
 
@@ -406,6 +411,9 @@ function recordTierChange(db: DbLike, memoryId: string, oldTier: string, newTier
  * 计划批量写入（延迟执行）
  */
 function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: any): void {
+  // Bounce if gateway is closing — prevents async store() from writing into a closed DB
+  if (closed) return;
+
   const buffer = getBuffer(AgentId, config);
 
   // 如果正在 flush 或已有定时器，不重复创建
@@ -425,6 +433,15 @@ function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: an
 /**
  * 强制立即写入所有待处理的记忆
  */
+/**
+ * Mark the store as closing — no new batch writes can be scheduled after this call.
+ * Call this BEFORE flushAllBuffers() when shutting down so that in-flight async
+ * store() calls that race with close() will bail out safely.
+ */
+export function setClosing(): void {
+  closed = true;
+}
+
 export function flushAllBuffers(db: DbLike, config: Config, log: any): number {
   let total = 0;
   for (const AgentId of memoryBuffers.keys()) {
