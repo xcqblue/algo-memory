@@ -2,6 +2,44 @@
 
 All notable changes to algo-memory are documented here.
 
+## [3.0.0] - 2026-03-25
+
+### 🔴 高优先级修复
+
+#### 多路召回：原始 query 先生成多路，再分别 Trie 展开
+- **问题**：`generateMultiPathQueries()` 对已展开的 FTS5 query（包含 OR）做前缀截取，语义不准确
+- **优化**：在原始 query 上先生成多路，再分别调用 `buildTrieFts5Query()` 展开
+- **效果**：不同路径保留各自独立展开的同义词集合（如"北京出差"展开"帝都"+"商务出行"）
+
+#### recall 和 search 统一走 `retrieve()` 检索引擎
+- **问题**：`recall.ts` 中的 MMR 是自己实现的全局 MMR，没有 tier 分组；`searchMemories` 走另一套 `ftsQuery` + `likeFallback`，没有 MMR
+- **优化**：
+  - `recall.ts` 替换为调用 `retrieve.ts` 的 `tierGroupedMMR()` 纯函数
+  - `searchMemories` 重构为调用统一 `retrieve()` 引擎
+- **效果**：recall 和 search 的去重逻辑完全一致，core 记忆保留率提升
+
+### 🟡 中优先级优化
+
+#### LLM 队列动态批次
+- **问题**：固定 200ms 窗口 + 每次 10 条，队列积压时处理慢，空闲时等待浪费
+- **优化**：队列深度决定批次大小和处理延迟
+  - 队列 ≥ 20：每次 20 条，50ms 快速消耗
+  - 队列 5~20：每次 10 条，200ms 标准等待
+  - 队列 < 5：最多 10 条，500ms 等待攒批
+- **效果**：低延迟（队列短时）+ 高吞吐（队列长时）+ 批量效率（队列满时）
+
+#### cleanupEmptyBuffers 30 分钟强制清理
+- **问题**：buffer 只在 `timer === null` 且 `idle > 1h` 时清理，长期会话的 buffer 可能堆积
+- **优化**：增加 `idle > 30 分钟` 强制清理条件（timer 最大等待 10s，30 分钟无 flush 说明无新消息）
+- **效果**：防止 `memoryBuffers` Map 无限增长
+
+#### hash 预热改为"今日+最近1000条"并集
+- **问题**：固定加载最近 2000 条，今天只有少量记忆时浪费；旧记忆加载了但今天没机会重复
+- **优化**：取今日 00:00 以来 + 最近 24 小时的最大值，LIMIT 1000
+- **效果**：覆盖今日活跃会话的同时兜底最近历史，启动扫描量减少
+
+---
+
 ## [2.9.0] - 2026-03-25
 
 ### 性能优化（写入）

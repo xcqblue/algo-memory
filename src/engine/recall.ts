@@ -1,18 +1,21 @@
 /**
- * algo-memory v2.3.0 - Recall Engine
+ * algo-memory v3.0.0 - Recall Engine
+ *
+ * v3.0.0 关键优化：
+ * - MMR 替换为 retrieve.ts 的 tierGroupedMMR()，统一 recall 和 search 的去重逻辑
  */
 
 import type { Config, Memory } from '../types.js';
 import {
   shouldRetrieve,
-  jaccardSimilarity,
   weibullDecay,
   reinforcementFactor,
-  mmrDeduplicate,
   lengthNorm
 } from '../utils.js';
 import { queryAll, run } from '../db/queries.js';
 import type { DbLike } from '../db/queries.js';
+// v3.0.0: 统一使用 retrieve.ts 的 tierGroupedMMR
+import { tierGroupedMMR } from './retrieve.js';
 
 export interface RecallDeps {
   db: DbLike;
@@ -125,9 +128,11 @@ export async function recall(
     }).sort((a, b) => (b._score || 0) - (a._score || 0));
   }
 
-  // Build the final returned set: MMR → hardMinScore → truncate
+  // v3.0.0: Tier 分组 MMR（统一使用 retrieve.ts 的 tierGroupedMMR）
+  // 问题：全局 MMR 可能让 core 记忆被 peripheral 挤出
+  // 解决：按 tier 分组，每组内独立 MMR 去重，再合并
   if (config.mmr.enabled) {
-    memories = mmrDeduplicate(memories, config.mmr);
+    memories = tierGroupedMMR(memories, config);
   }
 
   // HardMinScore filter BEFORE cited_count update

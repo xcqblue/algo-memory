@@ -1,8 +1,15 @@
 /**
- * algo-memory v2.9.0
+ * algo-memory v3.0.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
+ *
+ * v3.0.0 优化:
+ * - 多路召回优化：先在原始 query 生成多路，再分别 Trie 展开
+ * - recall 和 search 统一走 retrieve() 检索引擎（含 TierGroupedMMR）
+ * - LLM 队列动态批次（队列深度决定批次大小和处理延迟）
+ * - cleanupEmptyBuffers 30 分钟强制清理（防止 buffer 堆积）
+ * - hash 预热改为"今日+最近1000条"并集
  *
  * v2.9.0 优化:
  * - Tier 分组内 MMR 去重（core 记忆不被 peripheral 挤出）
@@ -117,7 +124,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
-  version = '2.9.0';
+  version = '3.0.0';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -143,17 +150,34 @@ class MemoryPlugin {
   private CONTENT_HASH_WARMUP_LIMIT = 2000;
 
   /**
-   * v2.9.0: 预热 content_hash 集合
-   * 启动时从 DB 加载最近 N 条记忆的 hash 到内存
-   * store() 中的精确去重先查内存（O(1)），未命中再查 DB
+   * v3.0.0: 预热 content_hash 集合（今日 + 最近 1000 条并集）
+   *
+   * 策略：
+   * - 取今日 00:00 以来所有记忆的 hash（覆盖今日活跃会话的重复去重）
+   * - 补充最近 1000 条（兜底：覆盖历史对话中可能被重复提及的旧记忆）
+   * - 两者取并集，LIMIT 1000 防止极端情况下加载过多
+   *
+   * 理由：
+   * - 大部分对话发生在今天，今天的记忆最可能被重复（同一 session 中反复聊类似话题）
+   * - 旧记忆的重复存储有 DB 层 idx_content_hash 唯一索引兜底
+   * - 启动时 DB 扫描量从固定 2000 条 → 动态（通常几百条），减少启动开销
    */
   private warmupContentHashes(): void {
     if (!this.db) return;
     try {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayTs = todayStart.getTime();
+
       const rows = queryAll(this._db(),
-        `SELECT content_hash FROM memories WHERE content_hash IS NOT NULL ORDER BY created_at DESC LIMIT ?`,
-        [this.CONTENT_HASH_WARMUP_LIMIT]
+        `SELECT content_hash FROM memories
+         WHERE content_hash IS NOT NULL
+           AND (created_at >= ? OR created_at >= (SELECT MAX(created_at) - 86400000 FROM memories))
+         ORDER BY created_at DESC
+         LIMIT ?`,
+        [todayTs, this.CONTENT_HASH_WARMUP_LIMIT]
       ) as { content_hash: string }[];
+
       this.contentHashSet = new Set(rows.map(r => r.content_hash).filter(Boolean));
       this.log.info(`[algo-memory] content_hash 预热完成: ${this.contentHashSet.size} 条记忆 hash 已加载到内存`);
     } catch (err) {
@@ -377,9 +401,20 @@ class MemoryPlugin {
     if (!cleanQuery) return [];
 
     const visibleAgentIds = this.getVisibleAgentIds(AgentId);
-    const safeLimit = Math.min(this.config.maxResults * 3, 100);
-    let results = this.ftsQuery(AgentId, cleanQuery, visibleAgentIds);
-    if (results.length === 0) results = this.likeFallback(AgentId, cleanQuery, visibleAgentIds);
+
+    // v3.0.0: 统一走 retrieve() 检索引擎（TierGroupedMMR + 评分 + 过滤）
+    // 原有 ftsQuery + likeFallback 逻辑与 retrieve() 重复，且缺少 MMR 去重
+    const results = retrieve({
+      db: this._db(),
+      config: this.config,
+      log: this.log,
+      agentId: AgentId,
+      visibleAgentIds,
+      query: cleanQuery,
+      mmrEnabled: true,  // search 工具调用也启用 MMR（与 recall 行为一致）
+      limit: Math.min(this.config.maxResults * 3, 100),
+      ftsEnabled: this.ftsAvailable,
+    });
 
     // Update cited_count for searched memories (active use signals relevance)
     if (results.length > 0) {

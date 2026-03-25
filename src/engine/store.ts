@@ -99,7 +99,7 @@ interface LlmRequest {
   content: string;
 }
 
-// ============= LLM 队列单例（优化2）=============
+// ============= LLM 队列单例（v3.0.0 动态批次优化）=============
 interface LlmQueueSingleton {
   queue: LlmQueueItem[];
   processing: boolean;
@@ -115,6 +115,13 @@ const llmSingleton: LlmQueueSingleton = {
   batchWindowMs: 200,
   llmClient: null,
 };
+
+// v3.0.0 动态批次策略常量
+const TARGET_BATCH_SIZE = 10;     // 标准批次大小
+const MAX_BATCH_SIZE = 20;         // 积压时最大批次
+const MIN_BATCH_WAIT_MS = 200;    // 正常等待
+const MAX_BATCH_WAIT_MS = 500;    // 队列快空时多等等
+const HIGH_THROUGHPUT_DELAY_MS = 50; // 积压时快速消耗延迟
 
 // LLM 结果缓存（带LRU优化）
 const llmCache = new Map<string, { result: any; ts: number; accessCount: number }>();
@@ -253,8 +260,14 @@ function addToLlmQueue(item: LlmRequest): Promise<any> {
 
     llmSingleton.queue.push({ ...item, addedAt: Date.now(), resolve, reject });
 
+    // v3.0.0 动态等待策略：队列深度决定下次处理延迟
     if (!llmSingleton.processTimer) {
-      llmSingleton.processTimer = setTimeout(() => processLlmQueue(), llmSingleton.batchWindowMs);
+      const delay = llmSingleton.queue.length >= 20
+        ? HIGH_THROUGHPUT_DELAY_MS      // 积压多 → 快速消耗
+        : llmSingleton.queue.length >= 5
+        ? MIN_BATCH_WAIT_MS             // 正常积压 → 标准等待
+        : MAX_BATCH_WAIT_MS;            // 队列快空 → 多等等看能不能再攒几条
+      llmSingleton.processTimer = setTimeout(() => processLlmQueue(), delay);
     }
   });
 }
@@ -264,7 +277,12 @@ async function processLlmQueue(): Promise<void> {
   llmSingleton.processing = true;
   llmSingleton.processTimer = null;
 
-  const batch = llmSingleton.queue.splice(0, 10);
+  // v3.0.0 动态批次大小：队列长度决定每次处理量
+  const batch = llmSingleton.queue.splice(0,
+    llmSingleton.queue.length >= 20
+      ? Math.min(llmSingleton.queue.length, MAX_BATCH_SIZE)
+      : Math.min(llmSingleton.queue.length, TARGET_BATCH_SIZE)
+  );
 
   for (const item of batch) {
     const cacheKey = getLlmCacheKey(item.type, item.content);
@@ -319,8 +337,14 @@ async function processLlmQueue(): Promise<void> {
 
   llmSingleton.processing = false;
 
+  // v3.0.0: 继续调度时使用动态延迟
   if (llmSingleton.queue.length > 0) {
-    llmSingleton.processTimer = setTimeout(() => processLlmQueue(), 100);
+    const nextDelay = llmSingleton.queue.length >= 20
+      ? HIGH_THROUGHPUT_DELAY_MS
+      : llmSingleton.queue.length >= 5
+      ? MIN_BATCH_WAIT_MS
+      : MAX_BATCH_WAIT_MS;
+    llmSingleton.processTimer = setTimeout(() => processLlmQueue(), nextDelay);
   }
 }
 
@@ -458,40 +482,55 @@ export function notifyUserActivity(AgentId: string): void {
   userActivity.set(AgentId, Date.now());
 }
 
-// ============= 内存缓冲区清理（优化2）=============
+// ============= 内存缓冲区清理（v3.0.0 优化）=============
 const BUFFER_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 每小时清理一次
+const BUFFER_IDLE_FORCE_CLEANUP_MS = 30 * 60 * 1000; // v3.0.0 新增：30 分钟强制清理
 let bufferCleanupTimer: NodeJS.Timeout | null = null;
 let isCleanupRunning = false;
 
 /**
- * 清理无用的内存缓冲区
- * 删除空的、没有活跃定时器的缓冲区，防止内存无限增长
+ * 清理无用的内存缓冲区（v3.0.0 优化）
+ *
+ * 清理条件：
+ * 1. 缓冲区为空 + 没有活跃定时器 + idle > 1小时（原有条件）
+ * 2. 缓冲区为空 + 上次 flush 后 idle > 30 分钟（v3.0.0 新增）
+ *    → timer 最多等待 maxBatchSize * bufferMs = 20 * 500ms = 10s
+ *    → 如果 30 分钟都没有 flush，说明已经没有新消息，timer 已清除，强制清理
  */
 export function cleanupEmptyBuffers(log: any): number {
   if (isCleanupRunning) return 0;
   isCleanupRunning = true;
-  
+
   let cleanedCount = 0;
   const now = Date.now();
-  
+
   for (const [AgentId, buffer] of memoryBuffers.entries()) {
-    // 只有当缓冲区为空且没有活跃定时器时才清理
-    if (buffer.memories.length === 0 && buffer.timer === null) {
-      // 检查是否长时间未使用（超过1小时）
-      const idleTime = now - buffer.lastFlush;
-      if (idleTime > BUFFER_CLEANUP_INTERVAL_MS) {
+    if (buffer.memories.length === 0) {
+      // 缓冲区为空
+      if (buffer.timer === null) {
+        // 没有活跃定时器 → 直接清理（原有条件）
         memoryBuffers.delete(AgentId);
         cleanedCount++;
+      } else {
+        // 有定时器但缓冲区为空 → 检查 idle 时间
+        // 定时器最多等待 10s，30 分钟没有任何 flush 说明已经没有新消息了
+        const idleTime = now - buffer.lastFlush;
+        if (idleTime > BUFFER_IDLE_FORCE_CLEANUP_MS) {
+          clearTimeout(buffer.timer);
+          buffer.timer = null;
+          memoryBuffers.delete(AgentId);
+          cleanedCount++;
+        }
       }
     }
   }
-  
+
   isCleanupRunning = false;
-  
+
   if (cleanedCount > 0) {
     log.info(`[algo-memory] 清理了 ${cleanedCount} 个无用内存缓冲区`);
   }
-  
+
   return cleanedCount;
 }
 

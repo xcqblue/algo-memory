@@ -65,22 +65,25 @@ export function retrieve(options: RetrievalOptions): Memory[] {
 
   // ---- FTS5 path with Trie-optimized multi-path expansion ----
   if (ftsEnabled) {
-    const ftsQuery = query.trim().replace(/'/g, "''");
-    if (ftsQuery) {
+    const rawQuery = query.trim().replace(/'/g, "''");
+    if (rawQuery) {
       try {
-        // v2.9.0: 使用 Trie 优化的同义词展开（FTS5 query expansion）
-        const expandedQuery = buildTrieFts5Query(ftsQuery);
+        // v3.0.0: 先在原始 query 上生成多路，再分别 Trie 展开
+        // 理由：不同路径展开后的 OR term 可能不同（"北京"展开出"帝都"，
+        // "出差"展开出"商务出行"），分别展开能保留每个路径的语义特性
+        const multiRawQueries = generateMultiPathQueries(rawQuery, 2);
 
-        // v2.9.0: 多路召回缩减为 2 路（原始 + 前缀 3-token）
-        const multiQueries = generateMultiPathQueries(expandedQuery, 2);
-
-        for (const q of multiQueries) {
-          if (!q.trim()) continue;
+        for (const rawQ of multiRawQueries) {
+          if (!rawQ.trim()) continue;
           try {
+            // 分别对每个路径做 Trie 展开
+            const expanded = buildTrieFts5Query(rawQ);
+            if (!expanded.trim()) continue;
+
             const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? ORDER BY bm25(fts) DESC, m.importance DESC LIMIT ?`;
-            const params = visibleAgentIds !== null ? [...visibleAgentIds, q, safeLimit] : [q, safeLimit];
+            const params = visibleAgentIds !== null ? [...visibleAgentIds, expanded, safeLimit] : [expanded, safeLimit];
             const rows = queryAll(db, baseSql, params) as unknown as Memory[];
-            // 多路合并：按 id 去重，保留最高分
+            // 多路合并：按 id 去重，保留首次出现（由 BM25 排序保证优先级）
             for (const m of rows) {
               if (!seenIds.has(m.id)) {
                 seenIds.add(m.id);
@@ -88,11 +91,11 @@ export function retrieve(options: RetrievalOptions): Memory[] {
               }
             }
           } catch (err) {
-            log.warn(`[algo-memory] FTS5 query "${q}" failed: ${err}`);
+            log.warn(`[algo-memory] FTS5 path "${rawQ}" failed: ${err}`);
           }
         }
       } catch (err) {
-        log.warn(`[algo-memory] Trie FTS5 expansion failed: ${err}`);
+        log.warn(`[algo-memory] Trie multi-path expansion failed: ${err}`);
       }
     }
   }
@@ -151,7 +154,8 @@ export function retrieve(options: RetrievalOptions): Memory[] {
 }
 
 /**
- * v2.9.0 新增：按 tier 分组内独立 MMR 去重
+ * v2.9.0 新增，v3.0.0 导出供 recall.ts 统一使用
+ * 按 tier 分组内独立 MMR 去重
  *
  * 策略：
  * 1. 将候选按 tier 分组（core / working / peripheral）
@@ -160,7 +164,7 @@ export function retrieve(options: RetrievalOptions): Memory[] {
  *
  * 优势：core 记忆不会因为和 peripheral "内容相似" 而被错误淘汰
  */
-function tierGroupedMMR(
+export function tierGroupedMMR(
   items: Memory[],
   config: Config
 ): Memory[] {
