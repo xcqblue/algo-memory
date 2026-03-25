@@ -2,6 +2,16 @@
 
 All notable changes to algo-memory are documented here.
 
+## [3.3.1] - 2026-03-26
+
+### Code Cleanup
+
+#### 移除无效的 ContextEngine 注册（死代码）
+- **问题**：`registerContextEngine('algo-memory', ...)` 在 OpenClaw 中注册了 ContextEngine 接口，但该接口需要用户在 `openclaw.json` 中显式配置 `plugins.slots.contextEngine: "algo-memory"` 才会生效。默认配置下该 slot 为 `"legacy"`，algo-memory 的 ContextEngine 实现从未被调用，约 700 行代码为死代码
+- **修复**：删除 `registerContextEngine` 调用及相关 import，删除 `src/engine/context-engine.ts` 文件
+- **保留**：Hook 系统（before_prompt_build / before_compaction / after_compaction / before_reset / session_end 等）和 Gateway RPC（stats / search / list / health / embeddings / metrics）正常运作
+- **影响**：无功能损失，代码更精简；如需启用 ContextEngine，需用户手动配置 `plugins.slots.contextEngine: "algo-memory"` 并自行承担维护责任
+
 ## [3.2.1] - 2026-03-25
 
 ### Bug Fix

@@ -1,19 +1,24 @@
 /**
- * algo-memory v3.3.0
+ * algo-memory v3.3.1
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
  *
- * v3.2.0 OpenClaw ContextEngine 三大优化:
- * - bootstrap(): 从 workspace Markdown 扫描并导入历史记忆到 SQLite
- * - maintain(): 返回真实 cleanup metrics（deleted / bytesFreed），供 OpenClaw 决策
- * - assemble(): 语言感知 token 估算（中英文分开，中文 1:1，英文 ~1.3:1）
+ * v3.3.1 OpenClaw Hooks 接入（移除无效的 ContextEngine 注册）：
+ * - 移除 registerContextEngine（slot 未启用，死代码）
+ * - 保留 before_prompt_build / before_compaction / after_compaction 等有效 hooks
+ * - 保留 Gateway RPC（stats / search / list / health / embeddings / metrics）
  *
- * v3.1.0 OpenClaw 兼容性优化:
+ * v3.3.0 OpenClaw Hooks 增强:
+ * - before_compaction: peripheral→working/core 升级强化
+ * - after_compaction: 旧 peripheral 强化/降级/清理
+ * - before_reset: flushAllBuffers 抢救未持久化记忆
+ *
+ * v3.2.0 OpenClaw 兼容性优化:
  * - openClawMemoryMode 配置：auto / standalone / retrieval-only
  * - syncToWorkspace 配置：同步写入 workspace Markdown
  *
- * v3.0.0 优化:
+ * v3.1.0 核心优化:
  * - recall/search 统一走 retrieve() 检索引擎（含 TierGroupedMMR）
  * - LLM 队列动态批次、cleanupEmptyBuffers 30 分钟强制清理
  */
@@ -72,7 +77,6 @@ import {
   CACHE_TTL_MS,
   DEFAULT_CLEANUP_INTERVAL_MS
 } from './utils.js';
-import { AlgoMemoryContextEngine } from './engine/context-engine.js';
 
 // ============= Config merge helper =============
 // Uses explicit `!== undefined` so that `false`/`0` from userConfig are respected.
@@ -122,7 +126,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
-  version = '3.3.0';
+  version = '3.3.1';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -1199,16 +1203,10 @@ export default {
     //    - OpenClaw memory_search 工具: agent 可主动调用 → Markdown 搜索结果注入
     //    → 非直接冲突（工具调用是 agent 主动的），但存在双路注入风险
     //
-    // 3. ContextEngine 冲突：
-    //    - algo-memory 的 assemble() 与 OpenClaw built-in engine 同时存在
-    //    - 如果 plugins.slots.contextEngine 设为 algo-memory，OpenClaw built-in 会被停用
-    //    → 不是冲突，反而是优势（algo-memory 可接管 OpenClaw 的 context engine）
-    //
     // 兼容性模式策略：
     // - standalone: algo-memory 完全独立（v3.0.0 行为），忽略 OpenClaw built-in memory
     // - retrieval-only: 关闭 auto-capture hooks，存储交给 OpenClaw built-in memory，
-    //                  algo-memory 仅通过 ContextEngine 的 assemble() 提供 FTS5 检索增强
-    // - auto: 自动检测 OpenClaw built-in memory 状态，选择最优协作模式
+    //                  algo-memory 通过 before_prompt_build 提供 FTS5 检索增强（autoRecall=true 时）
 
     // 检测 OpenClaw built-in memory 是否激活
     const openClawMemoryEnabled = (() => {
@@ -1237,7 +1235,7 @@ export default {
       log.info(
         `[algo-memory] OpenClaw built-in memory 已启用（mode=${effectiveMode}）。` +
         `auto-capture hooks 已关闭（避免重复存储），` +
-        `存储由 OpenClaw built-in memory 负责，algo-memory 通过 ContextEngine assemble() 提供 FTS5 检索增强。` +
+        `存储由 OpenClaw built-in memory 负责，algo-memory 通过 before_prompt_build 提供 FTS5 检索增强。` +
         `如需 algo-memory 完全独立，请设置 openClawMemoryMode: "standalone"。`
       );
     } else {
@@ -1255,12 +1253,6 @@ export default {
     plugin.workspaceDir = (api as any).workspaceDir
       || (api.config as any)?.agents?.defaults?.workspace
       || path.join(process.env.HOME || '/home/x', '.openclaw', 'workspace');
-
-    // Register as a ContextEngine — enables deep OpenClaw integration
-    // algo-memory acts as the context management engine for the agent
-    api.registerContextEngine('algo-memory', () => {
-      return new AlgoMemoryContextEngine(plugin);
-    });
 
     // Gateway RPC methods — allows CLI/HTTP access without LLM.
     // Signature: (opts: GatewayRequestHandlerOptions) => void
@@ -1434,10 +1426,8 @@ export default {
 
     // === auto-recall hooks ===
     // v3.1.0: autoRecall 在 retrieval-only 模式下依然启用（检索增强不与任何系统冲突）
-    // 但在 retrieval-only 模式下，召回完全由 ContextEngine 的 assemble() 接管，
-    // before_prompt_build 的 prependSystemContext 注入属于"双路注入"，可能导致重复。
-    // 因此 retrieval-only 模式下关闭 before_prompt_build 的 prependSystemContext 注入，
-    // 由 ContextEngine assemble() 作为唯一的召回注入通道。
+    // standalone 模式下开启 before_prompt_build 注入（recallViaHook = autoRecall && standalone）
+    // retrieval-only 模式下关闭 before_prompt_build 注入（存储由 OpenClaw 负责，检索由 agent 主动调用工具）
     const recallViaHook = config.autoRecall && effectiveMode === 'standalone';
 
     if (recallViaHook) {
@@ -1486,7 +1476,7 @@ export default {
         }
       }, { priority: 10 });
     } else if (effectiveMode === 'retrieval-only') {
-      log.info(`[algo-memory] recall hook 注入已禁用（retrieval-only 模式），召回完全由 ContextEngine assemble() 接管`);
+      log.info(`[algo-memory] recall hook 注入已禁用（retrieval-only 模式），请使用 algo_memory_search 工具主动检索记忆`);
     }
 
     // === Compaction lifecycle ===

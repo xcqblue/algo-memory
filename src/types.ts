@@ -20,8 +20,7 @@ export interface Config {
    * - `standalone`：algo-memory 完全独立运行，不考虑 OpenClaw built-in memory
    *   （等于 v3.0.0 及之前的行为）
    * - `retrieval-only`：关闭 auto-capture hooks（避免与 memoryFlush 重复存储），
-   *   仅通过 ContextEngine 的 assemble() 提供 FTS5 检索增强，
-   *   存储完全交给 OpenClaw built-in memory
+   *   存储完全交给 OpenClaw built-in memory，检索由 agent 主动调用 algo_memory_search 工具
    *
    * 模式切换时的影响：
    * - `standalone` → `retrieval-only`：关闭 before_prompt_build + agent_end 的 store hooks
