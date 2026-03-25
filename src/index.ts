@@ -93,6 +93,8 @@ class MemoryPlugin {
   private log: any;
   configHash: string = '';
   private ftsAvailable: boolean = false;
+  /** true = OpenClaw memoryFlush is active; algo-memory will skip store() in before_compaction */
+  memoryFlushActive: boolean = false;
   /** per-agent 会话去重追踪（避免跨 Agent 误拦截） */
   private lastRecallQuery: Map<string, string> = new Map();
   private lastRecallTime: Map<string, number> = new Map();
@@ -1011,8 +1013,29 @@ export default {
 
     const plugin = new MemoryPlugin(config, log);
 
+    // === Conflict detection: algo-memory vs OpenClaw built-in memoryFlush ===
+    // When algo-memory's autoCapture is enabled AND OpenClaw's memoryFlush is also enabled,
+    // both systems will store memories during compaction, causing duplicate entries.
+    //
+    // Self-abstention approach: detect memoryFlush at startup and let algo-memory
+    // skip its compaction-time store() when memoryFlush is active.
+    // OpenClaw's memoryFlush writes Markdown; algo-memory relies on its real-time
+    // hooks (before_prompt_build / agent_end) for SQLite storage — no duplication.
+    const memoryFlushActive = config.autoCapture && api.config?.agents?.defaults?.compaction?.memoryFlush?.enabled !== false;
+    if (memoryFlushActive) {
+      log.warn(
+        '[algo-memory] 检测到 memoryFlush 已启用。' +
+        'algo-memory 将在 compaction 时跳过 store()（避免重复存储），' +
+        '由 memoryFlush 写入 Markdown。实时 hooks 继续写入 SQLite。' +
+        '如需 algo-memory 完全接管，请设置 "agents.defaults.compaction.memoryFlush.enabled": false'
+      );
+    }
+
     await plugin.init(api.getStateDir?.() || api.stateDir ||
       path.join(process.env.HOME || '/home/x', '.openclaw', 'state', 'algo-memory'));
+
+    // Pass memoryFlush state to the plugin so before_compaction can reference it
+    plugin.memoryFlushActive = memoryFlushActive;
 
     // === Hooks ===
     // IMPORTANT: All OpenClaw hooks pass (event, ctx) — ctx.agentId is the source of truth.
@@ -1098,6 +1121,12 @@ export default {
     //
     // NOTE: This hook runs IN PARALLEL with the compaction LLM call.
     // All operations are fire-and-forget (no await) so they do NOT block compaction.
+    //
+    // Self-abstention (memoryFlushActive):
+    // When OpenClaw's memoryFlush is active, it writes Markdown during compaction.
+    // algo-memory's before_prompt_build/agent_end hooks are already storing to SQLite
+    // in real time, so skipping store() here avoids duplicate storage.
+    // promotePeripheralOnCompaction and reinforceOnCompaction still run — they only touch SQLite.
     api.on('before_compaction', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
       if (!plugin.isActive() || !config.autoCapture) return;
@@ -1109,28 +1138,31 @@ export default {
       const sessionMessages: any[] = Array.isArray(event.messages) ? event.messages : [];
 
       if (sessionMessages.length > 0) {
-        // 先立即强制 flush 当前 buffer，再异步 store（避免 compaction 开始前 buffer 未 flush 丢失）
-        const { flushAllBuffers } = await import('./engine/store.js');
-        flushAllBuffers(plugin.getDb(), config, log);
+        // Skip store() when memoryFlush is active — it already writes Markdown during compaction.
+        // algo-memory's real-time hooks (before_prompt_build / agent_end) keep storing to SQLite.
+        // Only flush the pending buffer to ensure no data loss.
+        if (!plugin.memoryFlushActive) {
+          const { flushAllBuffers } = await import('./engine/store.js');
+          flushAllBuffers(plugin.getDb(), config, log);
 
-        plugin.store(agentId, sessionMessages).catch((err: any) => {
-          log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
-        });
+          plugin.store(agentId, sessionMessages).catch((err: any) => {
+            log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
+          });
+
+          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息待 capture（异步，不阻塞 compaction）`);
+        } else {
+          log.info(`[algo-memory] before_compaction: memoryFlush 已启用，跳过 store()（避免重复存储），buffer 待下次 flush`);
+        }
       }
 
-      // 2. Fire-and-forget: DB-only peripheral promotion (no LLM, fast)
+      // These always run — they only affect SQLite tier management, no duplication risk.
       plugin.promotePeripheralOnCompaction(agentId).catch((err: any) => {
         log.error('[algo-memory] before_compaction promote 错误:', err?.message ?? err);
       });
 
-      // 3. Fire-and-forget: reinforcement (DB-only, fast)
       plugin.reinforceOnCompaction(agentId).catch((err: any) => {
         log.error('[algo-memory] before_compaction reinforce 错误:', err?.message ?? err);
       });
-
-      if (sessionMessages.length > 0) {
-        log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息待 capture（异步，不阻塞 compaction）`);
-      }
     });
 
     api.on('after_compaction', async (event: any, ctx: any) => {
