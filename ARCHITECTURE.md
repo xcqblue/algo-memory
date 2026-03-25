@@ -28,13 +28,13 @@ algo-memory 是一个基于 SQLite 的**拉取式记忆系统**。不依赖外�
 
 1. `agent_end` 触发，携带 `event.messages[]`
 2. 每条用户消息经过：
-   - 清洗：飞书数组格式 → 纯文本，去除元数据（`stripInboundMetadata` 剥离 `Conversation info` / `[message_id]` / `Sender` 三层元数据包裹）
+   - 清洗：飞书数组格式 → 纯文本，去除元数据（`extractMessageText()` 剥离 `Conversation info` / `[message_id]` / `Sender` 三层元数据包裹，**仅执行一次**，O1 优化）
    - **messagePriority 评分**：命中 `coreKeywords` 得正分；无命中但内容有实质意义（≥10 权重字符）也给 1 分保底，确保非"记住xxx"类消息也能进入下一关
    - 系统消息过滤：`isSystemMessage()` 拦截 Session Startup、系统指令等来源
    - 噪声过滤：问候语 / 纯 emoji / 短查询
-   - 哈希去重：`hashSet` 内存去重
-   - 批量 Jaccard：与同一批次候选对比
-   - 数据库 Jaccard：与最近 5 条 DB 记忆对比
+   - 哈希去重：`hashSet` 内存去重（O(1) 精确去重）
+   - 批量 Jaccard：与同一批次候选对比（O(n log n)，O2 优化：仅一次规范化）
+   - 数据库 Jaccard：与最近 5 条 DB 记忆对比（长度预过滤 + 元数据感知阈值）
 3. LLM 关键词提取（批次内 1 次调用）+ 可选 LLM 去重
 4. 计算 tier：`importance × (1 + log10(access_count + 1))`
 5. 进入 `MemoryBuffer`（500ms 防抖）

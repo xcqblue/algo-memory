@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v3.2.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
+**版本：** v3.2.1 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
 
 ---
 
@@ -57,11 +57,11 @@ algo-memory 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整的存储/�
 | `agent_end` | 每次对话结束 | 兜底存储（heartbeat/cron 时跳过，**retrieval-only 模式下跳过**）|
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 cited_count |
 | `tool_result_persist` | 工具结果写入 transcript 前 | 提取 memory ID，实时强化 cited_count |
-| `before_compaction` | compaction 开始前 | standalone 模式：store fire-and-forget；retrieval-only 模式：跳过（由 memoryFlush 负责）；两者均执行 tier 强化/清理 |
+| `before_compaction` | compaction 开始前 | standalone 模式：跳过 store（session_end 已 flush）；retrieval-only 模式：跳过（由 memoryFlush 负责）；两者均执行 tier 强化/清理（O5 优化）|
 | `after_compaction` | compaction 结束后 | no-op |
 | `session_start` | 会话开始 | gateway restart 后抢救 unflushed buffer；清除 recall 缓存 |
 | `session_end` | 会话结束 | 确保所有 buffer flush 到 DB（含 workspace sync） |
-| `before_reset` | `/new` 或 `/reset` 前 | 抢救 unflushed buffer，防止重置时消息丢失 |
+| `before_reset` | `/new` 或 `/reset` 前 | 抢救 unflushed buffer（O7 优化：不再清 recall 缓存，session_start 会独立清） |
 | `gateway_start` | Gateway 启动完成后 | DB 健康检查，确保 FTS 索引就绪；content_hash 预热到内存 |
 | `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
 | `subagent_spawning` | 子 Agent 启动前 | 日志记录 |

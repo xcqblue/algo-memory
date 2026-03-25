@@ -15,8 +15,6 @@ import {
   compressContent,
   extractContentSummary,
   extractMessageText,
-  normalizeText,
-  stripInboundMetadata,
   isMetadataLike,
   MAX_MESSAGE_LENGTH,
   MAX_SIMILAR_CHECK
@@ -594,10 +592,10 @@ type IdContentRow = { id: string; content: string };
 type TierRow = { id: string; tier: string; importance: number; access_count: number; created_at: number };
 
 // Normalize content before storing: strip @mentions, compress whitespace, remove markdown noise
+// Note: stripInboundMetadata is NOT called here — it is already done at the store() entry
+// point via extractMessageText(). Calling it twice was redundant.
 export function normalizeForStorage(content: string): string {
   let text = typeof content === 'string' ? content : String(content ?? '');
-  // Strip Conversation info metadata injected by OpenClaw
-  text = stripInboundMetadata(text);
   text = text
     // Strip @mentions
     .replace(/@[^\s]+/g, '')
@@ -715,7 +713,8 @@ export async function store(
 
     for (let i = 0; i < sortedForDedup.length; i++) {
       const current = sortedForDedup[i];
-      const currentSafe = safeContent(normalizeText(current.msg.content));
+      // O2 优化：normalizeText 已在外层处理过，直接用 safeContent 即可
+      const currentSafe = safeContent(current.msg.content);
       let skipForBatchDup = false;
 
       // 只和窗口内 [max(0, i-BATCH_DEDUP_WINDOW), i) 的已选项目比较
@@ -723,7 +722,8 @@ export async function store(
       for (let j = windowStart; j < i; j++) {
         const prev = scoredAndDeduped[j];
         if (!prev) continue;
-        const prevSafe = safeContent(normalizeText(prev.msg.content));
+        // O2 优化：normalizeText 已在外层处理过，直接用 safeContent 即可
+        const prevSafe = safeContent(prev.msg.content);
 
         // 长度差异过大 → Jaccard 上界 < minLenRatio，直接跳过比较
         const ratio = Math.min(currentSafe.length, prevSafe.length) /
@@ -743,11 +743,10 @@ export async function store(
     }
 
     for (const { msg } of scoredAndDeduped) {
-      // isSystemMessage 已在上方 filter 中处理，此处不再重复检查
-      const content = normalizeText(msg.content);
-      if (!content || isNoise(content, config.noiseFilter)) continue;
-
-      const safe = safeContent(content);
+      // O2 优化：normalizeText 已在外层 batch dedup 时处理过，此处直接用 safeContent
+      // safeContent 包含所有必要清理（@mention / markdown / 空格），无需重复 normalizeText
+      const safe = safeContent(msg.content);
+      if (!safe || isNoise(safe, config.noiseFilter)) continue;
 
       // ===== 来源标签过滤：系统/元数据来源直接跳过 =====
       // 来源标签过滤（msg.source === 'system'）在消息入口预先过滤

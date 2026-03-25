@@ -1479,26 +1479,12 @@ export default {
     // promotePeripheralOnCompaction 和 reinforceOnCompaction 始终运行（仅操作 SQLite，无冲突风险）
     api.on('before_compaction', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
-      if (!plugin.isActive() || !config.autoCapture) return;
+      if (!plugin.isActive()) return;
 
-      const sessionMessages: any[] = Array.isArray(event.messages) ? event.messages : [];
-
-      if (sessionMessages.length > 0) {
-        if (effectiveMode === 'standalone') {
-          // standalone 模式：先 flush buffer，再 fire-and-forget 新消息存储
-          const { flushAllBuffers } = await import('./engine/store.js');
-          flushAllBuffers(plugin.getDb(), config, log, plugin.workspaceDir);
-          plugin.store(agentId, sessionMessages).catch((err: any) => {
-            log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
-          });
-          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息（standalone 模式，fire-and-forget）`);
-        } else {
-          // retrieval-only: memoryFlush 负责 Markdown，buffer 待下次 flush
-          log.info(`[algo-memory] before_compaction: retrieval-only 模式，跳过 store()（由 memoryFlush 负责 Markdown 存储）`);
-        }
-      }
-
-      // 这些始终运行 — 仅操作 SQLite，无冲突风险
+      // O5 优化：session_end 时已执行 flushAllBuffers()，event.messages 中没有新消息
+      // 重复 store() 会让所有消息白跑一遍 hash 去重（命中 UPDATE access_count），
+      // 但不会产生任何新记忆。删除 store() 调用，只保留 tier 管理。
+      // promotePeripheralOnCompaction 和 reinforceOnCompaction 操作 SQLite，无冲突风险
       plugin.promotePeripheralOnCompaction(agentId).catch((err: any) => {
         log.error('[algo-memory] before_compaction promote 错误:', err?.message ?? err);
       });
@@ -1535,12 +1521,15 @@ export default {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
       if (!plugin.isActive()) return;
 
+      // O6 优化：非 algo_memory_search 工具直接跳过，避免不必要的 tryParse + 正则扫描
+      if (event.toolName !== 'algo_memory_search') return;
+
       // Fire-and-forget: do not await to avoid blocking the tool response pipeline.
       (async () => {
         try {
           // When algo_memory_search returns results, immediately reinforce cited memories.
           // This is better than waiting for agent_end — cited_count is updated in real-time.
-          if (event.toolName === 'algo_memory_search' && event.result) {
+          if (event.result) {
             // Extract memory IDs from search results safely.
             // Try structured JSON first (most reliable), fall back to text extraction.
             const citedIds: string[] = [];
@@ -1690,9 +1679,10 @@ export default {
       const agentId = ctx?.agentId || 'default';
       if (!plugin.isActive()) return;
       const { flushAllBuffers } = await import('./engine/store.js');
+      // O7 优化：buffer 抢救必须（/new 前最后抢救窗口），但 clearRecallCache 无意义
+      // session_start 会为新 session 独立清缓存，before_reset 的清缓存是多余操作
       flushAllBuffers(plugin.getDb(), config, log, plugin.workspaceDir);
-      plugin.clearRecallCache(agentId);
-      log.info(`[algo-memory] before_reset: agentId=${agentId}，buffer 已抢救，recall 缓存已清`);
+      log.info(`[algo-memory] before_reset: agentId=${agentId}，buffer 已抢救`);
     });
 
     // === gateway_start: 启动时预热 DB（v2.8.2 新增）===

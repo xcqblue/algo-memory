@@ -2,6 +2,36 @@
 
 All notable changes to algo-memory are documented here.
 
+## [3.2.1] - 2026-03-25
+
+### 性能优化（代码审查修复）
+
+#### O1: 消除双重 stripInboundMetadata
+- **问题**：`store()` 入口 `extractMessageText()` 已剥离飞书元数据（Conversation info / message_id / Sender），但内层循环 `normalizeForStorage()` 又调用了一次 `stripInboundMetadata()`，每条消息执行两次
+- **修复**：从 `normalizeForStorage()` 中移除 `stripInboundMetadata()` 调用，统一在入口做一次
+- **效果**：元数据剥离从每条消息 2 次 → 1 次
+
+#### O2: 合并 normalizeText + safeContent
+- **问题**：内层循环中 `normalizeText(content)` 先执行一次规范化，紧接着 `safeContent()`（= `normalizeForStorage()`）又执行一次，内容被处理了两遍
+- **修复**：删除 `normalizeText()` 调用，`safeContent()` 直接处理 `msg.content`；删除 store.ts 中未使用的 `normalizeText` 和 `stripInboundMetadata` import
+- **效果**：规范化从每条消息 2 次 → 1 次
+
+#### O5: before_compaction 删除冗余 store()
+- **问题**：`session_end` 时已执行 `flushAllBuffers()`，`before_compaction` 的 `event.messages` 中没有新消息。重复 `store()` 让所有消息白跑一遍 hash 去重（命中 `UPDATE access_count`），但不产生任何新记忆
+- **修复**：删除 `before_compaction` 中的 `store()` 调用，只保留 `promotePeripheralOnCompaction()` + `reinforceOnCompaction()`（两者操作 SQLite，无冲突风险）
+- **效果**：compaction 阶段减少 N 次 hash 查询 + N 次 DB UPDATE
+
+#### O6: after_tool_call 非目标工具提前返回
+- **问题**：所有工具调用都进入 try 块，执行 `tryParse()` + 正则扫描，即使 `event.toolName !== 'algo_memory_search'`
+- **修复**：在 hook 入口添加 `if (event.toolName !== 'algo_memory_search') return;` 早期返回
+- **效果**：非目标工具调用零开销
+
+#### O7: before_reset 删除无意义的 clearRecallCache
+- **问题**：`before_reset` 中 `clearRecallCache()` 无实际价值——`session_start` 会为新 session 独立清缓存，`before_reset` 的清缓存是多余操作
+- **修复**：删除 `clearRecallCache()` 调用，保留 `flushAllBuffers()` 抢救 buffer（这是唯一必须在 `/new` 前执行的抢救操作）
+
+---
+
 ## [3.2.0] - 2026-03-25
 
 ### ContextEngine 三大优化
