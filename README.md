@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v2.7.5 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
+**版本：** v2.8.2 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
 
 ---
 
@@ -42,21 +42,25 @@ openclaw gateway restart
 
 ### OpenClaw 生命周期 Hook + ContextEngine
 
+algo-memory 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整的存储/召回/生命周期管理。
+
 | Hook | 时机 | 行为 |
 |------|------|------|
-| `agent_end` | 每次对话结束 | capture 用户消息，写入 buffer |
-| `before_prompt_build` | LLM 调用前 | 检索相关记忆，注入上下文；实时存储上一轮消息 |
-| `tool_result_persist` | 工具结果写入 transcript 前 | 优先 JSON 解析提取 memory ID，实时强化召回记忆 |
-| `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store；tier 强化/清理 |
-| `after_compaction` | compaction 结束后 | 仅记录日志（强化已在 before_compaction 完成）|
-| `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
-| `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
-| `session_start` | 会话开始 | 初始化会话状态，清除 recall 缓存 |
+| `before_dispatch` | 入站消息投递前 | 快速哈希精确去重拦截，更新 access_count |
+| `before_prompt_build` | LLM 调用前 | 检索相关记忆注入上下文；存储上一轮消息（heartbeat/cron 时跳过）|
+| `agent_end` | 每次对话结束 | 兜底存储（heartbeat/cron 时跳过）|
+| `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 cited_count |
+| `tool_result_persist` | 工具结果写入 transcript 前 | 提取 memory ID，实时强化 cited_count |
+| `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store（2s 有限等待）；tier 强化/清理 |
+| `after_compaction` | compaction 结束后 | no-op（compaction 后 context 已截断，无需重复强化）|
+| `session_start` | 会话开始 | gateway restart 后抢救 unflushed buffer；清除 recall 缓存 |
 | `session_end` | 会话结束 | 确保所有 buffer flush 到 DB |
-| `before_message_write` | 消息写入 transcript 前 | 预处理钩子（为未来增强预留）|
-| `subagent_spawning` | 子 Agent 启动前 | 日志记录（预留）|
-| `subagent_spawned` | 子 Agent 已启动 | 日志记录（预留）|
-| `subagent_ended` | 子 Agent 结束 | 日志记录（预留）|
+| `before_reset` | `/new` 或 `/reset` 前 | 抢救 unflushed buffer，防止重置时消息丢失 |
+| `gateway_start` | Gateway 启动完成后 | DB 健康检查，确保 FTS 索引就绪 |
+| `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
+| `subagent_spawning` | 子 Agent 启动前 | 日志记录 |
+| `subagent_spawned` | 子 Agent 已启动 | 日志记录 |
+| `subagent_ended` | 子 Agent 结束 | 日志记录 |
 
 **ContextEngine 接口**：`registerContextEngine('algo-memory', ...)` — 实现 `assemble()` / `compact()` / `ingest()` 方法，深度接入 OpenClaw 上下文管理生命周期。
 
@@ -243,7 +247,7 @@ algo-memory/
 
 | 版本 | 最低要求 |
 |------|----------|
-| OpenClaw | v2026.3.23+ |
+| OpenClaw | v2026.3.24+ |
 | Node | ≥ 20.0.0 |
 | SQLite | FTS5 支持（Node ≥ 20 内置）|
 

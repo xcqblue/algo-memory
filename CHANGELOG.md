@@ -2,6 +2,48 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.8.2] - 2026-03-25
+
+### Bug Fixes（OpenClaw 25 Hook 全覆盖修复）
+
+#### `before_reset` — `/new` 时抢救 unflushed buffer
+- **问题**：用户敲 `/new` 时，如果上一轮 buffer 里还有未 flush 的消息，这些消息会随旧 session context 一起丢弃（因为 `before_prompt_build` 需要新消息触发，旧的 buffer 没有新触发机会）
+- **修复**：新增 `before_reset` hook，在 `/new` 或 `/reset` 触发后、新 session 开始前强制 flush buffer，并清空 recall 缓存
+
+#### `gateway_start` — 启动时 DB 健康预热
+- **问题**：gateway 启动后、第一个会话处理前，没有验证 DB 连接是否正常
+- **修复**：新增 `gateway_start` hook，gateway 完全启动后执行 DB 健康检查（`SELECT 1`），确保 FTS 索引就绪后才对外交互
+
+#### heartbeat/cron 时 `store()` 跳过
+- **问题**：`before_prompt_build` 对 heartbeat/cron 触发的系统消息跳过了 recall，但没有跳过 store，导致系统消息进记忆
+- **修复**：`before_prompt_build` 和 `agent_end` 均检测 `trigger`，heartbeat/cron 时跳过 store
+
+#### `before_dispatch` 哈希一致性修复
+- **问题**：`before_dispatch` 直接对 raw 内容 hash，`store()` 里先 `safeContent()` 再 hash，两者 hash 结果不一致，精确去重失效
+- **修复**：`before_dispatch` 改用 `safeContent()` 规范化后 hash，与 `store()` 的 `content_hash` 一致
+
+### OpenClaw 25 个 Plugin Hook 全覆盖
+
+| Hook | 用途 |
+|------|------|
+| `before_prompt_build` | 存储 + 召回 |
+| `agent_end` | 兜底存储 |
+| `before_compaction` | buffer flush + tier 强化（2s 有限等待）|
+| `after_compaction` | no-op（compaction 后 context 已截断）|
+| `session_start` | gateway restart 后 buffer 抢救 + 缓存清理 |
+| `session_end` | buffer flush |
+| **`before_reset`** 🆕 | `/new` 时抢救 unflushed buffer |
+| **`gateway_start`** 🆕 | DB 健康预热 |
+| `gateway_stop` | flush + close |
+| `after_tool_call` | cited_count 实时强化 |
+| `tool_result_persist` | cited_count 强化 |
+| `before_dispatch` | 入站哈希精确去重 |
+| `subagent_spawning` | 日志 |
+| `subagent_spawned` | 日志 |
+| `subagent_ended` | 日志 |
+
+---
+
 ## [2.8.0] - 2026-03-25
 
 ### 新增功能（OpenClaw v2026.3.24 深度集成）

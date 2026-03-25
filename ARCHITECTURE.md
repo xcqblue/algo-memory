@@ -176,8 +176,10 @@ t=180 天 → 0.018  （接近零）
 
 ## OpenClaw 生命周期 Hook
 
+v2.8.2 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整存储/召回/生命周期管理：
+
 ```
-gateway_start
+gateway_start ──► DB 健康检查（SELECT 1），确保 FTS 索引就绪
     ▼
 registerHook()
     │
@@ -187,31 +189,33 @@ registerHook()
     │                              ├─ compact() ──► manualCompact() → tier 强化
     │                              └─ ingest() ──► store()
     │
-    ├─ registerGatewayMethod ──► algo-memory.stats / search / list / health / metrics
+    ├─ registerGatewayMethod ──► stats / search / list / health / metrics / embeddings
+    │
+    ├─ before_dispatch ──► 入站哈希精确去重（safeContent 后 hash，与 store 一致）
     │
     ├─ before_prompt_build ──► recall() ──► return { prependSystemContext }
     │                          store() ──► scheduleBatchWrite()（实时存储）
-    │                          ⚠ trigger===memory/heartbeat/cron 时跳过 recall（防递归）
+    │                          ⚠ trigger===heartbeat/cron 时跳过 store（系统消息不进记忆）
     │
-    ├─ agent_end ──► store() ──► scheduleBatchWrite()
+    ├─ agent_end ──► store() ──► scheduleBatchWrite()（heartbeat/cron 时跳过）
+    │
+    ├─ after_tool_call ──► reinforceCitedMemories()（tryParse 安全解析）
+    ├─ tool_result_persist ──► reinforceCitedMemories()（AgentMessage 结构解析，优先 JSON）
     │
     ├─ before_compaction ──►
     │   ├── memoryFlush 启用？→ 跳过 store()（避免重复存储）
-    │   ├── memoryFlush 未启用？→ store(event.messages)
+    │   ├── memoryFlush 未启用？→ store(event.messages)（2s 有限等待）
     │   ├── promotePeripheralOnCompaction()
     │   └── reinforceOnCompaction()
     │
-    ├─ after_compaction ──►（仅记录日志，强化在 before_compaction 完成）
+    ├─ after_compaction ──► no-op（compaction 后 context 已截断，无需重复强化）
     │
-    ├─ after_tool_call ──► reinforceCitedMemories()（JSON.parse 安全解析）
-    ├─ tool_result_persist ──► reinforceCitedMemories()（AgentMessage 结构解析，优先 JSON）
-    │
-    ├─ session_start ──► clearRecallCache()（初始化会话状态）
-    ├─ session_end ──► flushAllBuffers()（确保 buffer 入库）
-    ├─ before_message_write ──►（预留预处理钩子）
-    ├─ subagent_spawning ──►（预留日志）
-    ├─ subagent_spawned ──►（预留日志）
-    ├─ subagent_ended ──►（预留日志）
+    ├─ session_start ──► gateway restart 时抢救 buffer + clearRecallCache()
+    ├─ session_end ──► flushAllBuffers()（记录 reason）
+    ├─ before_reset ──► 抢救 unflushed buffer，防止 /new 时消息丢失
+    ├─ subagent_spawning ──► 日志
+    ├─ subagent_spawned ──► 日志
+    ├─ subagent_ended ──► 日志
     │
     └─ gateway_stop ──► setClosing() → flushAll() → db.close()
 ```
