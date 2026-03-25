@@ -1058,7 +1058,7 @@ export default {
             }
             const suffix = omitted > 0 ? `\n[...还有 ${omitted} 条记忆因超出上下文限制未显示]` : '';
             log.info(`[algo-memory] 已召回 ${memories.length} 条记忆（注入 ${selected.length} 条，约 ${tokenCount} tokens）`);
-            api.prependSystemContext(selected.join('\n') + suffix + '\n');
+            return { prependSystemContext: selected.join('\n') + suffix + '\n' };
           }
         } catch (err: any) {
           log.error('[algo-memory] before_prompt_build 钩子错误:', err?.message ?? err, err?.stack);

@@ -4,7 +4,12 @@ All notable changes to algo-memory are documented here.
 
 ## [2.7.1] - 2026-03-25
 
-### Bug Fixes（元数据过滤 + 压缩策略优化）
+### Bug Fixes（Hook API 修复 + 元数据过滤 + 压缩策略优化）
+
+#### before_prompt_build 钩子 API 修复
+- `api.prependSystemContext(...)` 方法调用改为 `return { prependSystemContext: ... }`
+- OpenClaw `before_prompt_build` 钩子正确契约是通过 `return` 传递 `PluginHookBeforePromptBuildResult`，而非调用实例方法
+- 修复后钩子错误（`TypeError: api.prependSystemContext is not a function`）不再出现，召回记忆正常注入上下文
 
 #### 噪音过滤器扩展（skipPatterns）
 - `noiseFilter` 新增 `skipPatterns` 字段：支持正则表达式数组，符合任一 pattern 的内容在 importance 评分前直接跳过
