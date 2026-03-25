@@ -63,6 +63,30 @@ export function normalizeText(text: string): string {
   return normalized;
 }
 
+// ============= Metadata Pattern Detector =============
+/**
+ * 检测内容是否像系统元数据包裹层
+ * 用于语义去重 + 来源标签过滤
+ */
+const METADATA_LIKE_PATTERNS = [
+  /^Conversation info[\s\S]{0,100}?---/i,
+  /^\{[\s\S]*?"message_id"[\s\S]*?"sender"[\s\S]*?\}/,
+  /^\{[\s\S]*?"sender_id"[\s\S]*?"timestamp"[\s\S]*?\}/,
+  /^Sender[\s\S]{0,100}?---/i,
+];
+
+export function isMetadataLike(content: string): boolean {
+  if (!content || typeof content !== 'string') return false;
+  const trimmed = content.trim();
+  // 快速路径：检查前50字符是否包含关键词
+  const prefix = trimmed.substring(0, 50);
+  if (!prefix.includes('message_id') && !prefix.includes('sender_id') &&
+      !prefix.includes('Conversation info') && !prefix.includes('Sender')) {
+    return false;
+  }
+  return METADATA_LIKE_PATTERNS.some(p => p.test(trimmed));
+}
+
 // ============= Noise Filter =============
 export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   if (!config.enabled) return false;
@@ -76,6 +100,17 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
 
   // 纯标点/符号
   if (/^[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?\s]+$/.test(content)) return true;
+
+  // skipPatterns：正则匹配，符合任一模式直接跳过
+  if (config.skipPatterns && config.skipPatterns.length > 0) {
+    for (const pattern of config.skipPatterns) {
+      try {
+        if (new RegExp(pattern).test(trimmed)) return true;
+      } catch {
+        // 无效正则，跳过
+      }
+    }
+  }
 
   if (config.skipGreetings) {
     const greetings = ['hi', 'hello', 'hey', '你好', '您好', '嗨', '嗨你好', '你好呀', 'hiya',

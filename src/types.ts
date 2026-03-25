@@ -72,6 +72,10 @@ export interface CompressionConfig {
   maxLength: number;
   /** 是否提取关键词作为摘要补充 */
   extractKeywords: boolean;
+  /** 最小长度阈值：超过此长度才压缩（避免短内容被过度压缩） */
+  minLengthForCompression: number;
+  /** 是否跳过元数据类内容的压缩（直接存储原文） */
+  skipMetadataCompression: boolean;
 }
 
 export interface SessionSnapshot {
@@ -90,6 +94,10 @@ export interface NoiseFilterConfig {
   enabled: boolean;
   skipGreetings: boolean;
   skipCommands: boolean;
+  /** 正则表达式数组，符合任一模式的内容直接跳过（早于 importance 评分） */
+  skipPatterns: string[];
+  /** 是否跳过系统/元数据来源的消息 */
+  skipSystemSource: boolean;
 }
 
 export interface AdaptiveRetrievalConfig {
@@ -212,6 +220,7 @@ export const DEFAULT_VALUES = {
   
   // 压缩
   COMPRESSION_MAX_LENGTH: 200,
+  COMPRESSION_MIN_LENGTH: 300,
   
   // 批量写入
   BATCH_BUFFER_MS: 500,
@@ -235,7 +244,19 @@ export const DEFAULT_CONFIG: Config = {
   recencyHalfLife: 180,
   smartDedup: true,
   dedupThreshold: 0.85,
-  noiseFilter: { enabled: true, skipGreetings: true, skipCommands: true },
+  noiseFilter: {
+    enabled: true,
+    skipGreetings: true,
+    skipCommands: true,
+    skipPatterns: [
+      '^Conversation info',
+      '^```json',
+      '^```json\\{',
+      '^{.*"message_id"',
+      '^{.*"sender_id"'
+    ],
+    skipSystemSource: true
+  },
   adaptiveRetrieval: {
     enabled: true,
     minQueryLength: 2,
@@ -261,5 +282,5 @@ export const DEFAULT_CONFIG: Config = {
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },
   mcp: { enabled: false, transport: 'stdio', port: 8181 },
   batchWrite: { enabled: true, bufferMs: 500, maxBatchSize: 20 },
-  compression: { enabled: true, maxLength: 200, extractKeywords: true },
+  compression: { enabled: true, maxLength: 200, extractKeywords: true, minLengthForCompression: 300, skipMetadataCompression: true },
 };

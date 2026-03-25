@@ -15,7 +15,15 @@
   "noiseFilter": {
     "enabled": true,
     "skipGreetings": true,
-    "skipCommands": true
+    "skipCommands": true,
+    "skipPatterns": [
+      "^Conversation info",
+      "^```json",
+      "^```json\\{",
+      "^{.*\"message_id\"",
+      "^{.*\"sender_id\""
+    ],
+    "skipSystemSource": true
   },
   "adaptiveRetrieval": {
     "enabled": true,
@@ -70,6 +78,13 @@
     "enabled": true,
     "defaultScope": "agent",
     "visibleAgents": []
+  },
+  "compression": {
+    "enabled": true,
+    "maxLength": 200,
+    "extractKeywords": true,
+    "minLengthForCompression": 300,
+    "skipMetadataCompression": true
   },
   "llm": {
     "enabled": false,

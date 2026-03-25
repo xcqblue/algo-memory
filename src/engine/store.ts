@@ -17,6 +17,7 @@ import {
   extractMessageText,
   normalizeText,
   stripInboundMetadata,
+  isMetadataLike,
   MAX_MESSAGE_LENGTH,
   MAX_SIMILAR_CHECK
 } from '../utils.js';
@@ -615,6 +616,12 @@ export async function store(
       if (!content || isNoise(content, config.noiseFilter)) continue;
 
       const safe = safeContent(content);
+
+      // ===== 来源标签过滤：系统/元数据来源直接跳过 =====
+      // 来源标签过滤（msg.source === 'system'）在消息入口预先过滤
+      // 这里做兜底：内容本身像元数据包裹层的，也直接跳过
+      if (isMetadataLike(safe)) continue;
+
       const contentHash = hashContent(safe);
 
       // Exact dedup check
@@ -632,7 +639,7 @@ export async function store(
         continue;
       }
 
-      // Smart dedup
+      // Smart dedup（语义去重增强版）
       let isDuplicate = false; // reset each outer iteration — must not persist across messages
       if (config.smartDedup) {
         const similar = queryAll(db,
@@ -641,15 +648,32 @@ export async function store(
         ) as IdContentRow[];
 
         for (const s of similar) {
-          let score = jaccardSimilarity(safe, s.content);
+          const existingContent = s.content as string;
+
+          // ===== 语义去重增强：元数据结构相似性检测 =====
+          // 如果现有记忆的内容是元数据类的，且当前内容与它结构相似（都是元数据包裹），降级处理
+          const existingIsMetadata = isMetadataLike(existingContent);
+          const currentIsMetadata = isMetadataLike(safe);
+
+          // 两者都是元数据：强相似度降级（更激进地认为是重复）
+          // 两者之一是元数据：弱相似度降级
+          let effectiveThreshold = config.dedupThreshold;
+          if (existingIsMetadata || currentIsMetadata) {
+            // 元数据类内容更严格：降低阈值，更容易触发去重
+            effectiveThreshold = existingIsMetadata && currentIsMetadata
+              ? config.dedupThreshold * 0.5   // 双方都是元数据：阈值减半
+              : config.dedupThreshold * 0.75; // 一方是元数据：阈值降25%
+          }
+
+          let score = jaccardSimilarity(safe, existingContent);
           const { dedupUncertaintyMin, dedupUncertaintyMax } = config.threshold;
           const inUncertaintyZone = score >= dedupUncertaintyMin && score < dedupUncertaintyMax;
 
           if (config.threshold.useLlmForDedup && llmClient && inUncertaintyZone) {
-            const r = await llmClient.isDuplicateLLM(safe, s.content as string);
+            const r = await llmClient.isDuplicateLLM(safe, existingContent);
             isDuplicate = r.isDuplicate;
           } else {
-            isDuplicate = score >= config.dedupThreshold;
+            isDuplicate = score >= effectiveThreshold;
           }
 
           if (isDuplicate) {
@@ -688,19 +712,34 @@ export async function store(
         if (r) keywords = r;
       }
 
-      // 启用压缩时，对内容进行压缩
+      // 压缩策略优化：仅在必要时压缩，避免短内容和元数据被过度处理
       let storedContent = safe;
       let wasCompressed = false;
       if (config.compression?.enabled) {
-        const maxLen = config.compression.maxLength || DEFAULT_VALUES.BATCH_MAX_SIZE;
-        storedContent = compressContent(safe, maxLen);
-        wasCompressed = storedContent !== safe;
+        const minLen = config.compression.minLengthForCompression || DEFAULT_VALUES.COMPRESSION_MIN_LENGTH;
+        const maxLen = config.compression.maxLength || DEFAULT_VALUES.COMPRESSION_MAX_LENGTH;
 
-        // 如果启用了关键词提取，也添加到 keywords
-        if (config.compression.extractKeywords && storedContent.length >= maxLen) {
-          const extraKeywords = extractContentSummary(safe, 3);
-          if (extraKeywords) {
-            keywords = keywords ? `${keywords},${extraKeywords}` : extraKeywords;
+        // 元数据类内容：直接存储原文，不压缩
+        if (config.compression.skipMetadataCompression && isMetadataLike(safe)) {
+          storedContent = safe;
+          wasCompressed = false;
+        }
+        // 短内容：跳过压缩，直接存储
+        else if (safe.length <= minLen) {
+          storedContent = safe;
+          wasCompressed = false;
+        }
+        // 正常长度内容：执行压缩
+        else {
+          storedContent = compressContent(safe, maxLen);
+          wasCompressed = storedContent !== safe;
+
+          // 如果启用了关键词提取，也添加到 keywords
+          if (config.compression.extractKeywords && storedContent.length >= maxLen) {
+            const extraKeywords = extractContentSummary(safe, 3);
+            if (extraKeywords) {
+              keywords = keywords ? `${keywords},${extraKeywords}` : extraKeywords;
+            }
           }
         }
       }
