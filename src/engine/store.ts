@@ -618,6 +618,18 @@ export async function store(
     .sort((a, b) => b.score - a.score || a.index - b.index) // highest score first, stable tie-break
     .slice(0, maxCapture); // already limited here, no need to count in loop
 
+  // 系统消息来源过滤器（msg.source === 'system' 或内容像系统消息）
+  const SYSTEM_PATTERNS = [
+    /^A new session was started via \//,
+    /^Session Startup/i,
+    /^\/new\s|$|^\/reset\s|$/,
+  ];
+  function isSystemMessage(msg: any): boolean {
+    if (config.noiseFilter?.skipSystemSource && (msg as any).source === 'system') return true;
+    const c = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
+    return SYSTEM_PATTERNS.some(p => p.test(c.trim()));
+  }
+
   try {
     // Collect tier-update candidates to batch them (avoids N+1 queries)
     const tierCandidates: string[] = [];
@@ -625,6 +637,9 @@ export async function store(
     const memoriesToBatch: Memory[] = [];
 
     for (const { msg } of scoredMessages) {
+      // 系统消息来源过滤（兜底）
+      if (isSystemMessage(msg)) continue;
+
       const content = normalizeText(msg.content);
       if (!content || isNoise(content, config.noiseFilter)) continue;
 
@@ -833,7 +848,15 @@ export async function store(
 
       // 计算新的 tier
       const updates: { id: string; oldTier: string; newTier: string }[] = [];
+      const VALID_TIERS = new Set(['core', 'working', 'peripheral']);
       for (const row of currentRows) {
+        // 防御：如果 tier 列被损坏（存了 memory ID），先修复为 'working'
+        if (!VALID_TIERS.has(row.tier)) {
+          log.warn(`[algo-memory] tier 列损坏，修复 ${row.id}: ${row.tier} -> working`);
+          run(db, `UPDATE memories SET tier = 'working' WHERE id = ?`, [row.id]);
+          // eslint-disable-next-line no-param-reassign
+          row.tier = 'working';
+        }
         const daysOld = (Date.now() - row.created_at) / (1000 * 60 * 60 * 24);
         const newTier = getTier(row.importance, row.access_count, daysOld, config.tier);
         if (row.tier !== newTier) {

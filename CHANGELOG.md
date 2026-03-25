@@ -2,6 +2,33 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.7.2] - 2026-03-25
+
+### Bug Fixes（消息保底机制 + 元数据剥离修复 + 系统消息过滤 + Tier损坏防御）
+
+#### messagePriority 保底机制
+- **问题**：`messagePriority(score > 0)` 是硬关卡，没有命中 `coreKeywords` 的消息在到达 `isNoise` 之前就被过滤掉，导致"查一下内存情况"这类普通消息无法存入
+- **修复**：增加保底逻辑——无核心关键词但内容有实质意义（`meaningfulLen >= 10`，中文字符×1 + 英文×0.4）的消息，给 score = 1 进入 isNoise 二次判断
+- **效果**：普通用户对话现在可以被记录，只被 isNoise 过滤
+
+#### 元数据剥离重写（stripInboundMetadata）
+- **问题**：原正则 `/^Conversation info[\s\S]*?---\s*/` 要求 `---` 必须紧跟 Conversation info 块，但实际 Feishu 消息格式为 `Conversation info...}` + `[message_id:...]` + `Sender...---`，正则无法匹配，导致元数据残留存储
+- **修复**：拆分为三个独立 pattern 分别处理：
+  - `META_PREFIX_PATTERN`：匹配 `Conversation info` 行或跨行 JSON 块
+  - `META_MSGID_PATTERN`：匹配 `[message_id: xxx]` 行
+  - `META_SENDER_PATTERN`：匹配 `Sender...---` 多行块
+- **效果**：飞书消息的元数据包裹层完全剥离，只存用户实际内容
+
+#### 系统消息过滤（isSystemMessage）
+- **问题**：Session Startup 序列、"A new session was started via /new or /reset" 等系统消息被存入记忆库
+- **修复**：新增 `isSystemMessage()` 函数，基于 `msg.source === 'system'` 和内容 pattern 双重判断，在 store 主循环中拦截
+- **效果**：系统消息不再污染记忆库
+
+#### Tier 列损坏防御
+- **问题**：tier promotion 的 CASE WHEN 参数顺序错误（`[...idParams, ...tierParams, ...whereParams]` 应该是 `[...idParams, ...tierParams, ...whereParams]` 但 SQLite CASE WHEN WHEN id = ? THEN ? 只需要 2 个参数/次，结果把 memory ID 当作 tier 值写入），导致 tier 列被污染成 memory ID，且 tier_history 中的 old_tier 也是错误的 memory ID
+- **修复**：tier promotion 循环前增加 `VALID_TIERS` 白名单校验，不合法的 tier 值（既不是 core/working/peripheral）自动修复为 'working' 并记录警告日志
+- **效果**：已有损坏数据被自动修复，新增写入不会再损坏
+
 ## [2.7.1] - 2026-03-25
 
 ### Bug Fixes（Hook API 修复 + 元数据过滤 + 压缩策略优化）

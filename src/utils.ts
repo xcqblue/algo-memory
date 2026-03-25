@@ -17,13 +17,26 @@ export const MIN_CJK_QUERY_LENGTH = 6;
 export const MIN_EN_QUERY_LENGTH = 15;
 
 // ============= Feishu / OpenClaw Metadata Stripper =============
-// OpenClaw injects a "Conversation info (untrusted metadata): {json}" block
-// before every user message. Strip it so only real user text is stored.
-const METADATA_PATTERN = /^Conversation info[\s\S]*?---\s*/;
+// OpenClaw injects multiple metadata blocks before every user message:
+// 1. "Conversation info (untrusted metadata): json {...}"
+// 2. "[message_id: om_xxx]"
+// 3. "Sender (untrusted metadata): json {...}\n---"
+// These are always prepended and must be stripped before storage.
+const META_PREFIX_PATTERN = /^Conversation info[\s\S]*?(?:\n|$)/im;
+const META_MSGID_PATTERN = /^\[message_id:[^\]]*\]\n?/;
+const META_SENDER_PATTERN = /^Sender[\s\S]*?---\s*/im;
 
 export function stripInboundMetadata(raw: string): string {
   if (!raw || typeof raw !== 'string') return raw;
-  return raw.replace(METADATA_PATTERN, '').trim();
+  let text = raw;
+  // Remove Conversation info block (line or multi-line JSON)
+  text = text.replace(META_PREFIX_PATTERN, '');
+  // Remove [message_id: ...] line
+  text = text.replace(META_MSGID_PATTERN, '');
+  // Remove Sender...--- block (may span multiple lines)
+  text = text.replace(META_SENDER_PATTERN, '');
+  // Clean up leading/trailing blank lines
+  return text.replace(/^[\s\n]+/, '').trim();
 }
 
 /**
