@@ -1190,34 +1190,33 @@ export default {
     // 注意：before_dispatch 只能读取 event.inbound（入站消息），不能拦截出站回复
     api.on('before_dispatch', async (event: any, ctx: any) => {
       if (!plugin.isActive()) return;
-      // 预剥离入站消息的元数据（与 stripInboundMetadata 逻辑一致，但更早执行）
+      // 只做精确哈希去重一件事：检查 DB 中是否有完全相同内容_hash 的记忆
+      // strip/normalize 全交给 store() 处理，避免双重预处理
+      // 注意：event.inbound 是原始消息结构，内容字段可能是字符串或 Feishu 数组格式
       const inbound = event?.inbound;
       if (!inbound) return;
-
+      const rawContent = inbound?.content;
+      if (!rawContent) return;
       const agentId = ctx?.agentId || 'default';
-      // 对入站文本做快速哈希去重检测
-      // 注意：这里只记录 dedup 状态，不实际写入 DB（store 会在 before_prompt_build 写入）
-      // 实现方式：将去重状态写入插件的 lastRecallQuery/lastRecallTime（复用已有结构）
-      const text = extractMessageText(inbound?.content);
-      const cleaned = stripInboundMetadata(text).trim();
-      if (!cleaned) return;
-
-      // 快速哈希：用于检测精确重复（与 content_hash 逻辑一致）
+      // 与 store() 的 safeContent() 保持一致：先 normalize 再 hash
+      const rawText = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
+      if (!rawText.trim()) return;
+      const cleaned = safeContent(rawText);
       const hash = hashContent(cleaned);
-      // 检查 DB 中是否已有精确重复（用已有 queryAll，不新建方法）
-      if (plugin.getDb()) {
-        const existing = queryOne(plugin.getDb(),
-          'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ? LIMIT 1',
-          [agentId, hash]
+      const db = plugin.getDb();
+      if (!db) return;
+      const existing = queryOne(db,
+        'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ? LIMIT 1',
+        [agentId, hash]
+      );
+      if (existing) {
+        // 精确重复：只更新 access_count，不做其他处理
+        // store() 会正常走完流程，但因为 hash 命中会被 store 内 dedup 拦截
+        run(db,
+          `UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?`,
+          [Date.now(), (existing as any).id]
         );
-        if (existing) {
-          // 精确重复：更新 access_count 和 importance，让 store 阶段更快处理
-          run(plugin.getDb(),
-            `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
-            [Date.now(), (existing as any).id]
-          );
-          log.info(`[algo-memory] [before_dispatch] 精确重复拦截: id=${(existing as any).id}, agentId=${agentId}`);
-        }
+        log.info(`[algo-memory] [before_dispatch] 精确重复拦截: id=${(existing as any).id}, agentId=${agentId}`);
       }
     });
 
@@ -1226,6 +1225,9 @@ export default {
       api.on('before_prompt_build', async (event: any, ctx: any) => {
         try {
           const agentId = ctx?.agentId || 'default';
+          // cron/heartbeat 触发时的系统消息不应进入记忆，跳过 store
+          const trigger = ctx?.trigger;
+          if (trigger === 'heartbeat' || trigger === 'cron') return;
           const messages = event?.messages || [];
           if (messages.length > 0) {
             plugin.store(agentId, messages).catch((err: any) => {
@@ -1239,6 +1241,9 @@ export default {
 
       // agent_end: still keep for session-end / gateway-stop scenarios
       api.on('agent_end', async (event: any, ctx: any) => {
+        // cron/heartbeat 触发时的系统消息不应进入记忆
+        const trigger = ctx?.trigger;
+        if (trigger === 'heartbeat' || trigger === 'cron') return;
         const agentId = ctx?.agentId || 'default';
         const messages = event?.messages || [];
         if (messages.length > 0) {
@@ -1493,21 +1498,35 @@ export default {
     });
 
     // === Session lifecycle ===
+    // v2026.3.24 Gateway/restart sentinel: restart 后通过 heartbeat 唤醒被中断的会话。
+    // session_start 在此时触发，可能是：
+    //   1. 全新会话（无 unflushed buffer）
+    //   2. gateway restart 后恢复的会话（有 unflushed buffer 需抢救）
+    //   3. heartbeat 唤醒的 cron/heartbeat 触发（已在 before_prompt_build 跳过 store，这里只清缓存）
+    // session_end 在 gateway stop 时触发，确保 buffer 全部 flush
     api.on('session_start', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || 'default';
       if (!plugin.isActive()) return;
-      // Initialize per-session state — clear recall cache for this session
+      const trigger = ctx?.trigger;
+      // gateway restart 后恢复的会话：先抢救 unflushed buffer，再清缓存
+      if (trigger !== 'heartbeat' && trigger !== 'cron') {
+        const { flushAllBuffers } = await import('./engine/store.js');
+        flushAllBuffers(plugin.getDb(), config, log);
+        log.info(`[algo-memory] session_start: gateway restart 抢救 buffer, agentId=${agentId}`);
+      }
+      // 清 recall 缓存（每个会话独立，防止跨会话重复召回）
       plugin.clearRecallCache(agentId);
-      log.info(`[algo-memory] session_start: agentId=${agentId}`);
+      log.info(`[algo-memory] session_start: agentId=${agentId}, trigger=${trigger ?? 'user'}`);
     });
 
     api.on('session_end', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || 'default';
       if (!plugin.isActive()) return;
+      const reason = event?.reason || 'unknown';
       // Ensure all buffers are flushed at session end
       const { flushAllBuffers } = await import('./engine/store.js');
       flushAllBuffers(plugin.getDb(), config, log);
-      log.info(`[algo-memory] session_end: agentId=${agentId}, buffers flushed`);
+      log.info(`[algo-memory] session_end: agentId=${agentId}, reason=${reason}, buffers flushed`);
     });
 
     // === Subagent lifecycle ===
