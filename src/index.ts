@@ -1001,7 +1001,7 @@ confidence 是 0-1 的置信度。
 export default {
   id: 'algo-memory',
   name: 'algo-memory',
-  version: '2.6.0',
+  version: '2.7.1',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
