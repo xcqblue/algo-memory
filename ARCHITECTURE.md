@@ -181,6 +181,14 @@ gateway_start
     ▼
 registerHook()
     │
+    ├─ registerContextEngine ──► AlgoMemoryContextEngine 实例
+    │                              │
+    │                              ├─ assemble() ──► recall() → AgentMessage[]
+    │                              ├─ compact() ──► manualCompact() → tier 强化
+    │                              └─ ingest() ──► store()
+    │
+    ├─ registerGatewayMethod ──► algo-memory.stats / search / list / health / metrics
+    │
     ├─ before_prompt_build ──► recall() ──► return { prependSystemContext }
     │                          store() ──► scheduleBatchWrite()（实时存储）
     │
@@ -195,6 +203,13 @@ registerHook()
     ├─ after_compaction ──►（仅记录日志，强化在 before_compaction 完成）
     │
     ├─ after_tool_call ──► reinforceCitedMemories()（JSON.parse 安全解析）
+    │
+    ├─ session_start ──► clearRecallCache()（初始化会话状态）
+    ├─ session_end ──► flushAllBuffers()（确保 buffer 入库）
+    ├─ before_message_write ──►（预留预处理钩子）
+    ├─ subagent_spawning ──►（预留日志）
+    ├─ subagent_spawned ──►（预留日志）
+    ├─ subagent_ended ──►（预留日志）
     │
     └─ gateway_stop ──► setClosing() → flushAll() → db.close()
 ```

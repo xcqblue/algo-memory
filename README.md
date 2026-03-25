@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v2.7.1 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
+**版本：** v2.7.5 | **OpenClaw:** v2026.3.23+ | **Node:** ≥20
 
 ---
 
@@ -40,7 +40,7 @@ openclaw gateway restart
 - 自动提取关键词 / LLM 辅助去重 / 语义压缩
 - **纯算法模式零成本运行**，LLM 非必选
 
-### OpenClaw 生命周期 Hook
+### OpenClaw 生命周期 Hook + ContextEngine
 
 | Hook | 时机 | 行为 |
 |------|------|------|
@@ -50,12 +50,36 @@ openclaw gateway restart
 | `after_compaction` | compaction 结束后 | 仅记录日志（强化已在 before_compaction 完成）|
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
 | `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
+| `session_start` | 会话开始 | 初始化会话状态，清除 recall 缓存 |
+| `session_end` | 会话结束 | 确保所有 buffer flush 到 DB |
+| `before_message_write` | 消息写入 transcript 前 | 预处理钩子（为未来增强预留）|
+| `subagent_spawning` | 子 Agent 启动前 | 日志记录（预留）|
+| `subagent_spawned` | 子 Agent 已启动 | 日志记录（预留）|
+| `subagent_ended` | 子 Agent 结束 | 日志记录（预留）|
+
+**ContextEngine 接口**：`registerContextEngine('algo-memory', ...)` — 实现 `assemble()` / `compact()` / `ingest()` 方法，深度接入 OpenClaw 上下文管理生命周期。
 
 ---
 
 ## 工具（18 个）
 
 通过 `registerTool()` 自动暴露，无需额外 MCP 配置。
+
+### Gateway RPC（通过 registerGatewayMethod 注册，支持 CLI/HTTP 调用）
+
+| 方法 | 说明 |
+|------|------|
+| `algo-memory.stats` | 获取记忆统计 |
+| `algo-memory.search` | 搜索记忆 |
+| `algo-memory.list` | 分页列出记忆 |
+| `algo-memory.health` | 健康检查 |
+| `algo-memory.metrics` | 运行时指标 |
+
+```bash
+# CLI 调用示例
+openclaw gateway call algo-memory.stats --agentId default
+openclaw gateway call algo-memory.search --query "腾讯持仓"
+```
 
 ### 核心
 | 工具 | 说明 |
@@ -192,7 +216,8 @@ algo-memory/
 │   │   ├── store.ts         # 写入引擎（Buffer/LLM队列/批处理）
 │   │   ├── retrieve.ts       # 检索引擎（FTS5/评分/MMR/多路召回）
 │   │   ├── recall.ts         # 召回决策（shouldRetrieve/sessionDedup）
-│   │   └── llm.ts            # LLM 客户端（多provider/重试/缓存）
+│   │   ├── llm.ts            # LLM 客户端（多provider/重试/缓存）
+│   │   └── context-engine.ts # OpenClaw ContextEngine 接口实现
 │   ├── db/
 │   │   ├── schema.ts         # SQLite 建表 + FTS5 + 触发器
 │   │   └── queries.ts        # queryAll/queryOne/run 封装
