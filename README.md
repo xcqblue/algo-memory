@@ -244,6 +244,7 @@ Ollama:      llama2, mistral
 ### 自适应召回
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
+| `adaptiveRetrieval.enabled` | `true` | 开启自适应召回 |
 | `adaptiveRetrieval.minQueryLength` | `2` | 查询长度小于此值不触发召回 |
 | `adaptiveRetrieval.forceKeywords` | 见下方 | 含这些词强制触发召回 |
 | `adaptiveRetrieval.sessionDedup.enabled` | `true` | 开启会话内去重 |
@@ -277,16 +278,37 @@ Ollama:      llama2, mistral
 > ```
 > 用于在 capture 阶段过滤 OpenClaw 飞书等平台的元数据包裹层，避免 `Conversation info` JSON 块污染记忆库。
 
+### Agent 记忆隔离
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `scopes.enabled` | `true` | 启用 Agent 记忆隔离模式 |
+| `scopes.defaultScope` | `"agent"` | 默认作用域 |
+| `scopes.visibleAgents` | `[]` | 允许跨 Agent 查看的 Agent ID 列表（空=仅自己）|
+
+### 自然语言修正（feedback）
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `feedback.enabled` | `true` | 开启自然语言修正功能 |
+| `feedback.maxMemories` | `5` | 修正时召回的记忆条数上限 |
+| `feedback.matchThreshold` | `0.6` | LLM 判断匹配度阈值，超过才视为相关 |
+
 ### LLM（可选，默认关闭）
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `llm.enabled` | `false` | 是否启用 LLM |
-| `llm.provider` | `"auto"` | 提供商 |
-| `llm.model` | `""` | 模型名称（留空使用各 provider 默认）|
-| `llm.customModelNames` | `{}` | 自定义模型显示名映射 |
-| `threshold.useLlmForCore` | `false` | LLM 判断 core |
+| `llm.provider` | `"auto"` | 提供商（`minimax`/`deepseek`/`kimi`/`zhipu`/`qwen` 等）|
+| `llm.apiKey` | `""` | API 密钥（也可通过环境变量传入）|
+| `llm.baseURL` | `""` | API 地址（留空用默认值，部分 provider 需自设）|
+| `llm.model` | `""` | 模型名称（留空使用各 provider 默认模型）|
+| `llm.customModelNames` | `{}` | 自定义模型显示名映射，key=API模型名，value=显示名 |
+| `threshold.useLlmForCore` | `false` | LLM 判断是否为核心记忆 |
 | `threshold.useLlmForExtract` | `false` | LLM 提取关键词 |
-| `threshold.useLlmForDedup` | `false` | LLM 辅助去重 |
+| `threshold.useLlmForDedup` | `false` | LLM 辅助去重判断 |
+| `threshold.minConfidence` | `0.8` | LLM 判断最小置信度 |
+| `threshold.lengthForCore` | `100` | 触发 LLM 核心判断的内容长度阈值 |
+| `threshold.lengthForExtract` | `200` | 触发 LLM 关键词提取的内容长度阈值 |
+| `threshold.dedupUncertaintyMin` | `0.5` | Jaccard 相似度低于此值不使用 LLM |
+| `threshold.dedupUncertaintyMax` | `0.98` | Jaccard 相似度高于此值直接判定重复 |
 
 ### 批量与压缩
 | 配置项 | 默认值 | 说明 |
@@ -376,24 +398,28 @@ algo-memory 和 OpenClaw 内置的 `memory-core` / `memory-lancedb` **共用同�
 ```
 algo-memory/
 ├── src/
-│   ├── index.ts          # MemoryPlugin 主类 + 工具注册 + Hook 绑定
-│   ├── types.ts          # TypeScript 类型定义 + 配置默认值
-│   ├── utils.ts          # 工具函数（Weibull/Jaccard/MMR/token估算）
+│   ├── index.ts              # MemoryPlugin 主类 + 工具注册 + Hook 绑定
+│   ├── types.ts              # TypeScript 类型定义 + 配置默认值
+│   ├── utils.ts              # 工具函数（Weibull/Jaccard/MMR/token估算/噪声过滤）
 │   ├── engine/
-│   │   ├── store.ts     # 写入引擎（Buffer/LLM队列/批处理）
-│   │   ├── retrieve.ts  # 检索引擎（FTS5/评分/MMR）
-│   │   ├── recall.ts    # 召回决策（shouldRetrieve/sessionDedup）
-│   │   └── llm.ts       # LLM 客户端（多provider/重试/缓存）
+│   │   ├── store.ts          # 写入引擎（Buffer/LLM队列/批处理）
+│   │   ├── retrieve.ts       # 检索引擎（FTS5/评分/MMR/多路召回）
+│   │   ├── recall.ts         # 召回决策（shouldRetrieve/sessionDedup）
+│   │   └── llm.ts            # LLM 客户端（多provider/重试/缓存）
 │   ├── db/
-│   │   ├── schema.ts    # SQLite 建表 + FTS5 + 触发器
-│   │   └── queries.ts   # queryAll/queryOne/run 封装
-│   └── __tests__/       # 测试文件（228 个测试）
-├── dist/                # TypeScript 编译输出
-├── CHANGELOG.md         # 版本变更历史
-├── ARCHITECTURE.md      # 系统架构设计文档
-├── CONFIG.md            # 完整配置参考
-├── INSTALL.md           # 安装指南
-└── openclaw.plugin.json # OpenClaw 插件配置
+│   │   ├── schema.ts         # SQLite 建表 + FTS5 + 触发器
+│   │   └── queries.ts        # queryAll/queryOne/run 封装
+│   └── __tests__/            # Vitest 测试文件（~2844 行）
+├── dist/                     # TypeScript 编译输出（npm run build）
+├── config.default.json       # 默认配置参考（直接复制到 openclaw.json 使用）
+├── vitest.config.ts          # Vitest 测试框架配置
+├── CHANGELOG.md              # 版本变更历史
+├── ARCHITECTURE.md            # 系统架构设计文档
+├── CONFIG.md                 # 完整配置参考（完整配置项说明）
+├── INSTALL.md                # 安装指南（快速开始 + 完整安装 + 更新）
+├── README.md                 # 本文件
+├── update.sh                 # 一键更新脚本（备份 → git pull → 编译 → 重启）
+└── openclaw.plugin.json      # OpenClaw 插件配置（configSchema + uiHints）
 ```
 
 ---

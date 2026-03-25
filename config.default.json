@@ -30,11 +30,6 @@
     "minQueryLength": 2,
     "forceKeywords": ["记住", "之前", "上次", "记得", "remember", "before", "last"]
   },
-  "sessionSummary": {
-    "enabled": true,
-    "dir": "memory",
-    "maxItems": 50
-  },
   "feedback": {
     "enabled": true,
     "maxMemories": 5,
@@ -92,11 +87,6 @@
     "apiKey": "",
     "model": "",
     "baseURL": ""
-  },
-  "mcp": {
-    "enabled": false,
-    "transport": "stdio",
-    "port": 8181
   },
   "threshold": {
     "useLlmForCore": false,
