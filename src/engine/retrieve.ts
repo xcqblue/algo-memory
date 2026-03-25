@@ -60,7 +60,7 @@ export function retrieve(options: RetrievalOptions): Memory[] {
     if (ftsQuery) {
       try {
         const runFts = (q: string): Memory[] => {
-          const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? ORDER BY bm25(fts, 1.0, 2.0) DESC, m.importance DESC LIMIT ?`;
+          const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? ORDER BY bm25(fts) DESC, m.importance DESC LIMIT ?`;
           const params = visibleAgentIds !== null ? [...visibleAgentIds, q, safeLimit] : [q, safeLimit];
           return queryAll(db, baseSql, params) as unknown as Memory[];
         };
