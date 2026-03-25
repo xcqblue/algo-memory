@@ -82,10 +82,11 @@ export function normalizeText(text: string): string {
  * 用于语义去重 + 来源标签过滤
  */
 const METADATA_LIKE_PATTERNS = [
-  /^Conversation info[\s\S]{0,100}?---/i,
-  /^\{[\s\S]*?"message_id"[\s\S]*?"sender"[\s\S]*?\}/,
-  /^\{[\s\S]*?"sender_id"[\s\S]*?"timestamp"[\s\S]*?\}/,
-  /^Sender[\s\S]{0,100}?---/i,
+  /^Conversation info[\s\S]{0,500}?---/i,    // 宽松：Conversation info 到 --- 之间可以更长
+  /^\{[\s\S]*?"message_id"[\s\S]*?\}/,       // JSON对象含 message_id
+  /^\{[\s\S]*?"sender_id"[\s\S]*?\}/,         // JSON对象含 sender_id
+  /^Sender[\s\S]{0,200}?---/i,                // Sender 块到 --- 之间
+  /^Conversation info[\s\S]*?json\s*\{/i,     // Feishu格式：Conversation info + json {
 ];
 
 export function isMetadataLike(content: string): boolean {
@@ -113,6 +114,9 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
 
   // 纯标点/符号
   if (/^[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?\s]+$/.test(content)) return true;
+
+  // 纯数字（无任何字母或中文）
+  if (/^\d+$/.test(content.trim())) return true;
 
   // skipPatterns：正则匹配，符合任一模式直接跳过
   if (config.skipPatterns && config.skipPatterns.length > 0) {
@@ -235,10 +239,71 @@ export function extractContentSummary(content: string, maxKeywords: number = 5):
 }
 
 // ============= Keyword Extraction =============
+/**
+ * Score a message by how many core keywords it contains.
+ * Higher score = more likely to be worth storing.
+ * Fallback: if no core keyword matched but content is meaningful (>=10 Chinese chars
+ * or >=15 Latin chars), give a base score of 1 so it passes to the next filter (isNoise).
+ */
+export function messagePriority(content: string, coreKeywords: string[]): number {
+  if (!coreKeywords.length) return 0;
+  const lower = content.toLowerCase();
+  const kwScore = coreKeywords.filter(kw => lower.includes(kw.toLowerCase())).length;
+  if (kwScore > 0) return kwScore;
+
+  // No core keyword matched — give a保底 score if content is meaningful enough
+  // to survive the next filter (isNoise).
+  const chineseChars = (content.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latinChars = (content.match(/[a-zA-Z]/g) || []).length;
+  const meaningfulLen = chineseChars * 1 + latinChars * 0.4; // weighted length
+  if (meaningfulLen >= 10) return 1;
+  return 0;
+}
+
+/**
+ * Normalize content before storing: strip @mentions, compress whitespace, remove markdown noise.
+ * Also strips inbound metadata via stripInboundMetadata().
+ */
+export function normalizeForStorage(content: string): string {
+  let text = typeof content === 'string' ? content : String(content ?? '');
+  text = stripInboundMetadata(text);
+  text = text
+    .replace(/@[^\s]+/g, '')   // @mention 支持中文/英文用户名（\w 不匹配中文）
+    .replace(/\s+/g, ' ')
+    .replace(/```[\s\S]*?```/g, m => m.replace(/```/g, ''))
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s*/gm, '')
+    .trim();
+  return text;
+}
+
+export function safeContent(content: string): string {
+  return normalizeForStorage(content);
+}
+
 export function extractKeywords(content: string): string {
-  // CJK 单字分词（与 jaccardSimilarity 保持一致），英文/数字按词
-  const words = content.toLowerCase().match(/[\u4e00-\u9fa5]|[a-z0-9]+/gi) || [];
-  return [...new Set(words)].slice(0, MAX_KEYWORDS).join(',');
+  // 中文使用 2-gram（解决单字无意义问题），英文/数字按词
+  const chinesePart = content.toLowerCase().match(/[\u4e00-\u9fa5]+/g) || [];
+  const latinPart = content.toLowerCase().match(/[a-z0-9]+/gi) || [];
+
+  const keywords = new Set<string>();
+  // 中文 2-gram
+  for (const seg of chinesePart) {
+    for (let i = 0; i < seg.length - 1; i++) {
+      const bigram = seg.substring(i, i + 2);
+      if (bigram.length === 2) keywords.add(bigram);
+    }
+  }
+  // 英文/数字直接添加（过滤掉纯数字）
+  for (const w of latinPart) {
+    if (/\d/.test(w)) continue; // skip pure numbers
+    if (w.length >= 2) keywords.add(w);
+  }
+  return [...keywords].slice(0, MAX_KEYWORDS).join(',');
 }
 
 export function isCoreKeyword(content: string, keywords: string[]): boolean {

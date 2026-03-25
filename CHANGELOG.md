@@ -2,6 +2,32 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.7.3] - 2026-03-25
+
+### Bug Fixes（单元测试 + 集成测试发现问题并修复）
+
+#### 系统消息过滤顺序修复
+- **问题**：`isSystemMessage()` 定义在 `scoredMessages` 过滤之后，但 filter 中只检查 `score > 0`，导致 score=0 的系统消息直接跳过，永远没机会进入 `isSystemMessage`
+- **修复**：将 `isSystemMessage()` 移到 `scoredMessages` 定义之前，并将其整合进 filter 条件 `!isSystemMessage(msg)`
+- **效果**："A new session was started via /new" 等系统消息无论 score 如何都能被正确过滤
+
+#### extractKeywords 中文分词修复（2-gram）
+- **问题**：中文使用单字分词，导致"生日"被拆成"生"+"日"，关键词质量差，FTS 搜索噪音大
+- **修复**：中文改用 2-gram（相邻字组合），英文/数字按词，同时过滤纯数字词条
+- **效果**："我的生日是6月1日" → `我的,的生,生日,日是,日生`，关键词更精准
+
+#### normalizeForStorage @mention 剥离修复
+- **问题**：`/@\w+/g` 中 `\w` 不匹配中文字符，导致 `@张三` 无法被剥离
+- **修复**：改为 `/@[^\s]+/g`，支持中文/英文用户名
+
+#### isNoise 纯数字过滤
+- **问题**：`isNoise` 未覆盖纯数字场景，"1234567890" 被判定为非噪音
+- **修复**：新增 `/^\d+$/.test(content.trim())` 检查
+
+#### isMetadataLike Feishu 格式检测修复
+- **问题**：Feishu `Conversation info` 格式中间隔较长（`---` 在 Sender 块后才出现），原正则 `/^Conversation info[\s\S]{0,100}?---/` 无法匹配
+- **修复**：将限制放宽至 500 字符，并新增 `/^Conversation info[\s\S]*?json\s*\{/i` 专门匹配 Feishu 格式
+
 ## [2.7.2] - 2026-03-25
 
 ### Bug Fixes（消息保底机制 + 元数据剥离修复 + 系统消息过滤 + Tier损坏防御）
