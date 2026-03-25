@@ -46,6 +46,7 @@ openclaw gateway restart
 |------|------|------|
 | `agent_end` | 每次对话结束 | capture 用户消息，写入 buffer |
 | `before_prompt_build` | LLM 调用前 | 检索相关记忆，注入上下文；实时存储上一轮消息 |
+| `tool_result_persist` | 工具结果写入 transcript 前 | 优先 JSON 解析提取 memory ID，实时强化召回记忆 |
 | `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store；tier 强化/清理 |
 | `after_compaction` | compaction 结束后 | 仅记录日志（强化已在 before_compaction 完成）|
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
@@ -65,7 +66,10 @@ openclaw gateway restart
 
 通过 `registerTool()` 自动暴露，无需额外 MCP 配置。
 
-### Gateway RPC（通过 registerGatewayMethod 注册，支持 CLI/HTTP 调用）
+### Gateway RPC（通过 `registerGatewayMethod` 注册，支持 CLI/HTTP 调用，无需 LLM）
+
+签名：`async (opts: GatewayRequestHandlerOptions) => void`
+调用方式：`opts.respond(true, result)` 返回结果，`opts.respond(false, undefined, error)` 返回错误
 
 | 方法 | 说明 |
 |------|------|
@@ -77,8 +81,8 @@ openclaw gateway restart
 
 ```bash
 # CLI 调用示例
-openclaw gateway call algo-memory.stats --agentId default
-openclaw gateway call algo-memory.search --query "腾讯持仓"
+openclaw gateway call algo-memory.stats --params '{"agentId":"default"}'
+openclaw gateway call algo-memory.search --params '{"query":"腾讯持仓"}'
 ```
 
 ### 核心

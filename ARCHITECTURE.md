@@ -191,6 +191,7 @@ registerHook()
     │
     ├─ before_prompt_build ──► recall() ──► return { prependSystemContext }
     │                          store() ──► scheduleBatchWrite()（实时存储）
+    │                          ⚠ trigger===memory/heartbeat/cron 时跳过 recall（防递归）
     │
     ├─ agent_end ──► store() ──► scheduleBatchWrite()
     │
@@ -203,6 +204,7 @@ registerHook()
     ├─ after_compaction ──►（仅记录日志，强化在 before_compaction 完成）
     │
     ├─ after_tool_call ──► reinforceCitedMemories()（JSON.parse 安全解析）
+    ├─ tool_result_persist ──► reinforceCitedMemories()（AgentMessage 结构解析，优先 JSON）
     │
     ├─ session_start ──► clearRecallCache()（初始化会话状态）
     ├─ session_end ──► flushAllBuffers()（确保 buffer 入库）

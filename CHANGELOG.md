@@ -53,6 +53,21 @@ All notable changes to algo-memory are documented here.
 - **修复**：在 `before_compaction` 中检测 `memoryFlush.enabled` 状态；若 memoryFlush 启用，则跳过 `store()`（由 memoryFlush 写 Markdown），仅执行 `promotePeripheralOnCompaction()` 和 `reinforceOnCompaction()`；algo-memory 的实时 hooks（`before_prompt_build` / `agent_end`）继续写入 SQLite，两系统无冲突
 - **效果**：无需用户手动配置，两者共存时自动消解冲突
 
+#### Gateway RPC 签名修复
+- **问题**：`registerGatewayMethod` 的 handler 签名错误，直接返回结果而非调用 `respond()`，导致 gateway method 无法被调用
+- **修复**：改用 `async (opts: GatewayRequestHandlerOptions) => void`，通过 `opts.respond(true, result)` 返回，`opts.params` 读取参数
+- **效果**：gateway method 真正可用：`openclaw gateway call algo-memory.stats --params '{"agentId":"default"}'`
+
+#### tool_result_persist Hook
+- **问题**：`after_tool_call` 的 `event.result` 为字符串，需要正则提取 memory ID
+- **修复**：新增 `tool_result_persist` hook，`event.message` 为 AgentMessage 结构，可直接 JSON 解析
+- **效果**：ID 提取更可靠，早于 `after_tool_call` 触发
+
+#### ctx.trigger 防递归召回
+- **问题**：`before_prompt_build` 的 recall 在 memory/heartbeat/cron 触发的 agent turn 中会递归调用
+- **修复**：增加 `ctx.trigger` 检查，当 trigger 为 `memory`/`heartbeat`/`cron` 时跳过 recall
+- **效果**：避免 memory 触发的 agent turn 中重复召回
+
 ## [2.7.4] - 2026-03-25
 
 ### Bug Fixes（agent_end 在嵌入式模式不触发per-turn的修复）
