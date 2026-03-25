@@ -1,27 +1,21 @@
 /**
- * algo-memory v3.0.0
+ * algo-memory v3.1.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
  *
+ * v3.1.0 OpenClaw 兼容性优化:
+ * - 新增 openClawMemoryMode 配置：auto / standalone / retrieval-only
+ * - auto 模式自动检测 OpenClaw built-in memory 是否启用
+ * - retrieval-only 模式：关闭 auto-capture hooks（避免与 memoryFlush 重复存储），
+ *   存储交给 OpenClaw built-in memory，algo-memory 仅通过 ContextEngine assemble() 提供 FTS5 检索增强
+ * - 新增 syncToWorkspace 配置：将记忆同步写入 workspace Markdown（与 memory_search 工具互通）
+ *
  * v3.0.0 优化:
- * - 多路召回优化：先在原始 query 生成多路，再分别 Trie 展开
- * - recall 和 search 统一走 retrieve() 检索引擎（含 TierGroupedMMR）
+ * - recall/search 统一走 retrieve() 检索引擎（含 TierGroupedMMR）
  * - LLM 队列动态批次（队列深度决定批次大小和处理延迟）
  * - cleanupEmptyBuffers 30 分钟强制清理（防止 buffer 堆积）
  * - hash 预热改为"今日+最近1000条"并集
- *
- * v2.9.0 优化:
- * - Tier 分组内 MMR 去重（core 记忆不被 peripheral 挤出）
- * - Trie 树同义词展开（FTS5 查询 O(query_len) 替代 O(query_len × syn_count)）
- * - 批量去重 O(n log n) 优化（按长度窗口比较）
- * - 多路召回缩减为 2 路（原始 + 前缀 3-token）
- * - 会话去重增加长度豁免（追问类查询不被误拦截）
- * - Peripheral cleanup 双 cutoff（created_at + last_accessed）
- * - before_compaction 放弃 2s 有限等待（fire-and-forget，session_end 兜底）
- * - Tier 评分分段公式（解决对数饱和问题）
- * - Content hash 内存预热（O(1) 精确去重）
- * - 新增 DB 索引（peripheral_cleanup / agent_created / content_hash）
  */
 
 import path from 'path';
@@ -104,6 +98,8 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     threshold: { ...DEFAULT_CONFIG.threshold, ...userConfig.threshold },
     autoCapture: scalar('autoCapture', DEFAULT_CONFIG.autoCapture),
     autoRecall: scalar('autoRecall', DEFAULT_CONFIG.autoRecall),
+    openClawMemoryMode: scalar('openClawMemoryMode', DEFAULT_CONFIG.openClawMemoryMode) as 'auto' | 'standalone' | 'retrieval-only',
+    syncToWorkspace: scalar('syncToWorkspace', DEFAULT_CONFIG.syncToWorkspace),
     maxResults: scalar('maxResults', DEFAULT_CONFIG.maxResults),
     maxInjectTokens: scalar('maxInjectTokens', DEFAULT_CONFIG.maxInjectTokens),
     cleanupDays: scalar('cleanupDays', DEFAULT_CONFIG.cleanupDays),
@@ -124,7 +120,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
-  version = '3.0.0';
+  version = '3.1.0';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -139,6 +135,8 @@ class MemoryPlugin {
   private ftsAvailable: boolean = false;
   /** true = OpenClaw memoryFlush is active; algo-memory will skip store() in before_compaction */
   memoryFlushActive: boolean = false;
+  /** v3.1.0: workspace 目录路径，用于 syncMemoriesToWorkspace */
+  workspaceDir: string = '';
   /** per-agent 会话去重追踪（避免跨 Agent 误拦截） */
   private lastRecallQuery: Map<string, string> = new Map();
   private lastRecallTime: Map<string, number> = new Map();
@@ -298,6 +296,8 @@ class MemoryPlugin {
       metrics: this.metrics,
       // v2.9.0: 内存 hash 预热集合（O(1) 精确去重）
       contentHashSet: this.contentHashSet,
+      // v3.1.0: workspace 目录（syncMemoriesToWorkspace 需要）
+      workspaceDir: this.config.syncToWorkspace ? this.workspaceDir : undefined,
     };
     await doStore(deps, AgentId, messages);
   }
@@ -924,7 +924,7 @@ confidence 是 0-1 的置信度。
   /** 手动刷新所有 agent 的 buffer 到 DB */
   flushAll(): void {
     if (!this.db) return;
-    flushAllBuffers(this._db(), this.config, this.log);
+    flushAllBuffers(this._db(), this.config, this.log, this.workspaceDir);
   }
 
   /**
@@ -1132,7 +1132,7 @@ confidence 是 0-1 的置信度。
         // 1. Mark closing — prevents any new async store() from scheduling writes into closed DB
         setClosing();
         // 2. Flush all buffers synchronously — drain anything still pending
-        flushAllBuffers(this._db(), this.config, this.log);
+        flushAllBuffers(this._db(), this.config, this.log, this.workspaceDir);
       } catch (err: any) {
         this.log.error('[algo-memory] close() flush 失败:', err?.message ?? err);
       }
@@ -1159,29 +1159,76 @@ export default {
 
     const plugin = new MemoryPlugin(config, log);
 
-    // === Conflict detection: algo-memory vs OpenClaw built-in memoryFlush ===
-    // When algo-memory's autoCapture is enabled AND OpenClaw's memoryFlush is also enabled,
-    // both systems will store memories during compaction, causing duplicate entries.
+    // === v3.1.0 OpenClaw 兼容性模式检测 ===
     //
-    // Self-abstention approach: detect memoryFlush at startup and let algo-memory
-    // skip its compaction-time store() when memoryFlush is active.
-    // OpenClaw's memoryFlush writes Markdown; algo-memory relies on its real-time
-    // hooks (before_prompt_build / agent_end) for SQLite storage — no duplication.
-    const memoryFlushActive = config.autoCapture && api.config?.agents?.defaults?.compaction?.memoryFlush?.enabled !== false;
-    if (memoryFlushActive) {
-      log.warn(
-        '[algo-memory] 检测到 memoryFlush 已启用。' +
-        'algo-memory 将在 compaction 时跳过 store()（避免重复存储），' +
-        '由 memoryFlush 写入 Markdown。实时 hooks 继续写入 SQLite。' +
-        '如需 algo-memory 完全接管，请设置 "agents.defaults.compaction.memoryFlush.enabled": false'
+    // OpenClaw built-in memory 系统与 algo-memory 存在三个层面的重叠：
+    //
+    // 1. 存储冲突（agent_end hooks）：
+    //    - algo-memory: before_prompt_build + agent_end → SQLite
+    //    - OpenClaw memoryFlush: compaction 前静默轮次 → Markdown
+    //    → 两套系统对同一条消息分别存储，内容重复
+    //
+    // 2. 召回冲突（before_prompt_build）：
+    //    - algo-memory: before_prompt_build → prependSystemContext 注入记忆
+    //    - OpenClaw memory_search 工具: agent 可主动调用 → Markdown 搜索结果注入
+    //    → 非直接冲突（工具调用是 agent 主动的），但存在双路注入风险
+    //
+    // 3. ContextEngine 冲突：
+    //    - algo-memory 的 assemble() 与 OpenClaw built-in engine 同时存在
+    //    - 如果 plugins.slots.contextEngine 设为 algo-memory，OpenClaw built-in 会被停用
+    //    → 不是冲突，反而是优势（algo-memory 可接管 OpenClaw 的 context engine）
+    //
+    // 兼容性模式策略：
+    // - standalone: algo-memory 完全独立（v3.0.0 行为），忽略 OpenClaw built-in memory
+    // - retrieval-only: 关闭 auto-capture hooks，存储交给 OpenClaw built-in memory，
+    //                  algo-memory 仅通过 ContextEngine 的 assemble() 提供 FTS5 检索增强
+    // - auto: 自动检测 OpenClaw built-in memory 状态，选择最优协作模式
+
+    // 检测 OpenClaw built-in memory 是否激活
+    const openClawMemoryEnabled = (() => {
+      // 1. memoryFlush 启用
+      const memoryFlush = api.config?.agents?.defaults?.compaction?.memoryFlush;
+      if (memoryFlush && (memoryFlush as any).enabled !== false) return true;
+      // 2. memory-lancedb 插件启用
+      const memorySlot = api.config?.plugins?.slots?.memory;
+      if (memorySlot && memorySlot !== 'none') return true;
+      // 3. memory-core 插件显式启用（memorySlot === 'memory-core'）
+      if (memorySlot === 'memory-core') return true;
+      return false;
+    })();
+
+    // 确定最终工作模式
+    const effectiveMode = config.openClawMemoryMode === 'standalone'
+      ? 'standalone'
+      : config.openClawMemoryMode === 'retrieval-only'
+      ? 'retrieval-only'
+      : openClawMemoryEnabled
+      ? 'retrieval-only'
+      : 'standalone';
+
+    // 检测结果日志
+    if (effectiveMode === 'retrieval-only') {
+      log.info(
+        `[algo-memory] OpenClaw built-in memory 已启用（mode=${effectiveMode}）。` +
+        `auto-capture hooks 已关闭（避免重复存储），` +
+        `存储由 OpenClaw built-in memory 负责，algo-memory 通过 ContextEngine assemble() 提供 FTS5 检索增强。` +
+        `如需 algo-memory 完全独立，请设置 openClawMemoryMode: "standalone"。`
       );
+    } else {
+      log.info(`[algo-memory] 独立模式运行（mode=${effectiveMode}），algo-memory 完整接管存储和检索。`);
     }
 
     await plugin.init(api.getStateDir?.() || api.stateDir ||
       path.join(process.env.HOME || '/home/x', '.openclaw', 'state', 'algo-memory'));
 
-    // Pass memoryFlush state to the plugin so before_compaction can reference it
-    plugin.memoryFlushActive = memoryFlushActive;
+    // Pass effectiveMode to the plugin so hooks can reference it
+    plugin.memoryFlushActive = effectiveMode === 'retrieval-only';
+
+    // v3.1.0: 获取 workspace 目录用于 syncMemoriesToWorkspace
+    // api.workspaceDir 是 OpenClaw 提供的 workspace 路径（默认 ~/.openclaw/workspace）
+    plugin.workspaceDir = (api as any).workspaceDir
+      || (api.config as any)?.agents?.defaults?.workspace
+      || path.join(process.env.HOME || '/home/x', '.openclaw', 'workspace');
 
     // Register as a ContextEngine — enables deep OpenClaw integration
     // algo-memory acts as the context management engine for the agent
@@ -1284,6 +1331,7 @@ export default {
     // 在消息进入 transcript 之前提前剥离元数据 + 哈希去重
     // 比 store() 更早拦截重复消息，减少 store 引擎压力
     // 注意：before_dispatch 只能读取 event.inbound（入站消息），不能拦截出站回复
+    // v3.1.0: 此钩子不受兼容性模式影响（哈希精确去重是良性功能，不会与任何系统冲突）
     api.on('before_dispatch', async (event: any, ctx: any) => {
       if (!plugin.isActive()) return;
       // 只做精确哈希去重一件事：检查 DB 中是否有完全相同内容_hash 的记忆
@@ -1316,7 +1364,13 @@ export default {
       }
     });
 
-    if (config.autoCapture) {
+    // === auto-capture hooks（受兼容性模式控制）===
+    // v3.1.0: 在 retrieval-only 模式下，这些 hooks 会被禁用，
+    // 避免与 OpenClaw built-in memory（memoryFlush）重复存储同一批消息。
+    // 存储完全交给 OpenClaw built-in memory，algo-memory 仅提供 FTS5 检索增强。
+    const storeHooksEnabled = config.autoCapture && effectiveMode !== 'retrieval-only';
+
+    if (storeHooksEnabled) {
       // Store previous turn on every before_prompt_build
       api.on('before_prompt_build', async (event: any, ctx: any) => {
         try {
@@ -1348,9 +1402,19 @@ export default {
           });
         }
       });
+    } else if (effectiveMode === 'retrieval-only') {
+      log.info(`[algo-memory] auto-capture hooks 已禁用（retrieval-only 模式），存储由 OpenClaw built-in memory 负责`);
     }
 
-    if (config.autoRecall) {
+    // === auto-recall hooks ===
+    // v3.1.0: autoRecall 在 retrieval-only 模式下依然启用（检索增强不与任何系统冲突）
+    // 但在 retrieval-only 模式下，召回完全由 ContextEngine 的 assemble() 接管，
+    // before_prompt_build 的 prependSystemContext 注入属于"双路注入"，可能导致重复。
+    // 因此 retrieval-only 模式下关闭 before_prompt_build 的 prependSystemContext 注入，
+    // 由 ContextEngine assemble() 作为唯一的召回注入通道。
+    const recallViaHook = config.autoRecall && effectiveMode === 'standalone';
+
+    if (recallViaHook) {
       api.on('before_prompt_build', async (event: any, ctx: any) => {
         try {
           const agentId = ctx?.agentId || 'default';
@@ -1395,61 +1459,41 @@ export default {
           log.error('[algo-memory] before_prompt_build 钩子错误:', err?.message ?? err, err?.stack);
         }
       }, { priority: 10 });
-
+    } else if (effectiveMode === 'retrieval-only') {
+      log.info(`[algo-memory] recall hook 注入已禁用（retrieval-only 模式），召回完全由 ContextEngine assemble() 接管`);
     }
 
-    // === Compaction lifecycle (March 5 2026: before_compaction / after_compaction hooks) ===
+    // === Compaction lifecycle ===
     // OpenClaw calls these during context compression cycles.
     // before_compaction: event.messages is pre-populated with the session history to be compacted.
-    //                    Use it directly — no need to read from disk (fs.readFileSync is sync-blocking!).
     // after_compaction:  event.compactedCount — reinforce memories cited during compaction.
     //
-    // NOTE: This hook runs IN PARALLEL with the compaction LLM call.
-    // All operations are fire-and-forget (no await) so they do NOT block compaction.
-    //
-    // Self-abstention (memoryFlushActive):
-    // When OpenClaw's memoryFlush is active, it writes Markdown during compaction.
-    // algo-memory's before_prompt_build/agent_end hooks are already storing to SQLite
-    // in real time, so skipping store() here avoids duplicate storage.
-    // promotePeripheralOnCompaction and reinforceOnCompaction still run — they only touch SQLite.
-    //
-    // v2.9.0 优化：移除 before_compaction 的 store() 有限等待
-    // 
-    // 问题：旧实现的 Promise.race([storePromise, 2000ms timeout]) 不可靠：
-    //   - 如果消息量大或 LLM API 慢，store 永远无法在 2s 内完成
-    //   - 超时后的 storePromise 仍在后台运行，可能在 gateway restart 时产生竞走
-    // 
-    // 解决：store() 完全 fire-and-forget，依赖 session_end / gateway_stop 做最终保证
-    //   - before_prompt_build / agent_end 已在实时存储消息（主要路径）
-    //   - session_end 在会话结束时触发 flushAllBuffers（最终兜底）
-    //   - gateway_stop 确保进程退出前所有 buffer 落地
+    // v3.1.0 兼容性：store() 行为由 effectiveMode 控制
+    // - standalone: before_compaction store() fire-and-forget（session_end 兜底）
+    // - retrieval-only: 跳过 store()（OpenClaw memoryFlush 负责 Markdown 写入）
+    // promotePeripheralOnCompaction 和 reinforceOnCompaction 始终运行（仅操作 SQLite，无冲突风险）
     api.on('before_compaction', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
       if (!plugin.isActive() || !config.autoCapture) return;
 
-      // event.messages is provided directly by OpenClaw — use it instead of re-reading disk.
-      // This avoids a synchronous fs.readFileSync which would block the gateway event loop.
       const sessionMessages: any[] = Array.isArray(event.messages) ? event.messages : [];
 
       if (sessionMessages.length > 0) {
-        if (!plugin.memoryFlushActive) {
-          // v2.9.0: 先同步 flush 已缓冲数据，再 fire-and-forget 新消息存储
-          // 放弃有限等待，让 session_end 做最终兜底
+        if (effectiveMode === 'standalone') {
+          // standalone 模式：先 flush buffer，再 fire-and-forget 新消息存储
           const { flushAllBuffers } = await import('./engine/store.js');
-          flushAllBuffers(plugin.getDb(), config, log);
-
-          // Fire-and-forget：store() 异步运行，不等待
-          // 进程退出前 session_end / gateway_stop 会触发 flushAllBuffers 做兜底
+          flushAllBuffers(plugin.getDb(), config, log, plugin.workspaceDir);
           plugin.store(agentId, sessionMessages).catch((err: any) => {
             log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
           });
-          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息（fire-and-forget，session_end 兜底）`);
+          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息（standalone 模式，fire-and-forget）`);
         } else {
-          log.info(`[algo-memory] before_compaction: memoryFlush 已启用，跳过 store()（避免重复存储），buffer 待下次 flush`);
+          // retrieval-only: memoryFlush 负责 Markdown，buffer 待下次 flush
+          log.info(`[algo-memory] before_compaction: retrieval-only 模式，跳过 store()（由 memoryFlush 负责 Markdown 存储）`);
         }
       }
 
-      // These always run — they only affect SQLite tier management, no duplication risk.
+      // 这些始终运行 — 仅操作 SQLite，无冲突风险
       plugin.promotePeripheralOnCompaction(agentId).catch((err: any) => {
         log.error('[algo-memory] before_compaction promote 错误:', err?.message ?? err);
       });
@@ -1615,7 +1659,7 @@ export default {
       // gateway restart 后恢复的会话：先抢救 unflushed buffer，再清缓存
       if (trigger !== 'heartbeat' && trigger !== 'cron') {
         const { flushAllBuffers } = await import('./engine/store.js');
-        flushAllBuffers(plugin.getDb(), config, log);
+        flushAllBuffers(plugin.getDb(), config, log, plugin.workspaceDir);
         log.info(`[algo-memory] session_start: gateway restart 抢救 buffer, agentId=${agentId}`);
       }
       // 清 recall 缓存（每个会话独立，防止跨会话重复召回）
@@ -1629,7 +1673,7 @@ export default {
       const reason = event?.reason || 'unknown';
       // Ensure all buffers are flushed at session end
       const { flushAllBuffers } = await import('./engine/store.js');
-      flushAllBuffers(plugin.getDb(), config, log);
+      flushAllBuffers(plugin.getDb(), config, log, plugin.workspaceDir);
       log.info(`[algo-memory] session_end: agentId=${agentId}, reason=${reason}, buffers flushed`);
     });
 
@@ -1641,7 +1685,7 @@ export default {
       const agentId = ctx?.agentId || 'default';
       if (!plugin.isActive()) return;
       const { flushAllBuffers } = await import('./engine/store.js');
-      flushAllBuffers(plugin.getDb(), config, log);
+      flushAllBuffers(plugin.getDb(), config, log, plugin.workspaceDir);
       plugin.clearRecallCache(agentId);
       log.info(`[algo-memory] before_reset: agentId=${agentId}，buffer 已抢救，recall 缓存已清`);
     });

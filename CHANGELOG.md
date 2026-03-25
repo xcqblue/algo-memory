@@ -2,6 +2,49 @@
 
 All notable changes to algo-memory are documented here.
 
+## [3.1.0] - 2026-03-25
+
+### OpenClaw 兼容性优化
+
+#### 新增 openClawMemoryMode 配置
+- **问题**：algo-memory 的 `autoCapture`/`autoRecall` hooks 与 OpenClaw built-in memory 系统存在三个层面的重叠：
+  1. **存储冲突**：`agent_end` hook 与 `memoryFlush` 都存储消息
+  2. **召回冲突**：`before_prompt_build` prependSystemContext 与 `memory_search` 工具双路注入
+  3. **ContextEngine 冲突**：两者都实现了 `assemble/compact/ingest` 接口
+- **解决**：新增 `openClawMemoryMode` 配置
+  - `auto`（默认）：自动检测 OpenClaw built-in memory 状态，选择最优协作模式
+  - `standalone`：algo-memory 完全独立（v3.0.0 行为）
+  - `retrieval-only`：关闭 auto-capture hooks，存储交给 OpenClaw built-in memory，algo-memory 仅提供 FTS5 检索增强
+
+#### 新增 syncToWorkspace 功能
+- **问题**：algo-memory 存储在 SQLite，OpenClaw built-in memory 存储在 Markdown，两套系统数据隔离
+- **解决**：新增 `syncToWorkspace` 配置（默认 false）
+  - 启用后，每次 store() 时同步将记忆写入 workspace Markdown
+  - `core` tier → `MEMORY.md`（核心长期记忆）
+  - 所有 tier → `memory/YYYY-MM-DD.md`（每日日志）
+  - 格式兼容 OpenClaw `memory_search` 工具，可直接搜索
+  - 两套系统真正互通
+
+#### 自动检测逻辑
+```
+检测条件（满足任一即为"OpenClaw memory 启用"）：
+1. memoryFlush enabled（compaction 静默轮次）
+2. plugins.slots.memory 非 none（memory-lancedb 等插件）
+3. plugins.slots.memory === 'memory-core'
+
+检测结果：
+- 启用 → effectiveMode = 'retrieval-only'（hooks 注册时自动切换）
+- 未启用 → effectiveMode = 'standalone'
+```
+
+#### 模式切换对 hooks 的影响
+| 模式 | before_prompt_build store | agent_end | before_compaction store | before_prompt_build recall |
+|------|--------------------------|-----------|--------------------------|---------------------------|
+| standalone | ✅ | ✅ | ✅ fire-and-forget | ✅ prependSystemContext |
+| retrieval-only | ❌ 跳过（memoryFlush 负责） | ❌ 跳过 | ❌ 跳过 | ❌ 禁用，由 ContextEngine assemble() 接管 |
+
+---
+
 ## [3.0.0] - 2026-03-25
 
 ### 🔴 高优先级修复

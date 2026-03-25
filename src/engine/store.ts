@@ -369,7 +369,7 @@ function checkIdleAndFlush(db: DbLike, AgentId: string, config: Config, log: any
 /**
  * 将记忆批量写入数据库
  */
-function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any): number {
+function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any, workspaceDir?: string): number {
   const buffer = memoryBuffers.get(AgentId);
   if (!buffer || buffer.memories.length === 0) return 0;
 
@@ -402,6 +402,11 @@ function flushMemoryBuffer(db: DbLike, AgentId: string, config: Config, log: any
 
       inserted = memoriesToWrite.length;
       log.info(`[algo-memory] 批量写入完成: ${inserted} 条记忆`);
+
+      // v3.1.0: sync to workspace markdown
+      if (workspaceDir && inserted > 0) {
+        syncMemoriesToWorkspace(workspaceDir, AgentId, memoriesToWrite, log);
+      }
     } catch (err) {
       log.error('[algo-memory] 批量写入失败:', err);
     }
@@ -434,7 +439,7 @@ function recordTierChange(db: DbLike, memoryId: string, oldTier: string, newTier
 /**
  * 计划批量写入（延迟执行）
  */
-function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: any): void {
+function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: any, workspaceDir?: string): void {
   // Bounce if gateway is closing — prevents async store() from writing into a closed DB
   if (closed) return;
 
@@ -450,7 +455,7 @@ function scheduleBatchWrite(db: DbLike, AgentId: string, config: Config, log: an
   const dynamicBufferMs = getDynamicBufferMs(buffer);
   buffer.timer = setTimeout(() => {
     buffer.timer = null;
-    flushMemoryBuffer(db, AgentId, config, log);
+    flushMemoryBuffer(db, AgentId, config, log, workspaceDir);
   }, dynamicBufferMs);
 }
 
@@ -466,10 +471,10 @@ export function setClosing(): void {
   closed = true;
 }
 
-export function flushAllBuffers(db: DbLike, config: Config, log: any): number {
+export function flushAllBuffers(db: DbLike, config: Config, log: any, workspaceDir?: string): number {
   let total = 0;
   for (const AgentId of memoryBuffers.keys()) {
-    total += flushMemoryBuffer(db, AgentId, config, log);
+    total += flushMemoryBuffer(db, AgentId, config, log, workspaceDir);
   }
   return total;
 }
@@ -628,6 +633,8 @@ export interface StoreDeps {
   };
   /** v2.9.0: 内存中预热的 content_hash 集合，用于 O(1) 精确去重 */
   contentHashSet?: Set<string>;
+  /** v3.1.0: workspace 目录路径，用于 syncMemoriesToWorkspace */
+  workspaceDir?: string;
 }
 
 /**
@@ -954,10 +961,10 @@ export async function store(
 
         // 如果缓冲区满了，立即写入
         if (buffer.memories.length >= (config.batchWrite.maxBatchSize || DEFAULT_VALUES.BATCH_MAX_SIZE)) {
-          flushMemoryBuffer(db, AgentId, config, log);
+          flushMemoryBuffer(db, AgentId, config, log, deps.workspaceDir);
         } else {
           // 否则计划延迟写入
-          scheduleBatchWrite(db, AgentId, config, log);
+          scheduleBatchWrite(db, AgentId, config, log, deps.workspaceDir);
         }
       } else {
         // 直接写入（原有逻辑）- 使用统一SQL构建
@@ -966,6 +973,10 @@ export async function store(
           `INSERT INTO memories (${MEMORY_COLUMNS.join(', ')}) VALUES (${placeholders})`,
           params
         );
+        // v3.1.0: sync to workspace markdown（直接写入模式下立即同步）
+        if (deps.workspaceDir) {
+          syncMemoriesToWorkspace(deps.workspaceDir, AgentId, [memory], log);
+        }
       }
 
       captured++;
@@ -1050,4 +1061,89 @@ export function getBufferStats(): Record<string, { pending: number; flushing: bo
     };
   }
   return result;
+}
+
+// ============= v3.1.0: syncMemoriesToWorkspace =============
+// 将 algo-memory 的记忆同步写入 OpenClaw workspace Markdown 文件
+// 写入位置：
+//   - core tier → MEMORY.md（核心长期记忆）
+//   - 所有 tier → memory/YYYY-MM-DD.md（每日日志）
+// 格式兼容 OpenClaw built-in memory 的 markdown 格式，memory_search 工具可直接搜索
+
+/**
+ * 将记忆同步写入 workspace Markdown 文件
+ * - core tier → MEMORY.md
+ * - 所有 tier → memory/YYYY-MM-DD.md
+ */
+async function syncMemoriesToWorkspace(
+  workspaceDir: string,
+  agentId: string,
+  memories: { content: string; tier: string; created_at: number }[],
+  log: any
+): Promise<void> {
+  if (!workspaceDir || memories.length === 0) return;
+
+  // 动态 import fs/promises（避免顶层依赖）
+  const fs = await import('fs/promises');
+  const path = await import('path');
+
+  try {
+    // 确保 workspace 目录存在
+    const memoryDir = path.join(workspaceDir, 'memory');
+    await fs.mkdir(memoryDir, { recursive: true });
+
+    // 按日期分组
+    const byDate: Record<string, { core: string[]; all: string[] }> = {};
+    for (const m of memories) {
+      const date = new Date(m.created_at);
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      if (!byDate[dateStr]) byDate[dateStr] = { core: [], all: [] };
+      const entry = `- [algo-memory/${m.tier}] ${m.content}`;
+      byDate[dateStr].all.push(entry);
+      if (m.tier === 'core') {
+        byDate[dateStr].core.push(entry);
+      }
+    }
+
+    // 写入每日日志
+    for (const [dateStr, entries] of Object.entries(byDate)) {
+      const dailyPath = path.join(memoryDir, `${dateStr}.md`);
+      let existing = '';
+      try {
+        existing = await fs.readFile(dailyPath, 'utf-8');
+      } catch {
+        // 文件不存在，从头创建
+        existing = `# ${dateStr} 记忆日志\n\n`;
+      }
+      const newEntries = entries.all.filter(e => !existing.includes(e));
+      if (newEntries.length > 0) {
+        const updated = existing.trimEnd() + '\n' + newEntries.join('\n') + '\n';
+        await fs.writeFile(dailyPath, updated, 'utf-8');
+        log.info(`[algo-memory] sync: 写入 ${dailyPath}（${newEntries.length} 条新记忆）`);
+      }
+    }
+
+    // 写入 MEMORY.md（仅 core tier）
+    const coreMemories = memories.filter(m => m.tier === 'core');
+    if (coreMemories.length > 0) {
+      const memoryPath = path.join(workspaceDir, 'MEMORY.md');
+      let existing = '';
+      try {
+        existing = await fs.readFile(memoryPath, 'utf-8');
+      } catch {
+        existing = '# MEMORY.md\n\n';
+      }
+      const today = new Date().toISOString().split('T')[0];
+      const newCoreEntries = coreMemories
+        .map(m => `- [${today}] ${m.content}`)
+        .filter(e => !existing.includes(e));
+      if (newCoreEntries.length > 0) {
+        const updated = existing.trimEnd() + '\n' + newCoreEntries.join('\n') + '\n';
+        await fs.writeFile(memoryPath, updated, 'utf-8');
+        log.info(`[algo-memory] sync: 写入 MEMORY.md（${newCoreEntries.length} 条 core 记忆）`);
+      }
+    }
+  } catch (err) {
+    log.warn(`[algo-memory] syncMemoriesToWorkspace 失败:`, err);
+  }
 }

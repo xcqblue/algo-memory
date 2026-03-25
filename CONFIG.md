@@ -33,6 +33,19 @@ working:    everything in between
     "algo-memory": {
       "autoCapture": true,
       "autoRecall": true,
+      // v3.1.0: OpenClaw 兼容性模式
+      // - "auto"（默认）：自动检测，OpenClaw built-in memory 启用时自动切换为 retrieval-only
+      // - "standalone"：algo-memory 完全独立，不考虑 OpenClaw built-in memory
+      // - "retrieval-only"：关闭 auto-capture hooks，存储交给 OpenClaw built-in memory，
+      //                     algo-memory 仅通过 ContextEngine assemble() 提供 FTS5 检索增强
+      "openClawMemoryMode": "auto",
+      // v3.1.0: 同步到 workspace Markdown
+      // - 启用后，每次 store() 时同步将记忆写入 workspace Markdown 文件
+      // - core tier → MEMORY.md（核心长期记忆）
+      // - 所有 tier → memory/YYYY-MM-DD.md（每日日志）
+      // - 格式兼容 OpenClaw memory_search 工具，可直接搜索
+      // - 需要 gateway 对 workspace 有写入权限
+      "syncToWorkspace": false,
       "maxResults": 5,
       "capturePerTurn": 3,
       "cleanupDays": 180,

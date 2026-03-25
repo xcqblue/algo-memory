@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v3.0.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
+**版本：** v3.1.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
 
 ---
 
@@ -53,14 +53,14 @@ algo-memory 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整的存储/�
 | Hook | 时机 | 行为 |
 |------|------|------|
 | `before_dispatch` | 入站消息投递前 | 快速哈希精确去重拦截，更新 access_count |
-| `before_prompt_build` | LLM 调用前 | 检索相关记忆注入上下文；存储上一轮消息（heartbeat/cron 时跳过）|
-| `agent_end` | 每次对话结束 | 兜底存储（heartbeat/cron 时跳过）|
+| `before_prompt_build` | LLM 调用前 | 存储上一轮消息；**v3.1.0 retrieval-only 模式下禁用（由 ContextEngine assemble() 接管）** |
+| `agent_end` | 每次对话结束 | 兜底存储（heartbeat/cron 时跳过，**retrieval-only 模式下跳过**）|
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 cited_count |
 | `tool_result_persist` | 工具结果写入 transcript 前 | 提取 memory ID，实时强化 cited_count |
-| `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store（fire-and-forget，session_end 兜底）；tier 强化/清理 |
-| `after_compaction` | compaction 结束后 | no-op（compaction 后 context 已截断，无需重复强化）|
+| `before_compaction` | compaction 开始前 | standalone 模式：store fire-and-forget；retrieval-only 模式：跳过（由 memoryFlush 负责）；两者均执行 tier 强化/清理 |
+| `after_compaction` | compaction 结束后 | no-op |
 | `session_start` | 会话开始 | gateway restart 后抢救 unflushed buffer；清除 recall 缓存 |
-| `session_end` | 会话结束 | 确保所有 buffer flush 到 DB |
+| `session_end` | 会话结束 | 确保所有 buffer flush 到 DB（含 workspace sync） |
 | `before_reset` | `/new` 或 `/reset` 前 | 抢救 unflushed buffer，防止重置时消息丢失 |
 | `gateway_start` | Gateway 启动完成后 | DB 健康检查，确保 FTS 索引就绪；content_hash 预热到内存 |
 | `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
@@ -69,6 +69,8 @@ algo-memory 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整的存储/�
 | `subagent_ended` | 子 Agent 结束 | 日志记录 |
 
 **ContextEngine 接口**：`registerContextEngine('algo-memory', ...)` — 实现 `assemble()` / `compact()` / `ingest()` 方法，深度接入 OpenClaw 上下文管理生命周期。
+
+> **v3.1.0 OpenClaw 兼容性**：当 OpenClaw built-in memory 启用时（memoryFlush / memory-lancedb / memory-core），algo-memory 会自动切换到 `retrieval-only` 模式，关闭 hooks 存储（避免与 memoryFlush 重复），通过 ContextEngine assemble() 提供 FTS5 检索增强。详见 [CONFIG.md](CONFIG.md) 的 `openClawMemoryMode` 配置。
 
 ---
 

@@ -6,6 +6,43 @@
 export interface Config {
   autoCapture: boolean;
   autoRecall: boolean;
+  /**
+   * v3.1.0 新增：OpenClaw 兼容性模式
+   *
+   * OpenClaw built-in memory 系统（memoryFlush / memory-core / memory-lancedb）与 algo-memory
+   * 在存储和召回层面存在功能重叠。开启后 algo-memory 会自动检测 OpenClaw 配置，
+   * 避免两套系统重复存储 / 重复注入 / 重复上下文。
+   *
+   * 可选值：
+   * - `auto`（默认）：自动检测 OpenClaw built-in memory 是否启用
+   *   · memoryFlush 或 memory-lancedb 启用 → `retrieval-only` 模式
+   *   · 两者都未启用 → `standalone` 模式
+   * - `standalone`：algo-memory 完全独立运行，不考虑 OpenClaw built-in memory
+   *   （等于 v3.0.0 及之前的行为）
+   * - `retrieval-only`：关闭 auto-capture hooks（避免与 memoryFlush 重复存储），
+   *   仅通过 ContextEngine 的 assemble() 提供 FTS5 检索增强，
+   *   存储完全交给 OpenClaw built-in memory
+   *
+   * 模式切换时的影响：
+   * - `standalone` → `retrieval-only`：关闭 before_prompt_build + agent_end 的 store hooks
+   * - `retrieval-only` → `standalone`：恢复完整的 store hooks
+   */
+  openClawMemoryMode: 'auto' | 'standalone' | 'retrieval-only';
+
+  /**
+   * v3.1.0 新增：同步到 workspace Markdown
+   *
+   * 启用后，algo-memory 在每次 store() 时同步将重要记忆写入 workspace 目录：
+   * - `memory/YYYY-MM-DD.md` — 每日日志（append-only）
+   * - `MEMORY.md` — 核心长期记忆（core tier 写入此文件）
+   *
+   * 这样 OpenClaw 的 `memory_search` / `memory_get` 工具可以直接搜索到 algo-memory 的记忆，
+   * 两套系统共用同一份 Markdown 数据，真正实现互通。
+   *
+   * 注意：需要 gateway 对 workspace 有写入权限（`workspaceAccess: "rw"`）。
+   */
+  syncToWorkspace: boolean;
+
   maxResults: number;
   maxInjectTokens: number;
   cleanupDays: number;
@@ -233,6 +270,8 @@ export const DEFAULT_VALUES = {
 export const DEFAULT_CONFIG: Config = {
   autoCapture: true,
   autoRecall: true,
+  openClawMemoryMode: 'auto',
+  syncToWorkspace: false,
   maxResults: 5,
   maxInjectTokens: 1500,
   cleanupDays: 180,
