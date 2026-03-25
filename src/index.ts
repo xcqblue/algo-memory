@@ -1529,6 +1529,39 @@ export default {
       log.info(`[algo-memory] session_end: agentId=${agentId}, reason=${reason}, buffers flushed`);
     });
 
+    // === before_reset: /new 或 /reset 时抢救 unflushed buffer（v2.8.2 新增）===
+    // 场景：用户敲 /new，旧的 session_end 还没被触发（旧 session 未正式结束），
+    // 此时 buffer 里还有未 flush 的消息。before_reset 在重置前一刻触发，是最后抢救窗口。
+    // 如果没有此 hook，buffer 数据会随旧 session 上下文一起丢弃。
+    api.on('before_reset', async (event: any, ctx: any) => {
+      const agentId = ctx?.agentId || 'default';
+      if (!plugin.isActive()) return;
+      const { flushAllBuffers } = await import('./engine/store.js');
+      flushAllBuffers(plugin.getDb(), config, log);
+      plugin.clearRecallCache(agentId);
+      log.info(`[algo-memory] before_reset: agentId=${agentId}，buffer 已抢救，recall 缓存已清`);
+    });
+
+    // === gateway_start: 启动时预热 DB（v2.8.2 新增）===
+    // 在 gateway 完全启动后、所有会话处理之前执行。
+       // 用途：确保 DB 连接健康、FTS 索引就绪；warmup 可选地预加载 core 层统计。
+    // 注意：此时 config 和 plugin.db 已初始化完毕，可以安全访问。
+    api.on('gateway_start', async (event: any, ctx: any) => {
+      if (!plugin.isActive()) return;
+      try {
+        const db = plugin.getDb();
+        if (db) {
+          // 轻量健康检查：执行一次无意义查询验证连接
+          const { queryOne } = await import('./db/queries.js');
+          const ok = queryOne(db, 'SELECT 1 AS health', []);
+          log.info(`[algo-memory] gateway_start: DB 健康检查=${JSON.stringify(ok)}`);
+        }
+        log.info(`[algo-memory] gateway_start: algo-memory 已就绪`);
+      } catch (err: any) {
+        log.error('[algo-memory] gateway_start 错误:', err?.message ?? err);
+      }
+    });
+
     // === Subagent lifecycle ===
     api.on('subagent_spawning', async (event: any, ctx: any) => {
       const parentAgentId = ctx?.agentId || 'default';
