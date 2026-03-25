@@ -2,6 +2,30 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.7.5] - 2026-03-25
+
+### Bug Fixes（代码审查 + OpenClaw 兼容性修复）
+
+#### before_compaction 移除同步读磁盘
+- **问题**：`fs.readFileSync()` 是同步阻塞操作，会阻塞 gateway 事件循环
+- **修复**：改用 `event.messages`（OpenClaw 在 hook 调用前已直接传入），无需读磁盘
+- **效果**：compaction 触发更平稳，不影响 gateway 响应其他请求
+
+#### after_tool_call 记忆 ID 提取安全化
+- **问题**：`/"id"\s*:\s*"([^"]+)"/g` 纯正则提取，假阳性率高；格式变化时静默失败
+- **修复**：优先 `JSON.parse()` 安全解析，支持 `{ memories: [...] }` 和 `[...]` 两种格式；正则仅作兜底；新增 `startsWith('mem_')` 校验
+- **效果**：`reinforceCitedMemories()` 更可靠，不会误强化无关 ID
+
+#### gateway_stop 竞态守卫
+- **问题**：`before_prompt_build` 的异步 `store()` 可能在 `gateway_stop` 触发后仍试图写入已关闭的 DB
+- **修复**：新增 `setClosing()` 全局标志；`close()` 时先设标志再 flush；`scheduleBatchWrite()` 检查标志并拒绝新调度
+- **效果**：gateway 重启/关闭时不再出现 "SQLite error: database is closed" 写入崩溃
+
+#### memoryFlush 自我谦让机制（与 OpenClaw 内置兼容）
+- **问题**：algo-memory 与 OpenClaw 内置 memoryFlush 同时启用时，两者都会在 compaction 前存储记忆，导致重复存储
+- **修复**：在 `before_compaction` 中检测 `memoryFlush.enabled` 状态；若 memoryFlush 启用，则跳过 `store()`（由 memoryFlush 写 Markdown），仅执行 `promotePeripheralOnCompaction()` 和 `reinforceOnCompaction()`；algo-memory 的实时 hooks（`before_prompt_build` / `agent_end`）继续写入 SQLite，两系统无冲突
+- **效果**：无需用户手动配置，两者共存时自动消解冲突
+
 ## [2.7.4] - 2026-03-25
 
 ### Bug Fixes（agent_end 在嵌入式模式不触发per-turn的修复）

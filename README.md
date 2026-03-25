@@ -45,11 +45,11 @@ openclaw gateway restart
 | Hook | 时机 | 行为 |
 |------|------|------|
 | `agent_end` | 每次对话结束 | capture 用户消息，写入 buffer |
-| `before_prompt_build` | LLM 调用前 | 检索相关记忆，注入上下文 |
-| `before_compaction` | compaction 开始前 | 预捕获，触发 tier 强化 |
-| `after_compaction` | compaction 结束后 | 强化 core / 清理低价值 peripheral |
+| `before_prompt_build` | LLM 调用前 | 检索相关记忆，注入上下文；实时存储上一轮消息 |
+| `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store；tier 强化/清理 |
+| `after_compaction` | compaction 结束后 | 仅记录日志（强化已在 before_compaction 完成）|
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 |
-| `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB |
+| `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
 
 ---
 
@@ -160,12 +160,15 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, content, keywords);
 
 ---
 
-## 与内置 memory 的关系
+## 与 OpenClaw 内置 memoryFlush 的关系
 
-algo-memory 与内置 `memory-core` / `memory-lancedb` **共用同一插槽**，不可同时使用。
+algo-memory **不依赖** OpenClaw 内置 `memoryFlush`，可独立工作。
 
+**冲突处理（自我谦让）：** 若同时启用 algo-memory 的 `autoCapture` 和 OpenClaw 的 `memoryFlush`，algo-memory 在 `before_compaction` 时会**跳过 store()**（由 memoryFlush 写 Markdown），而依赖 `before_prompt_build` / `agent_end` 的实时 hooks 继续写 SQLite。两系统共存时无重复存储。
+
+**建议：** 如只用 algo-memory，在 `openclaw.json` 中设置：
 ```json
-{ "plugins": { "slots": { "memory": "algo-memory" } } }
+"agents": { "defaults": { "compaction": { "memoryFlush": { "enabled": false } } } }
 ```
 
 **algo-memory 独有价值：**
@@ -173,6 +176,7 @@ algo-memory 与内置 `memory-core` / `memory-lancedb` **共用同一插槽**，
 - importance × cited_count × tier 三层分级
 - Weibull 时间衰减 + reinforcement 强化机制
 - 纯算法模式零 LLM 成本
+- 结构化 SQLite（FTS5 关键词搜索）vs Markdown 向量语义搜索
 
 ---
 

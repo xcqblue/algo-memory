@@ -182,17 +182,21 @@ gateway_start
 registerHook()
     │
     ├─ before_prompt_build ──► recall() ──► return { prependSystemContext }
+    │                          store() ──► scheduleBatchWrite()（实时存储）
     │
     ├─ agent_end ──► store() ──► scheduleBatchWrite()
     │
-    ├─ before_compaction ──► store(sessionFile) ──► promotePeripheral()
-    │                       └─► reinforceOnCompaction()
+    ├─ before_compaction ──►
+    │   ├── memoryFlush 启用？→ 跳过 store()（避免重复存储）
+    │   ├── memoryFlush 未启用？→ store(event.messages)
+    │   ├── promotePeripheralOnCompaction()
+    │   └── reinforceOnCompaction()
     │
     ├─ after_compaction ──►（仅记录日志，强化在 before_compaction 完成）
     │
-    ├─ after_tool_call ──► reinforceCitedMemories(algo_memory_search 结果)
+    ├─ after_tool_call ──► reinforceCitedMemories()（JSON.parse 安全解析）
     │
-    └─ gateway_stop ──► flushAll() ──► db.close()
+    └─ gateway_stop ──► setClosing() → flushAll() → db.close()
 ```
 
 `before_prompt_build` 使用 `priority: 10`，确保在 LLM 调用之前、其他 memory 插件之后执行。
