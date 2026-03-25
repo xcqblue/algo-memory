@@ -1,6 +1,6 @@
 # 架构设计
 
-algo-memory 的工作原理 — 设计决策、数据流与核心算法。
+algo-memory v3.0.0 的工作原理 — 设计决策、数据流与核心算法。
 
 完整配置参考 → [CONFIG.md](CONFIG.md)
 
@@ -52,21 +52,20 @@ before_prompt_build 触发
 shouldRetrieve(query, config, sessionDedup)
     │
     ▼
-┌─ 多路召回（Multi-Path）— 4 条路径并行检索 ─┐
-│  路径1：原始 Query                             │
-│  路径2：前缀 3-token                          │
-│  路径3：后缀 2-token                          │
-│  路径4：首尾 token 组合                        │
-└──────────────────────────────────────────────┘
+┌─ 多路召回（Multi-Path）— 2 条路径并行检索（v3.0.0 优化）─┐
+│  路径1：原始 Query                                               │
+│  路径2：前缀 3-token                                            │
+│  每个路径分别 Trie 展开 → 不同路径保留各自展开的同义词集合      │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
-FTS5 搜索（BM25 + 同义词扩展）
+FTS5 搜索（BM25 + Trie 同义词扩展）
     │
     ▼
-多路结果合并（id 去重，保留最高分）
+多路结果合并（id 去重，保留首次出现）
     │
     ▼
-MMR 去重（全局统一做一次，λ=0.7）
+Tier 分组 MMR 去重（v2.9.0 — core/working/peripheral 组内独立去重，v3.0.0 recall/search 统一）
     │
     ▼
 scoreMemories() — tier权重 × weibullDecay × reinforcement × lengthNorm
@@ -85,9 +84,40 @@ prependSystemContext() — 格式化记忆注入 LLM 上下文
 
 ## FTS5 同义词扩展
 
-algo-memory 在 Query 时对用户输入进行**同义词展开**，将单一 Query 扩展为多路 OR 查询，大幅提升召回率。
+algo-memory 在 Query 时使用 **Trie 树预编译展开**（v2.9.0），时间复杂度 O(query_len) 替代原来的 O(query_len × syn_count)。
 
-### 分词器（simpleChineseTokenize）
+### Trie 树同义词展开（v2.9.0 优化）
+
+**脚本感知切分** + **贪心最长匹配**：
+- 输入经过脚本感知切分（Latin vs CJK 分开处理）
+- CJK 段在 Trie 树中查找所有命中词
+- 贪心最长匹配：每个位置找最长匹配词，然后跳到该词末尾继续
+- 每个命中词返回其标准词 + 所有同义词
+
+```
+输入："Mac系统崩了"
+  段1: "Mac" (latin) → 直接保留
+  段2: "系统崩了" (cjk)
+    在 Trie 中贪心匹配：
+    "系统崩了" → "崩" 命中 → 标准词="崩"，同义词=[死机,蓝屏,黑屏,宕机,崩溃]
+    "系统" 未直接命中
+    跳过已匹配位置，继续
+
+  → tokens: ["Mac", "苹果电脑", "Apple", "崩", "死机", "蓝屏", "黑屏", "宕机", "崩溃", "系统"]
+
+最后构建 FTS5 OR 查询：
+  "Mac" OR "苹果电脑" OR "Apple" OR "崩" OR "死机" OR "蓝屏" OR "黑屏" OR "宕机" OR "崩溃" OR "系统"
+```
+
+### 多路召回 Trie 展开（v3.0.0 优化）
+
+```
+原始 query: "北京出差"
+  路径1: "北京出差"     → Trie 展开 → "北京" OR "帝都" OR ... OR "出差" OR "商务出行" OR ...
+  路径2: "北京"         → Trie 展开 → "北京" OR "帝都" OR ...
+
+每个路径分别展开，保留各自独立的同义词集合。
+```
 
 **脚本感知切分**：Latin 与 CJK（中文）分段处理，解决"iPhone屏幕碎了"这类中英混合文本无法切分的核心问题。
 
@@ -141,18 +171,25 @@ Query: "Mac系统崩了"
 ## 记忆分层系统
 
 ```
-tier_score = importance × (1 + log10(access_count + 1))
+tier_score = importance × multiplier(access_count)
+
+multiplier 分段（v2.9.0 优化）：
+  ac 1~10:    1 + log10(ac + 1)           （快速提升，log10 增长）
+  ac 10~100:  1 + log10(11) + 0.3×(√ac - √10)  （平稳期，sqrt 增长，避免对数饱和）
+  ac 100+:    min(5.0, 对数上限饱和)       （防马太效应）
+
+示例：ac=1→1.30, ac=10→2.04, ac=50→2.6, ac=100→3.04, ac=1000→4.04
 
 core:       access_count ≥ 10
-            或 (score ≥ 0.7 且 age ≤ 60 天)
+            或 (tier_score ≥ 0.7 且 age ≤ 60 天)
 
-peripheral: score < 0.15
-            或 (age > 60 天 且 score < 0.7)
+peripheral: tier_score < 0.15
+            或 (age > 60 天 且 tier_score < 0.7)
 
 working:    其余情况
 ```
 
-Core 记忆不会被 cleanup 自动删除。Peripheral 记忆受 Weibull 衰减影响，超过 `cleanupDays` 未被访问则清理。
+Core 记忆不会被 cleanup 自动删除。Peripheral 记忆受 **双 cutoff** 清理（同时满足 `created_at` + `last_accessed` 均超期才删除），避免"续命"问题。
 
 ### Weibull 衰减
 
@@ -204,7 +241,7 @@ registerHook()
     │
     ├─ before_compaction ──►
     │   ├── memoryFlush 启用？→ 跳过 store()（避免重复存储）
-    │   ├── memoryFlush 未启用？→ store(event.messages)（2s 有限等待）
+    │   ├── memoryFlush 未启用？→ store(event.messages)（fire-and-forget，依赖 session_end 兜底）
     │   ├── promotePeripheralOnCompaction()
     │   └── reinforceOnCompaction()
     │
@@ -247,6 +284,9 @@ export ZHIPU_API_KEY="your-key"   # 推荐，免费额度高
 }
 ```
 
+> **v3.0.0 LLM 队列动态批次**：队列深度决定批次大小（10~20）和处理延迟（50~500ms），低延迟（队列短时）+ 高吞吐（队列长时）+ 批量效率（队列满时）。
+> **v2.9.0 合并 LLM 调用**：`processMemory()` 单次调用同时完成 isCore 判断 + 关键词提取 + 去重，减少 50%+ API 调用。
+
 | Provider | 别名 | 默认模型 | 推荐 |
 |----------|------|---------|------|
 | `minimax` | — | `abab6.5s-chat` | abab6.5s-chat |
@@ -282,13 +322,15 @@ export ZHIPU_API_KEY="your-key"   # 推荐，免费额度高
 | 操作 | 复杂度 | 典型延迟 |
 |------|--------|---------|
 | `store()` 阶段1（同步过滤）| O(n) | < 1ms |
-| `extractKeywords()` LLM 调用 | O(1) 每批次 | 500-2000ms |
+| `extractKeywords()` LLM 调用（动态批次，v3.0.0）| O(1) 每批次 | 队列≥20→50ms；5~20→200ms；<5→最多500ms |
 | FTS5 搜索 | O(log n) | 5-20ms |
 | JS 评分（n 个结果）| O(n) | < 1ms |
-| MMR 去重 | O(k²)，k = maxResults | < 1ms |
+| Tier 分组 MMR 去重 | O(k²)，k = maxResults per group | < 1ms |
 | Buffer flush（批量写入）| O(b)，b = 批次大小 | 10-50ms |
 
 n = DB 中总记忆数（通常 < 10,000），b = buffer 大小（通常 1-20）
+
+> v3.0.0 LLM 队列动态批次：队列深度决定批次大小（10~20）和处理延迟（50~500ms），低延迟（队列短时）+ 高吞吐（队列长时）。
 
 ---
 

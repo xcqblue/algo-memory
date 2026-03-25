@@ -43,6 +43,7 @@ openclaw gateway restart
 ### LLM 增强（可选）
 - 自动提取关键词 / LLM 辅助去重 / 语义压缩
 - **合并 LLM 调用**（v2.9.0 新增）— 单次 `processMemory()` 完成 isCore + 关键词 + 去重，减少 50%+ API 调用
+- **动态批次处理**（v3.0.0 优化）— 队列深度决定批次大小（10~20）和延迟（50~500ms），低延迟+高吞吐
 - **纯算法模式零成本运行**，LLM 非必选
 
 ### OpenClaw 生命周期 Hook + ContextEngine
@@ -230,9 +231,10 @@ algo-memory/
 │   ├── utils.ts              # 工具函数（Weibull/Jaccard/MMR/噪声过滤）
 │   ├── engine/
 │   │   ├── store.ts         # 写入引擎（Buffer/LLM队列/批处理）
-│   │   ├── retrieve.ts       # 检索引擎（FTS5/评分/MMR/多路召回）
+│   │   ├── retrieve.ts       # 检索引擎（FTS5/评分/MMR/多路召回/TierGroupedMMR）
 │   │   ├── recall.ts         # 召回决策（shouldRetrieve/sessionDedup）
-│   │   ├── llm.ts            # LLM 客户端（多provider/重试/缓存）
+│   │   ├── llm.ts            # LLM 客户端（多provider/重试/缓存/processMemory）
+│   │   ├── synonym-trie.ts   # Trie 树同义词展开器（v2.9.0 新增）
 │   │   └── context-engine.ts # OpenClaw ContextEngine 接口实现
 │   ├── db/
 │   │   ├── schema.ts         # SQLite 建表 + FTS5 + 触发器

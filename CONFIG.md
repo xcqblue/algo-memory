@@ -7,7 +7,12 @@
 ## Tier 评分公式
 
 ```
-tier_score = importance × (1 + log10(access_count + 1))
+tier_score = importance × multiplier(access_count)
+
+multiplier 分段（v2.9.0 优化）：
+  ac 1~10:    1 + log10(ac + 1)           （快速提升）
+  ac 10~100:  1 + log10(11) + 0.3×(√ac - √10)  （平稳期，避免对数饱和）
+  ac 100+:    min(5.0, 缓增对数上限)       （防马太效应）
 
 core:       access_count ≥ 10
             OR (tier_score ≥ 0.7 AND age ≤ 60 days)
