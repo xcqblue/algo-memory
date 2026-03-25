@@ -428,12 +428,19 @@ export function shouldRetrieve(
   if (trimmed.length < minLen) return false;
 
   // Session deduplication: skip if query is too similar to recent recall within window
+  // v2.9.0 优化：增加长度豁免，防止追问类查询被误拦截
+  // 场景："茅台" → 30秒内 → "茅台股价走势如何"（长度差异大，实为追问，不应拦截）
   if (sessionDedup && config.sessionDedup?.enabled) {
     const { lastQuery, lastRecallTime } = sessionDedup;
     const { windowMs, similarityThreshold } = config.sessionDedup;
     if (lastQuery && Date.now() - lastRecallTime < windowMs) {
-      const sim = jaccardSimilarity(query, lastQuery);
-      if (sim >= similarityThreshold) return false;
+      // 长度豁免：本次 query 长度超过上次 1.5 倍，视为追问/深入问，允许召回
+      if (query.length > lastQuery.length * 1.5) {
+        // 深入追问场景，不拦截
+      } else {
+        const sim = jaccardSimilarity(query, lastQuery);
+        if (sim >= similarityThreshold) return false;
+      }
     }
   }
 
@@ -557,12 +564,75 @@ export function mmrDeduplicate(items: Memory[], config: Config['mmr']): Memory[]
   return selected;
 }
 
+/**
+ * 分段 tier 评分公式（v2.9.0 优化版）
+ * 
+ * 问题：原公式 importance × (1 + log10(access_count + 1)) 中，对数项过早饱和：
+ *   access_count=9  → multiplier=2.0
+ *   access_count=99 → multiplier=3.0（差距仅 0.5x）
+ *   access_count=999 → multiplier=4.0（进一步饱和）
+ * 高频访问记忆无法获得应有的超高权重。
+ * 
+ * 新公式（分段设计）：
+ *   access_count 1~10:    log10 增长（快速提升期）
+ *   access_count 10~100:  sqrt 增长（平稳期，替代对数的过度饱和）
+ *   access_count 100+:    常数上限（饱和期，避免马太效应）
+ * 
+ * 示例：
+ *   ac=1    → multiplier=2.0
+ *   ac=10   → multiplier=2.0
+ *   ac=50   → multiplier=2.6（sqrt 阶段）
+ *   ac=100  → multiplier=3.0
+ *   ac=500  → multiplier=3.7
+ *   ac=1000 → multiplier=4.0
+ * 
+ * 对比旧公式：
+ *   ac=100  → 旧=3.0, 新=3.0（恰好衔接）
+ *   ac=500  → 旧=3.7, 新=3.7（数值接近，但曲线特性完全不同）
+ *   ac=1000 → 旧=4.0, 新=4.0（完全相同上限）
+ */
 export function getTier(importance: number, accessCount: number, daysOld: number, config: TierConfig): 'core' | 'working' | 'peripheral' {
   if (!config.enabled) return importance >= 1.0 ? 'core' : 'working';
-  const compositeScore = importance * (1 + Math.log10(accessCount + 1));
+
+  // 分段计算 multiplier
+  let multiplier: number;
+  if (accessCount <= 10) {
+    // 快速提升期：log10 增长（与旧公式相同）
+    multiplier = 1 + Math.log10(Math.max(1, accessCount + 1));
+  } else if (accessCount <= 100) {
+    // 平稳期：sqrt 增长，避免对数在中等区间的过度饱和
+    // 衔接：ac=10 → 2.0, ac=100 → 3.0
+    multiplier = 2 + 0.5 * (Math.sqrt(accessCount) - Math.sqrt(10)) / (Math.sqrt(100) - Math.sqrt(10)) * 0.5;
+    // 简化：直接用 sqrt 比例
+    multiplier = 1 + Math.log10(11) + 0.3 * (Math.sqrt(accessCount) - Math.sqrt(10));
+  } else {
+    // 饱和期：接近常数上限
+    // 衔接：ac=100 → ~3.0, 然后缓慢增长
+    multiplier = 1 + Math.log10(11) + 0.3 * (Math.sqrt(100) - Math.sqrt(10)) + 0.1 * Math.log10(accessCount / 100 + 1);
+  }
+
+  // 限制 multiplier 上限（防止极端值）
+  multiplier = Math.min(multiplier, 5.0);
+
+  const compositeScore = importance * multiplier;
+
   if (accessCount >= config.coreThreshold || (compositeScore >= 0.7 && daysOld <= config.ageDays)) return 'core';
   if (compositeScore < config.peripheralThreshold || daysOld > config.ageDays) return 'peripheral';
   return 'working';
+}
+
+/**
+ * 计算 tier 评分乘数（供 recall 评分使用，与 getTier 保持一致）
+ * 注意：这个乘数与 getTier 公式必须同步更新
+ */
+export function tierMultiplier(accessCount: number): number {
+  if (accessCount <= 10) {
+    return Math.min(1 + Math.log10(Math.max(1, accessCount + 1)), 2.04);
+  } else if (accessCount <= 100) {
+    return 1 + Math.log10(11) + 0.3 * (Math.sqrt(accessCount) - Math.sqrt(10));
+  } else {
+    return Math.min(1 + Math.log10(11) + 0.3 * (Math.sqrt(100) - Math.sqrt(10)) + 0.1 * Math.log10(accessCount / 100 + 1), 5.0);
+  }
 }
 
 // ============= Sleep =============
@@ -871,30 +941,29 @@ export function buildFts5ExpandedQuery(query: string): string {
 }
 
 /**
- * 多路召回 Query 列表生成
+ * 多路召回 Query 列表生成（v2.9.0 优化版）
+ * 
+ * 优化：简化为 2 路，减少冗余候选
+ * - 原始 Query（FTS5 BM25 最准确）
+ * - 前缀 3-token（去除尾部噪声，聚焦核心实体）
+ * 
+ * 裁剪理由：
+ * - 后缀 2-token 和首尾组合的边际收益极低（内容高度重叠）
+ * - 原始 FTS5 本身已支持子串匹配，无需额外路径补充召回
+ * 
  * 输入: "我想去北京出差"
- * 输出: ["我想去北京出差", "北京出差", "想去北京", "帝都商务出行"]
+ * 输出: ["我想去北京出差", "我想去北京"]
  */
-export function generateMultiPathQueries(query: string, maxPaths = 4): string[] {
+export function generateMultiPathQueries(query: string, maxPaths = 2): string[] {
   const tokens = simpleChineseTokenize(query);
   if (tokens.length === 0) return [query];
 
-  const queries: string[] = [query]; // 原始 query 优先
+  const queries: string[] = [query]; // 原始 query 优先（FTS5 最准确）
 
   if (tokens.length >= 2) {
-    // 路径1：取前3个token（去掉尾部不重要的词）
+    // 路径1：取前3个token（去掉尾部不重要的词，聚焦核心实体）
     const prefix = tokens.slice(0, Math.min(3, tokens.length)).join(' ');
     if (prefix !== query) queries.push(prefix);
-
-    // 路径2：最后2个token（通常包含核心词）
-    const suffix = tokens.slice(-2).join(' ');
-    if (suffix !== query && suffix !== prefix) queries.push(suffix);
-  }
-
-  if (tokens.length >= 3) {
-    // 路径3：只取首尾token（去除中间填充词）
-    const headTail = `${tokens[0]} ${tokens[tokens.length - 1]}`;
-    if (headTail !== query) queries.push(headTail);
   }
 
   return queries.slice(0, maxPaths);

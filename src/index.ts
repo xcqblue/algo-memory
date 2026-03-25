@@ -1,16 +1,20 @@
 /**
- * algo-memory v2.8.0
+ * algo-memory v2.9.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
  *
- * v2.8.0 新增:
- * - before_dispatch 入站预过滤（提前拦截元数据噪声）
- * - Gateway /v1/embeddings 语义召回（FTS5 并行候选路径）
- * - LLM Proxy 支持（HTTPS_PROXY 环境变量）
- * - MCP Server 暴露（algo_memory_* 工具通过 MCP 访问）
- * - before_compaction 异步 store 可靠化（有限等待防竞走）
- * - after_compaction 精简（compaction 后无需重复强化）
+ * v2.9.0 优化:
+ * - Tier 分组内 MMR 去重（core 记忆不被 peripheral 挤出）
+ * - Trie 树同义词展开（FTS5 查询 O(query_len) 替代 O(query_len × syn_count)）
+ * - 批量去重 O(n log n) 优化（按长度窗口比较）
+ * - 多路召回缩减为 2 路（原始 + 前缀 3-token）
+ * - 会话去重增加长度豁免（追问类查询不被误拦截）
+ * - Peripheral cleanup 双 cutoff（created_at + last_accessed）
+ * - before_compaction 放弃 2s 有限等待（fire-and-forget，session_end 兜底）
+ * - Tier 评分分段公式（解决对数饱和问题）
+ * - Content hash 内存预热（O(1) 精确去重）
+ * - 新增 DB 索引（peripheral_cleanup / agent_created / content_hash）
  */
 
 import path from 'path';
@@ -113,7 +117,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
-  version = '2.8.0';
+  version = '2.9.0';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -133,6 +137,39 @@ class MemoryPlugin {
   private lastRecallTime: Map<string, number> = new Map();
   getLastRecallQuery(agentId: string): string { return this.lastRecallQuery.get(agentId) ?? ''; }
   getLastRecallTime(agentId: string): number { return this.lastRecallTime.get(agentId) ?? 0; }
+
+  /** v2.9.0: 内存中最近记忆的 content_hash 集合，用于快速精确去重 */
+  private contentHashSet: Set<string> = new Set();
+  private CONTENT_HASH_WARMUP_LIMIT = 2000;
+
+  /**
+   * v2.9.0: 预热 content_hash 集合
+   * 启动时从 DB 加载最近 N 条记忆的 hash 到内存
+   * store() 中的精确去重先查内存（O(1)），未命中再查 DB
+   */
+  private warmupContentHashes(): void {
+    if (!this.db) return;
+    try {
+      const rows = queryAll(this._db(),
+        `SELECT content_hash FROM memories WHERE content_hash IS NOT NULL ORDER BY created_at DESC LIMIT ?`,
+        [this.CONTENT_HASH_WARMUP_LIMIT]
+      ) as { content_hash: string }[];
+      this.contentHashSet = new Set(rows.map(r => r.content_hash).filter(Boolean));
+      this.log.info(`[algo-memory] content_hash 预热完成: ${this.contentHashSet.size} 条记忆 hash 已加载到内存`);
+    } catch (err) {
+      this.log.warn('[algo-memory] content_hash 预热失败，将依赖 DB 层去重:', err);
+    }
+  }
+
+  /** 检查某 hash 是否在内存预热集合中（快速路径）*/
+  hasContentHashInMemory(hash: string): boolean {
+    return this.contentHashSet.has(hash);
+  }
+
+  /** 添加 hash 到内存集合（store 成功时调用）*/
+  addContentHash(hash: string): void {
+    this.contentHashSet.add(hash);
+  }
 
   // Error metrics
   public metrics = {
@@ -218,6 +255,12 @@ class MemoryPlugin {
     this.log.info('[algo-memory] 数据库初始化:', this.dbPath);
     this.log.info(`[algo-memory] 每轮最多写入: ${this.config.capturePerTurn} 条`);
 
+    // v2.9.0 新增：内容 hash 预热到内存
+    // 启动时加载最近 2000 条记忆的 content_hash 到 Set，
+    // 用于 store() 中做快速精确去重（避免每次都要查 DB）
+    // gateway 重启后自动重建，重启期间的消息可能重复，但会被 before_dispatch 的 DB 层去重拦截
+    this.warmupContentHashes();
+
     this.cleanupInterval = setInterval(() => this.cleanup(), DEFAULT_CLEANUP_INTERVAL_MS);
   }
 
@@ -228,7 +271,9 @@ class MemoryPlugin {
       llmClient: this.llmClient,
       log: this.log,
       clearRecallCache: (aid: string) => this.clearRecallCache(aid),
-      metrics: this.metrics
+      metrics: this.metrics,
+      // v2.9.0: 内存 hash 预热集合（O(1) 精确去重）
+      contentHashSet: this.contentHashSet,
     };
     await doStore(deps, AgentId, messages);
   }
@@ -701,6 +746,21 @@ confidence 是 0-1 的置信度。
 
   cleanup(): void {
     if (!this.db) return;
+
+    // v2.9.0 优化：peripheral cleanup 改用 created_at 作为主 cutoff
+    //
+    // 问题：旧实现用 last_accessed 作为 cutoff，存在"续命"问题：
+    // peripheral 记忆在第 179 天被访问一次 → last_accessed 更新 → 重新获得 180 天寿命
+    // 这让本该遗忘的临时信息（闲聊、临时计划）长期占用空间。
+    //
+    // 解决：新记忆的"临时性"本质不应因访问改变，cleanup cutoff 基于 created_at。
+    // 同时保留 last_accessed 作为辅助条件：同时满足以下条件才清理
+    //   1. created_at < cutoff（已存活 cleanupDays 天）
+    //   2. last_accessed < cutoff（即长期未被访问，非活跃记忆）
+    //
+    // 这确保：
+    //   - 真正重要的记忆（会被 recall 强化）→ last_accessed 持续更新 → 不被清理
+    //   - 临时的 peripheral 记忆 → 没人记得它 → 两者都超过 cutoff → 被清理
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
     const BATCH = 5000;
     let total = 0;
@@ -709,8 +769,9 @@ confidence 是 0-1 的置信度。
       let rows: any[] = [];
       try {
         rows = queryAll(this._db(),
-          `SELECT rowid FROM memories WHERE last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
-          [cutoff, BATCH]
+          // v2.9.0: 同时检查 created_at 和 last_accessed
+          `SELECT rowid FROM memories WHERE created_at < ? AND last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
+          [cutoff, cutoff, BATCH]
         );
       } catch (err) {
         this.log.error('[algo-memory] cleanup 查询失败:', err);
@@ -730,7 +791,7 @@ confidence 是 0-1 的置信度。
       total += deleted;
     } while (deleted === BATCH);
     if (total > 0) {
-      this.log.info('[algo-memory] 清理了', total, '条过期记忆');
+      this.log.info('[algo-memory] 清理了', total, '条过期记忆（基于 created_at + last_accessed 双 cutoff）');
     }
   }
 
@@ -1055,7 +1116,7 @@ confidence 是 0-1 的置信度。
 export default {
   id: 'algo-memory',
   name: 'algo-memory',
-  version: '2.8.0',
+  version: '2.9.0',
   async register(api: any) {
     const log = api.logger || console;
     const userConfig = api.pluginConfig || api.config || {};
@@ -1316,30 +1377,38 @@ export default {
     // algo-memory's before_prompt_build/agent_end hooks are already storing to SQLite
     // in real time, so skipping store() here avoids duplicate storage.
     // promotePeripheralOnCompaction and reinforceOnCompaction still run — they only touch SQLite.
+    //
+    // v2.9.0 优化：移除 before_compaction 的 store() 有限等待
+    // 
+    // 问题：旧实现的 Promise.race([storePromise, 2000ms timeout]) 不可靠：
+    //   - 如果消息量大或 LLM API 慢，store 永远无法在 2s 内完成
+    //   - 超时后的 storePromise 仍在后台运行，可能在 gateway restart 时产生竞走
+    // 
+    // 解决：store() 完全 fire-and-forget，依赖 session_end / gateway_stop 做最终保证
+    //   - before_prompt_build / agent_end 已在实时存储消息（主要路径）
+    //   - session_end 在会话结束时触发 flushAllBuffers（最终兜底）
+    //   - gateway_stop 确保进程退出前所有 buffer 落地
     api.on('before_compaction', async (event: any, ctx: any) => {
       const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
       if (!plugin.isActive() || !config.autoCapture) return;
 
       // event.messages is provided directly by OpenClaw — use it instead of re-reading disk.
       // This avoids a synchronous fs.readFileSync which would block the gateway event loop.
-      // event.sessionFile is available for plugins that need async disk access; algo-memory
-      // does NOT need it since messages are already in memory.
       const sessionMessages: any[] = Array.isArray(event.messages) ? event.messages : [];
 
       if (sessionMessages.length > 0) {
-        // Skip store() when memoryFlush is active — it already writes Markdown during compaction.
-        // algo-memory's real-time hooks (before_prompt_build / agent_end) keep storing to SQLite.
-        // Only flush the pending buffer to ensure no data loss.
         if (!plugin.memoryFlushActive) {
+          // v2.9.0: 先同步 flush 已缓冲数据，再 fire-and-forget 新消息存储
+          // 放弃有限等待，让 session_end 做最终兜底
           const { flushAllBuffers } = await import('./engine/store.js');
           flushAllBuffers(plugin.getDb(), config, log);
 
-          // 有限等待：最多 2s 确保异步 store 完成，防止 gateway restart 导致竞走丢消息
-          // 不使用完整 await（避免阻塞 compaction），但等待最多 2000ms 再继续
-          const storePromise = plugin.store(agentId, sessionMessages);
-          const timeoutPromise = new Promise<void>(resolve => setTimeout(resolve, 2000));
-          await Promise.race([storePromise, timeoutPromise]).catch(() => {});
-          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息（有限等待2s，不阻塞 compaction）`);
+          // Fire-and-forget：store() 异步运行，不等待
+          // 进程退出前 session_end / gateway_stop 会触发 flushAllBuffers 做兜底
+          plugin.store(agentId, sessionMessages).catch((err: any) => {
+            log.error('[algo-memory] before_compaction store 异步错误:', err?.message ?? err);
+          });
+          log.info(`[algo-memory] before_compaction: 已提交 ${sessionMessages.length} 条消息（fire-and-forget，session_end 兜底）`);
         } else {
           log.info(`[algo-memory] before_compaction: memoryFlush 已启用，跳过 store()（避免重复存储），buffer 待下次 flush`);
         }
@@ -1707,7 +1776,7 @@ export default {
         }));
 
         const mcpServer = new Server(
-          { name: 'algo-memory', version: '2.8.0' },
+          { name: 'algo-memory', version: '2.9.0' },
           { capabilities: { tools: {} } }
         );
 

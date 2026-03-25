@@ -63,6 +63,13 @@ export function initSchema(db: AnyDatabase, log: any): void {
     'CREATE INDEX IF NOT EXISTS idx_agent_tier_importance ON memories(agent_id, tier, importance DESC)',
     'CREATE INDEX IF NOT EXISTS idx_agent_last_accessed ON memories(agent_id, last_accessed DESC)',
     'CREATE INDEX IF NOT EXISTS idx_tier_confidence ON memories(tier, tier_confidence)',
+    // v2.9.0 新增索引
+    // peripheral cleanup 查询：WHERE tier='peripheral' AND layer='general' AND created_at < cutoff
+    'CREATE INDEX IF NOT EXISTS idx_peripheral_cleanup ON memories(tier, layer, created_at) WHERE tier = \'peripheral\' AND layer = \'general\'',
+    // export / list 查询：ORDER BY created_at DESC
+    'CREATE INDEX IF NOT EXISTS idx_agent_created ON memories(agent_id, created_at DESC)',
+    // content_hash 精确去重（UNIQUE + WHERE 允许 NULL）
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON memories(content_hash) WHERE content_hash IS NOT NULL',
   ]) {
     try { db.prepare(idx).run(); } catch (_) { /* index creation is non-fatal */ }
   }

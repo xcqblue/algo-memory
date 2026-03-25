@@ -587,6 +587,8 @@ export interface StoreDeps {
     dbErrors: number;
     lastErrorAt: number | null;
   };
+  /** v2.9.0: 内存中预热的 content_hash 集合，用于 O(1) 精确去重 */
+  contentHashSet?: Set<string>;
 }
 
 /**
@@ -654,7 +656,47 @@ export async function store(
     // 收集需要批量写入的记忆
     const memoriesToBatch: Memory[] = [];
 
-    for (const { msg } of scoredMessages) {
+    // v2.9.0 优化：批量内 Jaccard 去重 O(n log n) 替代 O(n²)
+    // 策略：按内容长度排序，然后在长度窗口内两两比较
+    // 不在窗口内的候选（长度差异过大，Jaccard 上界必然低）直接跳过
+    const BATCH_DEDUP_WINDOW = 5; // 只比较最近 5 条（长度相近的候选）
+    const scoredAndDeduped: typeof scoredMessages = [];
+
+    // 按长度降序排列（长内容优先级更高，通常更重要）
+    const sortedForDedup = [...scoredMessages].sort(
+      (a, b) => b.msg.content.length - a.msg.content.length
+    );
+
+    for (let i = 0; i < sortedForDedup.length; i++) {
+      const current = sortedForDedup[i];
+      const currentSafe = safeContent(normalizeText(current.msg.content));
+      let skipForBatchDup = false;
+
+      // 只和窗口内 [max(0, i-BATCH_DEDUP_WINDOW), i) 的已选项目比较
+      const windowStart = Math.max(0, i - BATCH_DEDUP_WINDOW);
+      for (let j = windowStart; j < i; j++) {
+        const prev = scoredAndDeduped[j];
+        if (!prev) continue;
+        const prevSafe = safeContent(normalizeText(prev.msg.content));
+
+        // 长度差异过大 → Jaccard 上界 < minLenRatio，直接跳过比较
+        const ratio = Math.min(currentSafe.length, prevSafe.length) /
+          Math.max(currentSafe.length, prevSafe.length);
+        if (ratio < 0.3) continue;
+
+        const sim = jaccardSimilarity(currentSafe, prevSafe);
+        if (sim >= config.dedupThreshold) {
+          skipForBatchDup = true;
+          break;
+        }
+      }
+
+      if (!skipForBatchDup) {
+        scoredAndDeduped.push(current);
+      }
+    }
+
+    for (const { msg } of scoredAndDeduped) {
       // isSystemMessage 已在上方 filter 中处理，此处不再重复检查
       const content = normalizeText(msg.content);
       if (!content || isNoise(content, config.noiseFilter)) continue;
@@ -668,30 +710,68 @@ export async function store(
 
       const contentHash = hashContent(safe);
 
-      // Exact dedup check
-      const existing = queryOne(db,
-        'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ?',
-        [AgentId, contentHash]
-      ) as IdRow | null;
-      if (existing) {
-        // Dedup hit: bump importance (max 1.0) to reflect repeated relevance, then re-tier
-        run(db,
-          `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
-          [Date.now(), existing.id]
-        );
-        tierCandidates.push(existing.id);
-        continue;
+      // v2.9.0 优化：内存 hash 预热集合 O(1) 精确去重
+      // 先查内存（O(1)），未命中再查 DB（兜底）
+      // 内存预热只覆盖最近 2000 条，旧的/跨会话的 hash 仍需 DB 查询
+      if (deps.contentHashSet && deps.contentHashSet.has(contentHash)) {
+        // 内存命中：再查 DB 确认（避免 hash 碰撞误判，同时更新 access_count）
+        const existing = queryOne(db,
+          'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ?',
+          [AgentId, contentHash]
+        ) as IdRow | null;
+        if (existing) {
+          run(db,
+            `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
+            [Date.now(), existing.id]
+          );
+          tierCandidates.push(existing.id);
+          continue;
+        }
+        // DB 未命中（该 hash 属于更早的记忆，不在预热范围内），正常继续
+      } else {
+        // 内存未命中或无预热：查 DB（原有逻辑）
+        const existing = queryOne(db,
+          'SELECT id FROM memories WHERE agent_id = ? AND content_hash = ?',
+          [AgentId, contentHash]
+        ) as IdRow | null;
+        if (existing) {
+          run(db,
+            `UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(1.0, importance * 1.05) WHERE id = ?`,
+            [Date.now(), existing.id]
+          );
+          tierCandidates.push(existing.id);
+          continue;
+        }
+        // 记录新 hash 到内存集合（供后续批次快速去重）
+        if (deps.contentHashSet) {
+          deps.contentHashSet.add(contentHash);
+        }
       }
 
-      // Smart dedup（语义去重增强版）
+      // Smart dedup（语义去重增强版 + v2.9.0 长度预过滤优化）
       let isDuplicate = false; // reset each outer iteration — must not persist across messages
       if (config.smartDedup) {
+        // v2.9.0 优化：在查询 DB 之前，先做长度预过滤
+        // Jaccard 的上界由长度比决定：len(A∩B)/len(A∪B) ≤ min(len(A),len(B))/max(len(A),len(B))
+        // 如果长度差异超过 3x，Jaccard 上界 < 0.33，直接跳过
+        const currentLen = safe.length;
+        const lengthRatioFast = (a: number, b: number) =>
+          Math.min(a, b) / Math.max(a, b);
+
         const similar = queryAll(db,
           'SELECT id, content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?',
           [AgentId, MAX_SIMILAR_CHECK]
         ) as IdContentRow[];
 
-        for (const s of similar) {
+        // v2.9.0 优化：先按长度预过滤，减少 Jaccard 计算次数
+        const filteredSimilar = similar.filter(s => {
+          const existingLen = (s.content as string).length;
+          // 长度差异过大 → Jaccard 上界过低，直接跳过
+          if (lengthRatioFast(currentLen, existingLen) < 0.3) return false;
+          return true;
+        });
+
+        for (const s of filteredSimilar) {
           const existingContent = s.content as string;
 
           // ===== 语义去重增强：元数据结构相似性检测 =====

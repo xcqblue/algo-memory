@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v2.8.2 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
+**版本：** v2.9.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
 
 ---
 
@@ -26,18 +26,23 @@ openclaw gateway restart
 ### 记忆分层（三级自动管理）
 | 层级 | 说明 |
 |------|------|
-| **core** | 高 importance × log(access_count)，被频繁召回的重要记忆 |
+| **core** | 高 importance × 分段乘数，被频繁召回的重要记忆 |
 | **working** | 中等重要度，日常信息 |
-| **peripheral** | 低重要度，随时间自然衰减（Weibull, shape=1.5, scale=90天）|
+| **peripheral** | 低重要度，同时满足 `created_at` + `last_accessed` 双 cutoff 时清理（避免"续命"问题）|
+
+> **v2.9.0 分段评分公式**：原 `importance × (1 + log10(access_count + 1))` 在高访问次数时过早饱和。新公式分段设计：1~10 次用 log10，10~100 次用 sqrt，100+ 次用对数上限，避免马太效应。
 
 ### 全文检索（FTS5）
 - SQLite FTS5 虚拟表，无需外部 embedding API，离线/隐私友好
-- **同义词扩展**（离线，零依赖）— 覆盖生活（老婆↔媳妇）、设备（iPhone↔苹果手机）、金融（止损↔割肉）、宏观（CPI↔通胀）等 200+ 条目
-- **多路召回**（Multi-Path）— 原始 Query + 前缀3-token + 后缀2-token + 首尾组合，并行检索后合并去重
+- **Trie 树同义词扩展**（v2.9.0 优化）— 预编译 Trie 树，O(query_len) 展开，替代 O(query_len × syn_count) 全表遍历
+- **多路召回缩减为 2 路**（v2.9.0 优化）— 原始 Query + 前缀 3-token，减少冗余候选
+- **Tier 分组 MMR**（v2.9.0 优化）— 每 tier 组内独立去重，core 记忆不会被 peripheral 意外挤出
+- **会话去重长度豁免**（v2.9.0 优化）— 追问类查询（长度 > 上次 1.5x）不被误拦截
 - **BM25+ 排序** + **MMR 多样化检索**（λ=0.7）
 
 ### LLM 增强（可选）
 - 自动提取关键词 / LLM 辅助去重 / 语义压缩
+- **合并 LLM 调用**（v2.9.0 新增）— 单次 `processMemory()` 完成 isCore + 关键词 + 去重，减少 50%+ API 调用
 - **纯算法模式零成本运行**，LLM 非必选
 
 ### OpenClaw 生命周期 Hook + ContextEngine
@@ -51,12 +56,12 @@ algo-memory 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整的存储/�
 | `agent_end` | 每次对话结束 | 兜底存储（heartbeat/cron 时跳过）|
 | `after_tool_call` | 工具执行后 | 实时强化 `algo_memory_search` 召回的记忆 cited_count |
 | `tool_result_persist` | 工具结果写入 transcript 前 | 提取 memory ID，实时强化 cited_count |
-| `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store（2s 有限等待）；tier 强化/清理 |
+| `before_compaction` | compaction 开始前 | 若 memoryFlush 未启用则 store（fire-and-forget，session_end 兜底）；tier 强化/清理 |
 | `after_compaction` | compaction 结束后 | no-op（compaction 后 context 已截断，无需重复强化）|
 | `session_start` | 会话开始 | gateway restart 后抢救 unflushed buffer；清除 recall 缓存 |
 | `session_end` | 会话结束 | 确保所有 buffer flush 到 DB |
 | `before_reset` | `/new` 或 `/reset` 前 | 抢救 unflushed buffer，防止重置时消息丢失 |
-| `gateway_start` | Gateway 启动完成后 | DB 健康检查，确保 FTS 索引就绪 |
+| `gateway_start` | Gateway 启动完成后 | DB 健康检查，确保 FTS 索引就绪；content_hash 预热到内存 |
 | `gateway_stop` | Gateway 关闭 | flush 所有 buffer，关闭 DB（带竞态守卫）|
 | `subagent_spawning` | 子 Agent 启动前 | 日志记录 |
 | `subagent_spawned` | 子 Agent 已启动 | 日志记录 |
@@ -133,7 +138,7 @@ openclaw gateway call algo-memory.search --params '{"query":"腾讯持仓"}'
 | `autoRecall` | `true` | before_prompt_build 时自动召回 |
 | `maxResults` | `5` | 最多召回记忆条数 |
 | `capturePerTurn` | `3` | 每轮对话最多存储条数 |
-| `cleanupDays` | `180` | peripheral 记忆超过此天数未访问则清理 |
+| `cleanupDays` | `180` | peripheral 记忆同时满足 `created_at` + `last_accessed` 双 cutoff 时清理（v2.9.0 防"续命"优化） |
 | `language` | `"auto"` | 语言：`auto` / `zh` / `en` |
 
 ### 三层分级
@@ -144,7 +149,10 @@ openclaw gateway call algo-memory.search --params '{"query":"腾讯持仓"}'
 | `tier.coreThreshold` | `10` | access_count ≥ 此值直接升为 core |
 | `tier.peripheralThreshold` | `0.15` | 复合评分低于此值为 peripheral |
 
-> 评分公式：`tier_score = importance × (1 + log10(access_count + 1))`
+> 评分公式（v2.9.0 分段优化版）：`tier_score = importance × multiplier`
+> - access_count 1~10: `1 + log10(access_count + 1)`（快速提升）
+> - access_count 10~100: `sqrt` 增长（平稳期，避免对数饱和）
+> - access_count 100+: 对数上限饱和（防止马太效应）
 
 ### 检索
 

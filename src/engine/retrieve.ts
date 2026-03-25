@@ -2,11 +2,16 @@
  * Unified retrieval engine — shared by both recall (with MMR) and search (without MMR).
  *
  * Pipeline:
- *   FTS5 search (with Query Expansion)  OR  LIKE fallback
+ *   FTS5 search (with Trie-optimized Query Expansion)  OR  LIKE fallback
  *   → Score (time decay / reinforcement / lengthNorm)
- *   → MMR (optional)
+ *   → Tier-grouped MMR deduplication (v2.9.0: 每组内独立 MMR，防止 peripheral 挤出 core)
  *   → HardMinScore filter
  *   → return sorted memories
+ *
+ * v2.9.0 关键优化：
+ * 1. Trie-based FTS5 query expansion（O(query_len) 替代 O(query_len × syn_count)）
+ * 2. 多路召回缩减为 2 路（原始 + 前缀 3-token）
+ * 3. Tier 分组内 MMR（core 记忆不会被 peripheral 意外挤出）
  */
 
 import type { Database as DatabaseType } from 'better-sqlite3';
@@ -17,7 +22,10 @@ import {
   weibullDecay,
   reinforcementFactor,
   lengthNorm,
+  generateMultiPathQueries,
 } from '../utils.js';
+// v2.9.0 Trie-based synonym expansion for FTS5
+import { buildTrieFts5Query } from './synonym-trie.js';
 
 export type DbLike = DatabaseType;
 
@@ -52,49 +60,57 @@ export function retrieve(options: RetrievalOptions): Memory[] {
     ? `agent_id IN (${visibleAgentIds.map(() => '?').join(',')})`
     : '1=1';
 
-  let candidates: Memory[] = [];
+  let allCandidates: Memory[] = [];
+  const seenIds = new Set<string>(); // 多路合并去重
 
-  // ---- FTS5 path ----
+  // ---- FTS5 path with Trie-optimized multi-path expansion ----
   if (ftsEnabled) {
     const ftsQuery = query.trim().replace(/'/g, "''");
     if (ftsQuery) {
       try {
-        const runFts = (q: string): Memory[] => {
-          const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? ORDER BY bm25(fts) DESC, m.importance DESC LIMIT ?`;
-          const params = visibleAgentIds !== null ? [...visibleAgentIds, q, safeLimit] : [q, safeLimit];
-          return queryAll(db, baseSql, params) as unknown as Memory[];
-        };
+        // v2.9.0: 使用 Trie 优化的同义词展开（FTS5 query expansion）
+        const expandedQuery = buildTrieFts5Query(ftsQuery);
 
-        candidates = runFts(ftsQuery);
+        // v2.9.0: 多路召回缩减为 2 路（原始 + 前缀 3-token）
+        const multiQueries = generateMultiPathQueries(expandedQuery, 2);
 
-        // Query Expansion: if empty, retry after dropping shortest term (once)
-        if (candidates.length === 0) {
-          const terms = ftsQuery.split(/\s+/).filter(t => t.length > 1);
-          if (terms.length > 1) {
-            const expanded = terms.sort((a, b) => a.length - b.length).slice(1).join(' ');
-            candidates = runFts(expanded);
+        for (const q of multiQueries) {
+          if (!q.trim()) continue;
+          try {
+            const baseSql = `SELECT ${FIELDS} FROM memories m JOIN memories_fts fts ON m.id = fts.id WHERE ${agentFilter} AND fts MATCH ? ORDER BY bm25(fts) DESC, m.importance DESC LIMIT ?`;
+            const params = visibleAgentIds !== null ? [...visibleAgentIds, q, safeLimit] : [q, safeLimit];
+            const rows = queryAll(db, baseSql, params) as unknown as Memory[];
+            // 多路合并：按 id 去重，保留最高分
+            for (const m of rows) {
+              if (!seenIds.has(m.id)) {
+                seenIds.add(m.id);
+                allCandidates.push(m);
+              }
+            }
+          } catch (err) {
+            log.warn(`[algo-memory] FTS5 query "${q}" failed: ${err}`);
           }
         }
       } catch (err) {
-        log.warn(`[algo-memory] FTS5 search failed: ${err}`);
+        log.warn(`[algo-memory] Trie FTS5 expansion failed: ${err}`);
       }
     }
   }
 
   // ---- LIKE fallback (when FTS5 unavailable or returned nothing) ----
-  if (candidates.length === 0) {
+  if (allCandidates.length === 0) {
     const likeQuery = query.replace(/'/g, "''").trim();
     if (likeQuery) {
       const sql = `SELECT ${FIELDS} FROM memories WHERE ${agentFilter} AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC, created_at DESC LIMIT ?`;
       const params = visibleAgentIds !== null ? [...visibleAgentIds, `%${likeQuery}%`, `%${likeQuery}%`, safeLimit] : [`%${likeQuery}%`, `%${likeQuery}%`, safeLimit];
-      candidates = queryAll(db, sql, params) as unknown as Memory[];
+      allCandidates = queryAll(db, sql, params) as unknown as Memory[];
     }
   }
 
-  if (candidates.length === 0) return [];
+  if (allCandidates.length === 0) return [];
 
   // ---- Score ----
-  const scored = candidates.map(m => {
+  const scored = allCandidates.map(m => {
     const daysOld = (Date.now() - m.last_accessed) / (1000 * 60 * 60 * 24);
     const w = config.tier.weights;
     const tierMultiplier = m.tier === 'core' ? w.core : m.tier === 'working' ? w.working : w.peripheral;
@@ -118,9 +134,12 @@ export function retrieve(options: RetrievalOptions): Memory[] {
     return { ...m, _score: score };
   }).sort((a, b) => b._score - a._score);
 
-  // ---- MMR (optional) ----
+  // ---- Tier-grouped MMR deduplication (v2.9.0 关键优化) ----
+  // 问题：全局 MMR 可能让 core 记忆被 peripheral 挤出（内容相似时，peripheral 先被选中）
+  // 解决：按 tier 分组，每组内独立 MMR，再合并
+  // 这样 core 组保留 core 代表，peripheral 组保留 peripheral 代表
   const mmrCandidates = mmrEnabled && config.mmr.enabled
-    ? mmrDeduplicate(scored, config.mmr)
+    ? tierGroupedMMR(scored, config)
     : scored;
 
   // ---- HardMinScore filter ----
@@ -129,4 +148,57 @@ export function retrieve(options: RetrievalOptions): Memory[] {
     : mmrCandidates;
 
   return filtered;
+}
+
+/**
+ * v2.9.0 新增：按 tier 分组内独立 MMR 去重
+ *
+ * 策略：
+ * 1. 将候选按 tier 分组（core / working / peripheral）
+ * 2. 每组内独立执行 MMR 去重（保留各组代表）
+ * 3. 合并结果，按 _score 排序截断
+ *
+ * 优势：core 记忆不会因为和 peripheral "内容相似" 而被错误淘汰
+ */
+function tierGroupedMMR(
+  items: Memory[],
+  config: Config
+): Memory[] {
+  if (items.length === 0) return [];
+
+  // 按 tier 分组
+  const groups: Record<string, Memory[]> = {
+    core: [],
+    working: [],
+    peripheral: [],
+  };
+  for (const m of items) {
+    const tier = m.tier as string;
+    if (groups[tier]) {
+      groups[tier].push(m);
+    } else {
+      // 未知 tier，归入 working
+      groups.working.push(m);
+    }
+  }
+
+  const deduplicated: Memory[] = [];
+
+  // 每组内独立 MMR（lambda 使用配置的默认值 0.7）
+  const mmrLambda = config.mmr?.lambda ?? 0.7;
+
+  for (const [tier, groupItems] of Object.entries(groups)) {
+    if (groupItems.length === 0) continue;
+
+    if (groupItems.length === 1) {
+      deduplicated.push(groupItems[0]);
+    } else {
+      // 组内 MMR 去重
+      const deduped = mmrDeduplicate(groupItems, { ...config.mmr, lambda: mmrLambda });
+      deduplicated.push(...deduped);
+    }
+  }
+
+  // 合并后按 _score 排序
+  return deduplicated.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 }

@@ -350,4 +350,96 @@ export class LLMClient {
       return { isDuplicate: sim >= this.config.dedupThreshold, similarity: sim };
     }
   }
+
+  /**
+   * v2.9.0 新增：合并记忆处理（isCore + 关键词 + 去重）
+   *
+   * 原有流程需要 2+ 次 LLM 调用（isCore, extractKeywords, isDuplicate）。
+   * 合并为单次调用，减少 50%+ API 调用，降低延迟和成本。
+   *
+   * @param content 记忆内容
+   * @param candidateContents 候选相似记忆内容（用于去重判断）
+   */
+  async processMemory(
+    content: string,
+    candidateContents: string[] = []
+  ): Promise<{
+    isCore: boolean;
+    confidence: number;
+    keywords: string;
+    isDuplicate: boolean;
+    duplicateWith?: string;
+  }> {
+    if (!this.config.llm.enabled || !this.config.llm.apiKey) {
+      return { isCore: false, confidence: 0.5, keywords: '', isDuplicate: false };
+    }
+
+    const candidatesText = candidateContents.length > 0
+      ? `\n候选相似记忆：\n${candidateContents.map((c, i) => `[${i}] ${c.substring(0, 200)}`).join('\n')}`
+      : '';
+
+    const systemPrompt = `你是一个记忆处理助手。用户会提供一条新记忆，你需要：
+1. 判断是否重要需要长期记住（isCore：true/false，confidence：0-1）
+2. 提取关键词（keywords：最多10个，用逗号分隔）
+3. 判断是否与候选记忆重复（isDuplicate：true/false，duplicateWith：重复的候选编号）
+
+回复JSON：
+{"isCore": true/false, "confidence": 0-1, "keywords": "k1,k2,...", "isDuplicate": true/false, "duplicateWith": "编号或null"}
+
+注意：只将真正重复的记忆标记为 isDuplicate=true，不要过度标记。`;
+
+    try {
+      const dispatcher = buildProxyDispatcher();
+      const result = await llmCallWithRetry(async () => {
+        const response = await (dispatcher
+          ? undiciFetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: systemPrompt },
+                  { role: 'user', content: `新记忆：${content}${candidatesText}` }
+                ],
+                max_tokens: 300,
+                temperature: 0.2
+              }),
+              dispatcher
+            })
+          : fetch(llmEndpoint(this.config.llm.baseURL, this.config.llm.provider), {
+              method: 'POST',
+              headers: llmHeaders(this.config.llm.apiKey, this.config.llm.provider),
+              body: JSON.stringify({
+                model: this.config.llm.model,
+                messages: [
+                  { role: 'system', content: systemPrompt },
+                  { role: 'user', content: `新记忆：${content}${candidatesText}` }
+                ],
+                max_tokens: 300,
+                temperature: 0.2
+              })
+            })
+        );
+        if (!response.ok) {
+          throw new Error(`LLM API 错误: ${response.status}`);
+        }
+        const jsonResponse = await response.json() as any;
+        const raw = jsonResponse?.choices?.[0]?.message?.content;
+        if (!raw) throw new Error('LLM 响应格式错误');
+        return JSON.parse(raw);
+      }, RETRY_MAX_ATTEMPTS, RETRY_DELAY_MS);
+
+      return {
+        isCore: result.isCore ?? false,
+        confidence: result.confidence ?? 0.5,
+        keywords: result.keywords ?? '',
+        isDuplicate: result.isDuplicate ?? false,
+        duplicateWith: result.duplicateWith ?? undefined,
+      };
+    } catch (err) {
+      this.log.error('[algo-memory] LLM processMemory 失败:', err);
+      this.onCoreError?.();
+      return { isCore: false, confidence: 0.5, keywords: '', isDuplicate: false };
+    }
+  }
 }

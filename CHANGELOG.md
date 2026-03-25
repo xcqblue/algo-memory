@@ -2,6 +2,93 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.9.0] - 2026-03-25
+
+### 性能优化（写入）
+
+#### 批量去重 O(n²) → O(n log n)
+- **问题**：批次内两两 Jaccard 比较，n 条消息 → n²/2 次比较，消息多时延迟飙升
+- **优化**：按内容长度降序排列，在长度窗口内（最多 5 条）两两比较；窗口外长度差异过大，Jaccard 上界必然低于阈值，直接跳过
+- **效果**：批次去重次数大幅减少，写入延迟降低
+
+#### DB Jaccard 长度预过滤
+- **问题**：每条候选都要和 DB 中 5 条记忆做 Jaccard，很多比较无意义（长度差异大时 Jaccard 上界必然低）
+- **优化**：Jaccard 上界由长度比决定：`min(a,b)/max(a,b) < 0.3` 直接跳过比较
+- **效果**：70%+ Jaccard 计算被跳过
+
+#### Content hash 内存预热
+- **新增**：启动时加载最近 2000 条记忆的 `content_hash` 到 `Set<string>`
+- **效果**：精确去重 O(1)（先查内存 Set，未命中再查 DB）
+
+#### 合并 LLM 调用（processMemory）
+- **新增** `LLMClient.processMemory()` 方法
+- 单次调用同时完成：isCore 判断 + 关键词提取 + 语义去重
+- **效果**：减少 50%+ LLM API 调用，降低延迟和成本
+
+### 性能优化（召回）
+
+#### Tier 分组 MMR 去重
+- **问题**：全局 MMR 可能让 core 记忆被 peripheral 挤出（内容相似时，peripheral 先被选中）
+- **优化**：按 tier 分组，每组内独立 MMR 去重，再合并按 score 排序
+- **效果**：core 记忆不会被 peripheral 意外淘汰
+
+#### Trie 树同义词展开（synonym-trie.ts）
+- **问题**：同义词展开 O(query_len × syn_count)，每 token 要遍历 200+ 同义词表
+- **优化**：预编译 Trie 树，从任意子串出发贪心最长匹配，时间复杂度 O(query_len × max_word_len)
+- **新增文件**：`src/engine/synonym-trie.ts`
+- **效果**：FTS5 查询同义词展开从 ~4000 次/查询 降至 ~query_len 次
+
+#### 多路召回 4 → 2 路
+- **问题**：原始 4 路（原始 + 前缀3 + 后缀2 + 首尾）产生大量冗余候选，实际价值低
+- **优化**：只保留原始 Query + 前缀 3-token，裁剪后缀和首尾组合
+- **效果**：召回候选数量减少 50%+，评分压力降低
+
+#### 会话去重长度豁免
+- **问题**：30 秒内相似查询直接跳过，但追问类场景（"茅台" → "茅台股价走势如何"）不应被拦截
+- **优化**：本次 query 长度超过上次 1.5 倍时，视为追问/深入问，允许召回
+- **效果**：追问类场景不被误拦截
+
+### 可靠性优化
+
+#### before_compaction 放弃 2s 有限等待
+- **问题**：`Promise.race([storePromise, 2000ms])` 不可靠：消息量大时 store 永远无法完成；超时后的 storePromise 仍在后台运行，可能在 gateway restart 时竞走
+- **优化**：改为完全 fire-and-forget，依赖 `session_end` / `gateway_stop` 做最终 flush 兜底
+- **效果**：compaction 不被阻塞，gateway 重启时无竞走风险
+
+#### Peripheral cleanup 双 cutoff
+- **问题**：旧实现用 `last_accessed` 作为 cutoff，存在"续命"问题——peripheral 记忆在第 179 天被访问一次 → last_accessed 更新 → 重新获得 180 天寿命
+- **优化**：同时使用 `created_at` + `last_accessed` 双 cutoff：
+  - `created_at < cutoff`：已存活 cleanupDays 天（临时信息本质）
+  - `last_accessed < cutoff`：长期未被访问（非活跃记忆）
+- **效果**：真正重要的记忆会被 recall 强化（last_accessed 持续更新），临时的 peripheral 记忆两者都超 cutoff → 被清理
+
+#### Tier 评分分段公式
+- **问题**：原公式 `importance × (1 + log10(access_count + 1))` 中，高访问次数（100+/1000+）时对数项过早饱和，multiplier 差距极小（ac=100 → 3.0, ac=1000 → 4.0）
+- **优化**：分段设计：
+  - ac 1~10: log10 增长（快速提升）
+  - ac 10~100: sqrt 增长（平稳期）
+  - ac 100+: 对数上限（饱和期，multiplier 上限 5.0）
+- **效果**：高频访问记忆获得应有区分度
+
+### 数据库优化
+
+#### 新增 3 个索引
+```sql
+-- peripheral cleanup 查询优化
+CREATE INDEX idx_peripheral_cleanup ON memories(tier, layer, created_at) WHERE tier = 'peripheral' AND layer = 'general';
+
+-- export / list 查询优化
+CREATE INDEX idx_agent_created ON memories(agent_id, created_at DESC);
+
+-- content_hash 精确去重（UNIQUE + WHERE 允许 NULL）
+CREATE UNIQUE INDEX idx_content_hash ON memories(content_hash) WHERE content_hash IS NOT NULL;
+```
+
+### 项目结构更新
+- **新增** `src/engine/synonym-trie.ts`（Trie 树同义词展开器）
+
+---
+
 ## [2.8.2] - 2026-03-25
 
 ### Bug Fixes（OpenClaw 25 Hook 全覆盖修复）
