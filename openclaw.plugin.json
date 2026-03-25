@@ -2,7 +2,7 @@
   "id": "algo-memory",
   "name": "algo-memory",
   "description": "Structured SQLite-based memory for OpenClaw — ContextEngine interface (assemble/compact hooks), registerGatewayMethod RPC, tier scoring (core/working/peripheral), FTS5 full-text search, Weibull decay, session continuity, compaction reinforcement. Compatible with OpenClaw v2026.3.23+. Mutually exclusive with memory-lancedb: set plugins.slots.memory='algo-memory' to activate.",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
   "readme": "https://raw.githubusercontent.com/xcqblue/algo-memory/main/README.md",

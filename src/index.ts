@@ -1,21 +1,21 @@
 /**
- * algo-memory v3.1.0
+ * algo-memory v3.2.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
  *
+ * v3.2.0 OpenClaw ContextEngine 三大优化:
+ * - bootstrap(): 从 workspace Markdown 扫描并导入历史记忆到 SQLite
+ * - maintain(): 返回真实 cleanup metrics（deleted / bytesFreed），供 OpenClaw 决策
+ * - assemble(): 语言感知 token 估算（中英文分开，中文 1:1，英文 ~1.3:1）
+ *
  * v3.1.0 OpenClaw 兼容性优化:
- * - 新增 openClawMemoryMode 配置：auto / standalone / retrieval-only
- * - auto 模式自动检测 OpenClaw built-in memory 是否启用
- * - retrieval-only 模式：关闭 auto-capture hooks（避免与 memoryFlush 重复存储），
- *   存储交给 OpenClaw built-in memory，algo-memory 仅通过 ContextEngine assemble() 提供 FTS5 检索增强
- * - 新增 syncToWorkspace 配置：将记忆同步写入 workspace Markdown（与 memory_search 工具互通）
+ * - openClawMemoryMode 配置：auto / standalone / retrieval-only
+ * - syncToWorkspace 配置：同步写入 workspace Markdown
  *
  * v3.0.0 优化:
  * - recall/search 统一走 retrieve() 检索引擎（含 TierGroupedMMR）
- * - LLM 队列动态批次（队列深度决定批次大小和处理延迟）
- * - cleanupEmptyBuffers 30 分钟强制清理（防止 buffer 堆积）
- * - hash 预热改为"今日+最近1000条"并集
+ * - LLM 队列动态批次、cleanupEmptyBuffers 30 分钟强制清理
  */
 
 import path from 'path';
@@ -120,7 +120,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
-  version = '3.1.0';
+  version = '3.2.0';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -779,33 +779,26 @@ confidence 是 0-1 的置信度。
     }
   }
 
-  cleanup(): void {
-    if (!this.db) return;
+  /**
+   * v3.1.0: cleanup 返回真实 metrics
+   * @returns deleted 实际删除的记录数
+   * @returns bytesFreed 估算释放的字节数（基于已删除内容的平均长度）
+   */
+  cleanup(): { deleted: number; bytesFreed: number } {
+    if (!this.db) return { deleted: 0, bytesFreed: 0 };
 
-    // v2.9.0 优化：peripheral cleanup 改用 created_at 作为主 cutoff
-    //
-    // 问题：旧实现用 last_accessed 作为 cutoff，存在"续命"问题：
-    // peripheral 记忆在第 179 天被访问一次 → last_accessed 更新 → 重新获得 180 天寿命
-    // 这让本该遗忘的临时信息（闲聊、临时计划）长期占用空间。
-    //
-    // 解决：新记忆的"临时性"本质不应因访问改变，cleanup cutoff 基于 created_at。
-    // 同时保留 last_accessed 作为辅助条件：同时满足以下条件才清理
-    //   1. created_at < cutoff（已存活 cleanupDays 天）
-    //   2. last_accessed < cutoff（即长期未被访问，非活跃记忆）
-    //
-    // 这确保：
-    //   - 真正重要的记忆（会被 recall 强化）→ last_accessed 持续更新 → 不被清理
-    //   - 临时的 peripheral 记忆 → 没人记得它 → 两者都超过 cutoff → 被清理
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
     const BATCH = 5000;
-    let total = 0;
+    let totalDeleted = 0;
+    let totalBytes = 0;
     let deleted = 0;
+
     do {
       let rows: any[] = [];
       try {
+        // v3.1.0: 查询待删除记忆的内容长度（用于估算 bytesFreed）
         rows = queryAll(this._db(),
-          // v2.9.0: 同时检查 created_at 和 last_accessed
-          `SELECT rowid FROM memories WHERE created_at < ? AND last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
+          `SELECT rowid, length(content) as content_len FROM memories WHERE created_at < ? AND last_accessed < ? AND layer = 'general' AND tier = 'peripheral' LIMIT ?`,
           [cutoff, cutoff, BATCH]
         );
       } catch (err) {
@@ -813,7 +806,10 @@ confidence 是 0-1 的置信度。
         break;
       }
       if (rows.length === 0) break;
+
       const rowids = rows.map((r: any) => r.rowid);
+      const contentLens = rows.map((r: any) => r.content_len || 0);
+
       try {
         deleted = run(this._db(),
           `DELETE FROM memories WHERE rowid IN (${rowids.map(() => '?').join(',')})`,
@@ -823,11 +819,20 @@ confidence 是 0-1 的置信度。
         this.log.error('[algo-memory] cleanup 删除失败:', err);
         break;
       }
-      total += deleted;
+
+      totalDeleted += deleted;
+      totalBytes += contentLens.reduce((sum, len) => sum + len, 0);
     } while (deleted === BATCH);
-    if (total > 0) {
-      this.log.info('[algo-memory] 清理了', total, '条过期记忆（基于 created_at + last_accessed 双 cutoff）');
+
+    // bytesFreed = 内容总字节 + 索引开销（估算每条 200 字节）
+    const INDEX_OVERHEAD_PER_RECORD = 200;
+    const bytesFreed = totalBytes + totalDeleted * INDEX_OVERHEAD_PER_RECORD;
+
+    if (totalDeleted > 0) {
+      this.log.info(`[algo-memory] 清理了 ${totalDeleted} 条过期记忆，估算释放 ${bytesFreed} bytes（基于 created_at + last_accessed 双 cutoff）`);
     }
+
+    return { deleted: totalDeleted, bytesFreed };
   }
 
 

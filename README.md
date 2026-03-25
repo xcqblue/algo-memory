@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v3.1.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
+**版本：** v3.2.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
 
 ---
 

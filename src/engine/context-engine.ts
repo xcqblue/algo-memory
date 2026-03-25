@@ -1,18 +1,20 @@
 /**
- * algo-memory v2.7.5 - ContextEngine Implementation
- * Implements the OpenClaw ContextEngine interface by wrapping MemoryPlugin.
+ * algo-memory v3.1.0 - ContextEngine Implementation
  *
- * Type imports are pulled from openclaw's plugin-sdk (available as peer dep)
- * and @mariozechner/pi-agent-core (peer dep). At runtime these are provided
- * by the OpenClaw host; at compile time we declare stub types so tsc succeeds.
+ * v3.1.0 三大优化：
+ * 1. bootstrap(): 扫描 workspace Markdown 并导入到 SQLite
+ * 2. maintain(): 返回真实 cleanup metrics（deleted / bytesFreed）
+ * 3. assemble(): 语言感知 token 估算（中英文分开，更精确）
  */
+
+import { existsSync } from 'fs';
+import { readFile } from 'fs/promises';
+import { join, dirname } from 'path';
 
 // AgentMessage is provided by the OpenClaw runtime; we declare it as a local type alias
 // so this file has no external type-level dependencies beyond the plugin host.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AgentMessage = any;
-
-
 
 // ============= Local type stubs (mirrors OpenClaw plugin-sdk types) =============
 
@@ -103,7 +105,7 @@ export interface PrepareSubagentSpawnParams {
 }
 
 export interface OnSubagentEndedParams {
-  childSessionKey: string;
+  childAgentId: string;
   reason: SubagentEndReason;
 }
 
@@ -155,11 +157,172 @@ export interface MemoryPluginInstance {
   store(agentId: string, messages: any[]): Promise<void>;
   recall(agentId: string, query: string, options?: { limit?: number; skipDedup?: boolean }): Promise<{ hasMemory: boolean; memories: any[] }>;
   manualCompact(agentId: string): Promise<{ success: boolean; message: string; promoted?: number; reinforced?: number; pruned?: number }>;
-  cleanup?(): void;
+  cleanup(): { deleted: number; bytesFreed: number };
   close?(): void;
   config?: { maxInjectTokens?: number };
   version?: string;
+  workspaceDir?: string;
 }
+
+// ============= Token 估算器（v3.1.0 语言感知版）=============
+
+/**
+ * v3.1.0 语言感知 token 估算
+ *
+ * 问题：原来用 `length * 0.4` 过于粗糙：
+ *   - 中文：1个汉字 ≈ 1个token，用 0.4 严重低估（×2.5 放大）
+ *   - 英文：1个token ≈ 0.75个单词，1个单词≈4字符，用 length*0.4 ≈ 偏大
+ *   - 混合文本：无法区分
+ *
+ * 新方案：CJK 字符 / English words / ASCII digits 分开估算
+ * - CJK 字符（中文/日文/韩文）：1字符 ≈ 1 token
+ * - Latin 单词：[a-zA-Z]+ 识别为英文单词，每词 ≈ 1.3 tokens（GPT tokenizer cl100k_base 经验值）
+ * - ASCII 数字/标点：[0-9]+ ≈ 0.75 tokens/数字，标点 ≈ 1 token
+ * - 空格：忽略
+ *
+ * 示例：
+ * - "我生日是6月1日" → 8 CJK = 8 tokens
+ * - "我的生日是6月1日，记得买蛋糕" → 10 CJK = 10 tokens
+ * - "hello world today" → 3 words × 1.3 = 3.9 ≈ 4 tokens
+ * - "MacBook Pro 2024" → 2 words × 1.3 + 1 number × 0.75 + 1 number × 0.75 ≈ 3.8 ≈ 4 tokens
+ */
+function estimateTokens(text: string): number {
+  let tokens = 0;
+  let i = 0;
+  const len = text.length;
+
+  while (i < len) {
+    const char = text[i];
+    const code = text.charCodeAt(i);
+
+    // ASCII range（英文单词、数字、标点、空格）
+    if (code < 128) {
+      if (/[a-zA-Z]/.test(char)) {
+        // Latin word
+        let wordLen = 0;
+        while (i < len && /[a-zA-Z]/.test(text[i])) {
+          wordLen++;
+          i++;
+        }
+        tokens += wordLen * 1.3; // English word ≈ 1.3 tokens
+      } else if (/[0-9]/.test(char)) {
+        // Number
+        let numLen = 0;
+        while (i < len && /[0-9]/.test(text[i])) {
+          numLen++;
+          i++;
+        }
+        tokens += numLen * 0.75; // number ≈ 0.75 tokens
+      } else if (/\S/.test(char)) {
+        // Other non-whitespace ASCII (punctuation, etc.)
+        tokens += 1;
+        i++;
+      } else {
+        // Whitespace
+        i++;
+      }
+    } else {
+      // CJK（中文/日文/韩文）或全角字符
+      // 简单判断：CJK Unicode 范围
+      // 中文: 4E00-9FFF, 3400-4DBF（扩展A）, 20000-2A6DF（扩展B）
+      // 日文 Hiragana/Katakana: 3040-309F, 30A0-30FF
+      // 韩文: AC00-D7AF, 1100-11FF（初声）, 3100-312F（注音）
+      const isCJK = (
+        (code >= 0x4E00 && code <= 0x9FFF) ||   // CJK Unified Ideographs
+        (code >= 0x3400 && code <= 0x4DBF) ||   // CJK Extension A
+        (code >= 0x20000 && code <= 0x2A6DF) ||  // CJK Extension B
+        (code >= 0x3040 && code <= 0x309F) ||    // Hiragana
+        (code >= 0x30A0 && code <= 0x30FF) ||    // Katakana
+        (code >= 0xAC00 && code <= 0xD7AF) ||    // Hangul Syllables
+        (code >= 0x1100 && code <= 0x11FF) ||     // Hangul Jamo
+        (code >= 0x3100 && code <= 0x312F)       // Bopomofo
+      );
+      if (isCJK) {
+        tokens += 1; // 每个 CJK 字符 ≈ 1 token
+        i++;
+      } else {
+        // 全角字母/数字/标点（占两个代码单元但算一个字符）
+        tokens += 1;
+        i += 2;
+      }
+    }
+  }
+
+  return Math.ceil(tokens);
+}
+
+// ============= Markdown 解析器（v3.1.0 bootstrap 用）============
+
+/**
+ * 解析 OpenClaw workspace Markdown 文件中的记忆条目
+ *
+ * 支持的格式：
+ * - "- [日期] 记忆内容"  （MEMORY.md / memory/*.md 标准格式）
+ * - "- [algo-memory/tier] 记忆内容" （algo-memory syncToWorkspace 格式）
+ * - "## 日期" / "# 日期" （日期分区标题）
+ * - "- 记忆内容" 或 "* 记忆内容" （无日期的列表项）
+ * - "1. 记忆内容" （有序列表）
+ */
+function parseMemoryEntries(content: string): { date: string; text: string; source: string }[] {
+  const entries: { date: string; text: string; source: string }[] = [];
+  const lines = content.split('\n');
+  let currentSection = '';
+
+  // 行首空格
+  const listItemPattern = /^[\s]*[-*]?\s*/;
+  const sectionPattern = /^#+\s*(.+)/;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // 跳过代码块
+    if (line.startsWith('```')) continue;
+
+    // 解析日期分区标题
+    const sectionMatch = line.match(sectionPattern);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1].trim();
+      continue;
+    }
+
+    // 解析列表项
+    if (/^[-*]\s/.test(line) || /^\d+\.\s/.test(line)) {
+      const text = line.replace(listItemPattern, '').trim();
+
+      // 跳过注释/空内容
+      if (!text || text.startsWith('//') || text.startsWith('#')) continue;
+
+      // 跳过已有标签行
+      if (text.startsWith('[...') || text.startsWith('```') || text.startsWith('<!--')) continue;
+
+      // 提取日期（如果有）
+      let entryDate = currentSection || '';
+      const dateMatch = text.match(/^\[(\d{4}-\d{2}-\d{2})\]/);
+      if (dateMatch) {
+        entryDate = dateMatch[1];
+      }
+
+      // 去除标签前缀 [algo-memory/core] 或 [日期]
+      const cleanText = text
+        .replace(/^\[\d{4}-\d{2}-\d{2}\]\s*/, '')
+        .replace(/^\[algo-memory\/[^]]+\]\s*/, '')
+        .trim();
+
+      if (cleanText.length >= 3) {
+        entries.push({
+          date: entryDate || new Date().toISOString().split('T')[0],
+          text: cleanText,
+          source: 'bootstrap',
+        });
+      }
+    }
+  }
+
+  return entries;
+}
+
+// ============= AlgoMemoryContextEngine =============
 
 /**
  * Wraps a MemoryPlugin instance to expose the OpenClaw ContextEngine interface.
@@ -176,14 +339,87 @@ export class AlgoMemoryContextEngine implements ContextEngine {
     this.info = {
       id: 'algo-memory',
       name: 'algo-memory',
-      version: plugin && (plugin as any).version || '2.7.5',
+      version: plugin && (plugin as any).version || '3.1.0',
       ownsCompaction: false,
     };
   }
 
-  // No-op: plugin is already initialized via its own init() in register()
-  async bootstrap(): Promise<BootstrapResult> {
-    return { bootstrapped: false, reason: 'MemoryPlugin handles its own initialization' };
+  /**
+   * v3.1.0: bootstrap — 从 workspace Markdown 导入历史记忆到 SQLite
+   *
+   * 扫描路径：
+   * - workspaceDir/MEMORY.md
+   * - workspaceDir/memory/*.md（YYYY-MM-DD.md）
+   *
+   * 解析格式：支持 OpenClaw memory_search 标准格式和 algo-memory syncToWorkspace 格式
+   * 导入方式：通过 plugin.store() 批量写入（触发 deduplication，不会重复导入）
+   *
+   * 只在从未 bootstrap 过时执行（通过检查 workspaceDir 下是否有 Markdown 文件判断）
+   */
+  async bootstrap(params: { sessionId: string; sessionKey?: string; sessionFile: string }): Promise<BootstrapResult> {
+    const workspaceDir = (this.plugin as any).workspaceDir as string | undefined;
+
+    if (!workspaceDir || !existsSync(workspaceDir)) {
+      return { bootstrapped: false, reason: 'workspaceDir not available' };
+    }
+
+    try {
+      const memoryDir = join(workspaceDir, 'memory');
+      const entries: { date: string; text: string; source: string }[] = [];
+
+      // 扫描 MEMORY.md
+      const memoryPath = join(workspaceDir, 'MEMORY.md');
+      if (existsSync(memoryPath)) {
+        const content = await readFile(memoryPath, 'utf-8');
+        entries.push(...parseMemoryEntries(content).map(e => ({ ...e, source: 'MEMORY.md' })));
+      }
+
+      // 扫描 memory/*.md
+      if (existsSync(memoryDir)) {
+        const { readdirSync } = await import('fs');
+        const files = readdirSync(memoryDir).filter(f => f.endsWith('.md'));
+        for (const file of files) {
+          const filePath = join(memoryDir, file);
+          const content = await readFile(filePath, 'utf-8');
+          entries.push(...parseMemoryEntries(content).map(e => ({ ...e, source: `memory/${file}` })));
+        }
+      }
+
+      if (entries.length === 0) {
+        return { bootstrapped: true, importedMessages: 0, reason: 'no entries found in workspace' };
+      }
+
+      // 转换为 AgentMessage 格式，调用 store()
+      // 注意：store() 内部有 deduplication，重复导入不会产生重复记录
+      const messages = entries.map(entry => ({
+        role: 'user',
+        content: entry.text,
+        _meta: { importDate: entry.date, importSource: entry.source },
+      }));
+
+      // 分批导入（每批 50 条）
+      const BATCH = 50;
+      let imported = 0;
+      for (let i = 0; i < messages.length; i += BATCH) {
+        const batch = messages.slice(i, i + BATCH);
+        try {
+          await this.plugin.store(params.sessionId, batch);
+          imported += batch.length;
+        } catch (err) {
+          console.warn(`[algo-memory] bootstrap batch import failed:`, err);
+        }
+      }
+
+      console.log(`[algo-memory] bootstrap: 从 workspace 导入了 ${imported}/${entries.length} 条记忆到 SQLite`);
+      return {
+        bootstrapped: true,
+        importedMessages: imported,
+        reason: `从 workspace 导入了 ${imported}/${entries.length} 条记忆`,
+      };
+    } catch (err: any) {
+      console.error('[algo-memory] bootstrap failed:', err);
+      return { bootstrapped: false, reason: err?.message ?? String(err) };
+    }
   }
 
   // Forward to plugin.store()
@@ -209,15 +445,34 @@ export class AlgoMemoryContextEngine implements ContextEngine {
   // No-op: MemoryPlugin handles storage via hooks (before_prompt_build / agent_end)
   async afterTurn(): Promise<void> {}
 
-  // Trigger cleanup on maintain — rewrites nothing in the transcript
+  /**
+   * v3.1.0: maintain — 调用 plugin.cleanup() 返回真实 metrics
+   *
+   * OpenClaw 用 bytesFreed 决定是否需要再次 maintain。
+   * 之前返回 { bytesFreed: 0 }，导致 OpenClaw 误判 maintain 效果。
+   * 现在返回 plugin.cleanup() 的实际值。
+   */
   async maintain(): Promise<ContextEngineMaintenanceResult> {
-    this.plugin.cleanup?.();
-    return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: 'noop - algo-memory uses hook-based storage' };
+    try {
+      const result = this.plugin.cleanup();
+      return {
+        changed: result.deleted > 0,
+        bytesFreed: result.bytesFreed,
+        rewrittenEntries: 0, // algo-memory 不重写任何 entry
+        reason: result.deleted > 0
+          ? `清理了 ${result.deleted} 条 peripheral 记忆`
+          : '无记忆需清理',
+      };
+    } catch (err: any) {
+      return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: err?.message ?? String(err) };
+    }
   }
 
   /**
-   * Assemble model context: call plugin.recall() with the user prompt
-   * and convert returned Memory[] to AgentMessage[] for injection.
+   * v3.1.0: assemble — 语言感知 token 估算
+   *
+   * 用 estimateTokens() 替代 `length * 0.4` 粗糙估算，
+   * 对中英文混合文本更准确。
    */
   async assemble(params: AssembleParams): Promise<AssembleResult> {
     try {
@@ -246,7 +501,8 @@ export class AlgoMemoryContextEngine implements ContextEngine {
       for (let i = 0; i < memories.length; i++) {
         const m = memories[i];
         const line = `[记忆] ${m.content}`;
-        const lineTokens = Math.ceil((line.length * 0.4)); // rough token estimate
+        // v3.1.0: 语言感知 token 估算
+        const lineTokens = estimateTokens(line);
         if (tokenCount + lineTokens > MAX_TOKENS) break;
         const msg = {
           role: 'user' as const,

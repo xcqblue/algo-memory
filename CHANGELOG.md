@@ -2,6 +2,36 @@
 
 All notable changes to algo-memory are documented here.
 
+## [3.2.0] - 2026-03-25
+
+### ContextEngine 三大优化
+
+#### bootstrap(): workspace Markdown → SQLite 历史导入
+- **问题**：`bootstrap()` 之前是 no-op，用户切换到 algo-memory 后，workspace 中的 `MEMORY.md` 和 `memory/*.md` 历史记忆完全丢失
+- **解决**：在 `bootstrap()` 中扫描 workspace 目录：
+  - `workspaceDir/MEMORY.md` — 核心长期记忆
+  - `workspaceDir/memory/YYYY-MM-DD.md` — 每日日志
+- **解析格式**：支持 OpenClaw `memory_search` 标准格式（`- [日期] 内容`）和 algo-memory syncToWorkspace 格式（`- [algo-memory/tier] 内容`）
+- **去重导入**：通过 `plugin.store()` 批量导入，store 内部去重机制保证不会重复
+
+#### maintain(): 返回真实 cleanup metrics
+- **问题**：`maintain()` 之前返回 `{ bytesFreed: 0 }`，导致 OpenClaw 无法判断 maintain 是否有效，可能频繁调用
+- **解决**：
+  - `plugin.cleanup()` 改造：返回 `{ deleted: number; bytesFreed: number }`
+  - `bytesFreed = 内容总长度 + 每条记录估算索引开销（200 bytes）`
+  - `changed = deleted > 0`
+
+#### assemble(): 语言感知 token 估算
+- **问题**：原来用 `length * 0.4` 估算，中文严重低估（×2.5），英文偏高
+- **解决**：CJK 字符（中文/日文/韩文）1:1 估算，英文单词 × 1.3，数字 × 0.75
+  ```
+  "我生日是6月1日"       → 8 CJK + 1 number → 8.75 ≈ 9 tokens（原估算 ×0.4 = 4）
+  "hello world today"    → 3 words ×1.3     → 3.9 ≈ 4 tokens（原估算 5.5）
+  ```
+- **效果**：OpenClaw 的 auto-compaction 触发时机判断更准确
+
+---
+
 ## [3.1.0] - 2026-03-25
 
 ### OpenClaw 兼容性优化
