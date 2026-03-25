@@ -50,8 +50,8 @@
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
-| `smartDedup` | `true` | 开启 Jaccard 智能去重 |
-| `dedupThreshold` | `0.85` | Jaccard 相似度阈值，超过此值认为是重复 |
+| `smartDedup` | `true` | 开启 Jaccard 智能去重（含元数据结构感知增强） |
+| `dedupThreshold` | `0.85` | Jaccard 相似度阈值；双方或一方为元数据内容时自动降低（50% / 75%）|
 
 ### 噪声过滤
 
@@ -60,6 +60,19 @@
 | `noiseFilter.enabled` | `true` | 开启噪声过滤 |
 | `noiseFilter.skipGreetings` | `true` | 过滤 hi/hello/hey/你好/您好/嗨 |
 | `noiseFilter.skipCommands` | `true` | 过滤 / ! - 开头的命令 |
+| `noiseFilter.skipPatterns` | 见下方 | 正则数组，符合任一 pattern 的内容在评分前直接跳过 |
+| `noiseFilter.skipSystemSource` | `true` | 预留：跳过系统/元数据来源的消息 |
+
+> **skipPatterns 默认值**（过滤 OpenClaw 飞书等平台的元数据包裹层）
+> ```json
+> [
+>   "^Conversation info",
+>   "^```json",
+>   "^```json\\{",
+>   "^{.*\"message_id\"",
+>   "^{.*\"sender_id\""
+> ]
+> ```
 
 ---
 
@@ -192,6 +205,8 @@ working:    everything in between
 | `compression.enabled` | `true` | 开启压缩存储 |
 | `compression.maxLength` | `200` | 压缩后最大长度 |
 | `compression.extractKeywords` | `true` | 提取关键词补充摘要 |
+| `compression.minLengthForCompression` | `300` | 最小长度阈值：超过此长度才执行压缩（避免短内容被截断） |
+| `compression.skipMetadataCompression` | `true` | 元数据类内容直接存储原文，不执行压缩 |
 
 ---
 
@@ -213,7 +228,15 @@ working:    everything in between
   "noiseFilter": {
     "enabled": true,
     "skipGreetings": true,
-    "skipCommands": true
+    "skipCommands": true,
+    "skipPatterns": [
+      "^Conversation info",
+      "^```json",
+      "^```json\\{",
+      "^{.*\"message_id\"",
+      "^{.*\"sender_id\""
+    ],
+    "skipSystemSource": true
   },
   "adaptiveRetrieval": {
     "enabled": true,
@@ -275,7 +298,9 @@ working:    everything in between
   "compression": {
     "enabled": true,
     "maxLength": 200,
-    "extractKeywords": true
+    "extractKeywords": true,
+    "minLengthForCompression": 300,
+    "skipMetadataCompression": true
   },
   "batchWrite": {
     "enabled": true,

@@ -2,6 +2,62 @@
 
 All notable changes to algo-memory are documented here.
 
+## [2.7.1] - 2026-03-25
+
+### Bug Fixes（元数据过滤 + 压缩策略优化）
+
+#### 噪音过滤器扩展（skipPatterns）
+- `noiseFilter` 新增 `skipPatterns` 字段：支持正则表达式数组，符合任一 pattern 的内容在 importance 评分前直接跳过
+- 默认 patterns 覆盖 OpenClaw 飞书等平台的元数据包裹层：
+  - `^Conversation info` — 飞书消息前缀元数据块
+  - `^```json` / `^```json{` — JSON 代码块包裹
+  - `^{.*"message_id"` — 包含 message_id 的 JSON 对象
+  - `^{.*"sender_id"` — 包含 sender_id 的 JSON 对象
+- 新增 `skipSystemSource` 字段（预留来源标签过滤能力）
+
+#### 元数据包裹层过滤（来源标签过滤）
+- 新增 `isMetadataLike()` 函数，检测内容是否像系统元数据包裹层
+- store() 循环中，在精确去重之前加入 `isMetadataLike()` 兜底过滤
+- **效果**：飞书消息的 `Conversation info` 元数据包裹层被直接跳过，不再污染记忆库
+
+#### 语义去重增强（元数据结构感知）
+- smart dedup 中加入元数据感知逻辑：
+  - 双方都是元数据类内容：阈值降至原值的 **50%**（更激进地去重）
+  - 一方是元数据类内容：阈值降至原值的 **75%**
+- **效果**：避免结构相似的元数据碎片被误认为"不同内容"重复存入
+
+#### 压缩策略优化
+- `compression` 新增 `minLengthForCompression` 字段（默认 300 字符）：
+  - 内容长度 ≤300 字符：跳过压缩，直接存储原文
+  - 避免短内容被过度截断
+- `compression` 新增 `skipMetadataCompression: true`：
+  - 元数据类内容：直接存储原文，不执行压缩逻辑
+- **效果**：短内容（≤300字符）保持完整，元数据内容不浪费压缩 CPU
+
+### 配置变更
+
+**noiseFilter 新增字段（向后兼容，未设置时使用默认值）：**
+```json
+{
+  "skipPatterns": [
+    "^Conversation info",
+    "^```json",
+    "^```json\\{",
+    "^{.*\"message_id\"",
+    "^{.*\"sender_id\""
+  ],
+  "skipSystemSource": true
+}
+```
+
+**compression 新增字段：**
+```json
+{
+  "minLengthForCompression": 300,
+  "skipMetadataCompression": true
+}
+```
+
 ## [2.7.0] - 2026-03-24
 
 ### Features（FTS5 同义词扩展 + 多路召回）
