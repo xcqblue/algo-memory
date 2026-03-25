@@ -539,7 +539,7 @@ export function normalizeForStorage(content: string): string {
   text = stripInboundMetadata(text);
   text = text
     // Strip @mentions
-    .replace(/@\w+/g, '')
+    .replace(/@[^\s]+/g, '')
     // Compress multiple whitespace to single space
     .replace(/\s+/g, ' ')
     // Remove common markdown noise (keep the text, not the markup)

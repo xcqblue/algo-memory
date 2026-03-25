@@ -68,7 +68,8 @@ export async function recall(
 
   // Session dedup is active — do NOT use cache, because same query at different times
   // should produce different results (one eligible, one skipped). Cache would bypass dedup.
-  const useCache = (!config.adaptiveRetrieval.sessionDedup?.enabled || !!options?.skipDedup) && !options?.skipDedup;
+  // However, when skipDedup is explicitly true (proactive recall), we SHOULD use cache.
+  const useCache = !config.adaptiveRetrieval.sessionDedup?.enabled || !!options?.skipDedup;
 
   const cacheKey = `recall:${AgentId}:${configHash}:${query}`;
   if (useCache && cache.has(cacheKey)) {

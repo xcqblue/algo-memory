@@ -70,7 +70,7 @@ export function hashContent(content: string): string {
 // ============= Text Normalization =============
 export function normalizeText(text: string): string {
   let normalized = text.trim();
-  normalized = normalized.replace(/@[\w]+/g, ''); // 移除所有 @mention
+  normalized = normalized.replace(/@[^\s]+/g, ''); // 移除所有 @mention（支持中文用户名）
   normalized = normalized.replace(/\s+/g, ' ').trim();
   normalized = normalized.replace(/^(以下是|根据|按照).*?:?\s*/i, '');
   return normalized;
@@ -154,8 +154,11 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   // 精确匹配
   if (confirms.includes(lower)) return true;
 
-  // 包含关系（处理"好的我知道了"这类）
-  if (confirms.some(c => lower.includes(c) && lower.length <= c.length + 5)) return true;
+  // 宽松前缀匹配：确认词必须在开头，且总长度不超过确认词+5（容忍末尾标点）
+  // 这样 "好的我知道了" 就不会被误判为噪音（"好的" 在中间，不在开头）
+  if (confirms.some(c =>
+    (lower.startsWith(c) || lower === c) && lower.length <= c.length + 5
+  )) return true;
 
   return false;
 }
@@ -438,10 +441,30 @@ export function shouldRetrieve(
 }
 
 // ============= Similarity =============
+/**
+ * Jaccard similarity with 2-gram for Chinese text.
+ * Uses the same tokenization strategy as FTS5 extractKeywords to ensure
+ * dedup logic and FTS retrieval are consistent.
+ */
 export function jaccardSimilarity(text1: string, text2: string): number {
-  // CJK 单字为词，英文/数字按词分
-  const words1 = new Set(text1.toLowerCase().match(/[\u4e00-\u9fa5]|[a-z0-9]+/gi) || []);
-  const words2 = new Set(text2.toLowerCase().match(/[\u4e00-\u9fa5]|[a-z0-9]+/gi) || []);
+  const tokenize = (text: string): Set<string> => {
+    const chinesePart = text.toLowerCase().match(/[\u4e00-\u9fa5]+/g) || [];
+    const latinPart = text.toLowerCase().match(/[a-z0-9]+/gi) || [];
+    const tokens = new Set<string>();
+    // Chinese 2-gram (same as extractKeywords FTS strategy)
+    for (const seg of chinesePart) {
+      for (let i = 0; i < seg.length - 1; i++) {
+        tokens.add(seg.substring(i, i + 2));
+      }
+    }
+    // English/numbers: filter pure digits, min length 2
+    for (const w of latinPart) {
+      if (!/\d/.test(w) && w.length >= 2) tokens.add(w);
+    }
+    return tokens;
+  };
+  const words1 = tokenize(text1);
+  const words2 = tokenize(text2);
   if (words1.size === 0 || words2.size === 0) return 0;
   const intersection = new Set([...words1].filter(x => words2.has(x)));
   const union = new Set([...words1, ...words2]);
@@ -668,8 +691,6 @@ const SYNONYMS: Record<string, string[]> = {
   '杠杆': ['杠杆率', '倍数', '做多', '做空'],
   '保证金': ['Margin', '担保金', '维持保证金'],
   '做T': ['日内交易', '高抛低吸', 'T+0', '做'],
-  'T': ['日内交易', '高抛低吸', 'T+0'],
-  't': ['日内交易', '高抛低吸', 'T+0'],
   // 品牌/公司
   '茅台': ['贵州茅台', '600519', '茅台'],
   '腾讯': ['腾讯控股', '00700', '港股00700'],
