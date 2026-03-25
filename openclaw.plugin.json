@@ -5,7 +5,8 @@
   "version": "2.7.5",
   "kind": "memory",
   "homepage": "https://github.com/xcqblue/algo-memory",
-  "installDependencies": true,
+  "readme": "https://raw.githubusercontent.com/xcqblue/algo-memory/main/README.md",
+  "installDependencies": false,
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
