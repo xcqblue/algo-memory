@@ -1044,29 +1044,61 @@ export default {
       return new AlgoMemoryContextEngine(plugin);
     });
 
-    // Gateway RPC methods — allows CLI/HTTP access without LLM
-    api.registerGatewayMethod('algo-memory.stats', async (params: any, ctx: any) => {
-      const agentId = params?.agentId || ctx?.agentId || 'default';
-      return plugin.getStats(agentId);
+    // Gateway RPC methods — allows CLI/HTTP access without LLM.
+    // Signature: (opts: GatewayRequestHandlerOptions) => void
+    // opts.params contains the call parameters, opts.respond(true, result) must be called to reply.
+    api.registerGatewayMethod('algo-memory.stats', async (opts: any) => {
+      const { params, respond } = opts;
+      const agentId = params?.agentId || 'default';
+      try {
+        const result = plugin.getStats(agentId);
+        respond(true, result);
+      } catch (err: any) {
+        respond(false, undefined, { message: err?.message ?? String(err) });
+      }
     });
 
-    api.registerGatewayMethod('algo-memory.search', async (params: any, ctx: any) => {
-      const agentId = params?.agentId || ctx?.agentId || 'default';
+    api.registerGatewayMethod('algo-memory.search', async (opts: any) => {
+      const { params, respond } = opts;
+      const agentId = params?.agentId || 'default';
       const query = params?.query || '';
-      return plugin.searchMemories(agentId, query);
+      try {
+        const result = plugin.searchMemories(agentId, query);
+        respond(true, result);
+      } catch (err: any) {
+        respond(false, undefined, { message: err?.message ?? String(err) });
+      }
     });
 
-    api.registerGatewayMethod('algo-memory.list', async (params: any, ctx: any) => {
-      const agentId = params?.agentId || ctx?.agentId || 'default';
-      return plugin.listMemories(agentId, params?.limit || 20, params?.offset || 0);
+    api.registerGatewayMethod('algo-memory.list', async (opts: any) => {
+      const { params, respond } = opts;
+      const agentId = params?.agentId || 'default';
+      try {
+        const result = plugin.listMemories(agentId, params?.limit || 20, params?.offset || 0);
+        respond(true, result);
+      } catch (err: any) {
+        respond(false, undefined, { message: err?.message ?? String(err) });
+      }
     });
 
-    api.registerGatewayMethod('algo-memory.health', async (_params: any, _ctx: any) => {
-      return plugin.getHealth();
+    api.registerGatewayMethod('algo-memory.health', async (opts: any) => {
+      const { respond } = opts;
+      try {
+        const result = plugin.getHealth();
+        respond(true, result);
+      } catch (err: any) {
+        respond(false, undefined, { message: err?.message ?? String(err) });
+      }
     });
 
-    api.registerGatewayMethod('algo-memory.metrics', async (_params: any, _ctx: any) => {
-      return plugin.getMetrics();
+    api.registerGatewayMethod('algo-memory.metrics', async (opts: any) => {
+      const { respond } = opts;
+      try {
+        const result = plugin.getMetrics();
+        respond(true, result);
+      } catch (err: any) {
+        respond(false, undefined, { message: err?.message ?? String(err) });
+      }
     });
 
     // === Hooks ===
@@ -1108,6 +1140,13 @@ export default {
       api.on('before_prompt_build', async (event: any, ctx: any) => {
         try {
           const agentId = ctx?.agentId || 'default';
+
+          // Skip recall when triggered by memory (recursive) or heartbeat/cron — only respond to user turns
+          const trigger = ctx?.trigger;
+          if (trigger === 'memory' || trigger === 'heartbeat' || trigger === 'cron') {
+            return;
+          }
+
           const messages = event?.messages || [];
           // Handle Feishu array-format messages like [{type, text}] in addition to plain strings
           const userMessages = (messages as any[])
@@ -1270,6 +1309,50 @@ export default {
         } catch (err: any) {
           log.error('[algo-memory] after_tool_call 错误:', err?.message ?? err);
         }
+      })();
+    });
+
+    // tool_result_persist: fires before tool result is written to transcript (earlier than after_tool_call).
+    // event.message is an AgentMessage (structured), not a raw string — much more reliable for ID extraction.
+    api.on('tool_result_persist', async (event: any, ctx: any) => {
+      const agentId = ctx?.agentId || ctx?.sessionKey || 'default';
+      if (!plugin.isActive()) return;
+      if (ctx?.toolName !== 'algo_memory_search') return;
+
+      // Fire-and-forget: do not await
+      (async () => {
+        try {
+          // event.message is an AgentMessage — content is structured JSON or text
+          const content = event?.message?.content;
+          if (!content) return;
+
+          const citedIds: string[] = [];
+          try {
+            // Try parsing as JSON first (structured format)
+            const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+            const items = Array.isArray(parsed)
+              ? parsed
+              : (parsed?.memories && Array.isArray(parsed.memories)) ? parsed.memories : [];
+            for (const item of items) {
+              if (item?.id && typeof item.id === 'string' && item.id.startsWith('mem_')) {
+                citedIds.push(item.id);
+              }
+            }
+          } catch {
+            // Non-JSON text fallback
+            const text = typeof content === 'string' ? content : String(content);
+            const pattern = /"id"\s*:\s*"([^"]+)"/g;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+              const id = match[1];
+              if (id.startsWith('mem_') && !citedIds.includes(id)) citedIds.push(id);
+            }
+          }
+
+          if (citedIds.length > 0) {
+            plugin.reinforceCitedMemories(agentId, citedIds).catch(() => {});
+          }
+        } catch {}
       })();
     });
 
