@@ -105,7 +105,7 @@ export function isNoise(content: string, config: NoiseFilterConfig): boolean {
   if (config.skipPatterns && config.skipPatterns.length > 0) {
     for (const pattern of config.skipPatterns) {
       try {
-        if (new RegExp(pattern).test(trimmed)) return true;
+        if (new RegExp(pattern).test(lower)) return true;
       } catch {
         // 无效正则，跳过
       }
