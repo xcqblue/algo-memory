@@ -156,3 +156,70 @@ working:    everything in between
   }
 }
 ```
+
+---
+
+## v3.3.0 新增配置项
+
+### coreCleanupDays - 核心记忆保护
+
+```json
+{
+  "coreCleanupDays": 365
+}
+```
+
+**说明：**
+- 核心记忆专属保留天数，不受 `cleanupDays` 限制
+- 超过此天数未访问的 core 记忆会被**降级为 peripheral**，然后在下次 cleanup 时被删除
+- 设为 `0` 表示不启用核心保护（与旧版本行为一致）
+
+**使用场景：**
+- 希望重要记忆保留更长时间（比如 1 年）
+- 核心记忆不会因为长期不访问就被删掉，而是先降级保护
+
+---
+
+### adaptiveCapture - 动态捕获
+
+```json
+{
+  "adaptiveCapture": {
+    "enabled": true,
+    "maxPerTurn": 10,
+    "burstThreshold": 5,
+    "burstWindowMs": 60000
+  }
+}
+```
+
+**说明：**
+- `enabled`：是否启用动态捕获调整
+- `maxPerTurn`：密集对话时每轮最多捕获条数上限
+- `burstThreshold`：触发密集模式的连续消息数阈值
+- `burstWindowMs`：密集模式持续时间（毫秒）
+
+**使用场景：**
+- 密集对话时自动提高捕获上限，避免重要记忆被截断
+- 普通对话维持较低的 `capturePerTurn` 限制，节省存储
+
+---
+
+### 增强的 skipPatterns（v3.3.0 新增过滤规则）
+
+以下系统消息前缀会被自动过滤，不会成为记忆：
+
+| 模式 | 说明 |
+|------|------|
+| `[Subagent Context]` | 子代理上下文信息 |
+| `[Inter-session message]` | 跨会话消息 |
+| `[Internal task completion event]` | 内部任务完成事件 |
+| `OpenClaw runtime context` | OpenClaw 运行时上下文 |
+| `[Runtime generated]` | 运行时生成内容 |
+| `sourceSession=` / `sourceChannel=` / `sourceTool=` | 元数据前缀 |
+| `[[reply_to_current]]` / `[[reply_to:...]]` | 回复标签 |
+| `HEARTBEAT_OK` / `NO_REPLY` | 心跳/静默回复标记 |
+| `session_key=` / `Runtime:` / `Dashboard\|` 等 | 状态输出格式 |
+
+这些内容不会进入记忆库，避免系统噪音污染。
+

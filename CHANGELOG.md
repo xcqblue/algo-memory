@@ -670,3 +670,36 @@ CREATE UNIQUE INDEX idx_content_hash ON memories(content_hash) WHERE content_has
 - MiniMax / DeepSeek / Kimi / 阿里百炼 LLM 支持
 - 会话续接（session_snapshots 表）
 - 14 个 MCP 工具
+
+---
+
+## v3.3.0 (2026-03-26)
+
+### 🆕 新功能
+
+**P0: 系统消息过滤增强**
+- 新增 20+ 种 OpenClaw 内部上下文过滤规则
+- 过滤 `[Subagent Context]`、`[Inter-session message]`、`OpenClaw runtime context` 等系统消息
+- 防止运行时元数据被误记为用户记忆
+
+**P2: 核心记忆长期保护（coreCleanupDays）**
+- 新增 `coreCleanupDays` 配置项
+- 核心记忆专属保留天数（默认 365 天）
+- 超过期限未访问的 core 记忆会被降级为 peripheral，最终删除
+- 保护重要记忆不会被意外清理
+
+**P3: 动态捕获（adaptiveCapture）**
+- 新增 `adaptiveCapture` 配置项
+- 密集对话时自动提高每轮最大捕获数（最高 10 条）
+- 普通对话维持较低的 `capturePerTurn` 限制
+- 避免密集对话时重要记忆被截断
+
+### 🐛 Bug 修复
+- 修复 `getStats` 按 agentId 查询返回 0 时未返回总体统计的问题
+
+### ⚙️ 配置变更
+- `openClawMemoryMode` 默认值从 `auto` 改为 `standalone`
+- `noiseFilter.skipPatterns` 新增 20+ 系统消息过滤规则
+- 新增 `coreCleanupDays: 365`（核心记忆保留一年）
+- 新增 `adaptiveCapture`（动态捕获配置）
+

@@ -46,6 +46,8 @@ export interface Config {
   maxResults: number;
   maxInjectTokens: number;
   cleanupDays: number;
+  /** v3.3.0 新增：核心记忆专属保留天数，不受 cleanupDays 限制（永久保留直到手动删除） */
+  coreCleanupDays: number;
   metricsEnabled: boolean; // enable llm_output hook to record LLM usage stats
  // how many days of session snapshots to keep
   language: string;
@@ -64,6 +66,8 @@ export interface Config {
   tier: TierConfig;
   scopes: ScopesConfig;
   capturePerTurn: number;
+  /** v3.3.0 新增：动态捕获配置 */
+  adaptiveCapture: AdaptiveCaptureConfig;
   llm: LLMConfig;
   threshold: ThresholdConfig;
   feedback: FeedbackConfig;
@@ -125,6 +129,17 @@ export interface SessionSnapshot {
   message_count: number;
   total_tokens: number;
   created_at: number;
+}
+
+export interface AdaptiveCaptureConfig {
+  /** 是否启用动态捕获调整 */
+  enabled: boolean;
+  /** 密集对话时每轮最多捕获条数上限 */
+  maxPerTurn: number;
+  /** 触发密集模式的连续消息数阈值 */
+  burstThreshold: number;
+  /** 密集模式持续时间（毫秒），超时后恢复普通模式 */
+  burstWindowMs: number;
 }
 
 export interface NoiseFilterConfig {
@@ -275,6 +290,7 @@ export const DEFAULT_CONFIG: Config = {
   maxResults: 5,
   maxInjectTokens: 1500,
   cleanupDays: 180,
+  coreCleanupDays: 365,  // 核心记忆保留一年
   metricsEnabled: true,  // enable llm_output hook to record LLM usage stats
 
   language: 'auto',
@@ -292,7 +308,28 @@ export const DEFAULT_CONFIG: Config = {
       '^```json',
       '^```json\\{',
       '^{.*"message_id"',
-      '^{.*"sender_id"'
+      '^{.*"sender_id"',
+      // v3.3.0 新增：过滤 OpenClaw 内部运行时上下文和系统消息
+      '^\\[Subagent Context\\]',
+      '^\\[Inter-session message\\]',
+      '^\\[Internal task completion event\\]',
+      '^OpenClaw runtime context',
+      '^\\[Runtime\\s+generated\\]',
+      '^sourceSession=',
+      '^sourceChannel=',
+      '^sourceTool=',
+      '^\\[Memory\\]',
+      '^\\[Heartbeat\\]',
+      '^HEARTBEAT_OK',
+      '^NO_REPLY',
+      '^\\[\\[reply_to_current\\]\\]',
+      '^\\[\\[reply_to:',
+      '^\\[\\[reply_to\\s+\\]\\]',
+      '^session_key=',
+      '^Runtime:',
+      '^Dashboard\\s+\\|',
+      '^Gateway\\s+\\|',
+      '^Overview\\s+┌',
     ],
     skipSystemSource: true
   },
@@ -316,6 +353,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   scopes: { enabled: true, defaultScope: 'agent', visibleAgents: [] },
   capturePerTurn: 3,
+  adaptiveCapture: { enabled: true, maxPerTurn: 10, burstThreshold: 5, burstWindowMs: 60000 },
   llm: { enabled: false, provider: 'auto', apiKey: '', model: '', baseURL: '', batchWindowMs: 200 },
   threshold: { useLlmForCore: false, useLlmForExtract: false, useLlmForDedup: false, minConfidence: 0.8, lengthForCore: 100, lengthForExtract: 200, dedupUncertaintyMin: 0.5, dedupUncertaintyMax: 0.98 },
   feedback: { enabled: true, maxMemories: 5, matchThreshold: 0.6 },

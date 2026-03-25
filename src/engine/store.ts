@@ -671,7 +671,13 @@ export async function store(
   });
 
   let captured = 0;
-  const maxCapture = config.capturePerTurn || 3;
+  // v3.3.0: 动态捕获限制
+  // adaptiveCapture.enabled 时，根据对话密度动态调整每轮最大捕获数
+  // 密集对话（短时间内多轮）使用 burst 模式的上限，避免重要记忆被截断
+  const isAdaptive = config.adaptiveCapture?.enabled === true;
+  const maxCapture = isAdaptive
+    ? config.adaptiveCapture!.maxPerTurn  // burst 模式下使用更高上限
+    : (config.capturePerTurn || 3);
   const storeStartTime = Date.now();
 
   // 系统消息过滤器（需要提前定义，在 scoredMessages 过滤中使用）

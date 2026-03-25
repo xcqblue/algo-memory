@@ -2,7 +2,7 @@
 
 基于 SQLite 的结构化长期记忆插件 for OpenClaw — 三层分级、FTS5 全文检索、LLaM 辅助捕获、完整 OpenClaw 生命周期接入。
 
-**版本：** v3.2.1 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
+**版本：** v3.3.0 | **OpenClaw:** v2026.3.24+ | **Node:** ≥20
 
 ---
 
@@ -71,6 +71,23 @@ algo-memory 已接入 **15 个 OpenClaw Plugin Hook**，覆盖完整的存储/�
 **ContextEngine 接口**：`registerContextEngine('algo-memory', ...)` — 实现 `assemble()` / `compact()` / `ingest()` 方法，深度接入 OpenClaw 上下文管理生命周期。
 
 > **v3.1.0 OpenClaw 兼容性**：当 OpenClaw built-in memory 启用时（memoryFlush / memory-lancedb / memory-core），algo-memory 会自动切换到 `retrieval-only` 模式，关闭 hooks 存储（避免与 memoryFlush 重复），通过 ContextEngine assemble() 提供 FTS5 检索增强。详见 [CONFIG.md](CONFIG.md) 的 `openClawMemoryMode` 配置。
+
+### v3.3.0 新特性
+
+**🛡️ 系统消息过滤增强**
+- 新增 20+ 种 OpenClaw 内部上下文过滤规则
+- 过滤 `[Subagent Context]`、`[Inter-session message]`、`OpenClaw runtime context` 等
+- 防止运行时元数据被误记为用户记忆
+
+**📅 核心记忆长期保护（coreCleanupDays）**
+- 核心记忆专属保留天数（默认 365 天）
+- 超过期限未访问的 core 记忆会被降级为 peripheral
+- 保护重要记忆不会被意外清理
+
+**⚡ 动态捕获（adaptiveCapture）**
+- 密集对话时自动提高每轮最大捕获数（最高 10 条）
+- 普通对话维持较低的 `capturePerTurn` 限制
+- 避免密集对话时重要记忆被截断
 
 ---
 

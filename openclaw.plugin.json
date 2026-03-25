@@ -296,7 +296,8 @@
               "^\\`\\`\\`json\\{",
               "^{.*\"message_id\"",
               "^{.*\"sender_id\""
-            ]
+            ],
+            "description": "正则表达式数组，符合任一模式的内容直接跳过（早于 importance 评分）。v3.3.0 新增了对 OpenClaw 内部上下文和系统消息的过滤。"
           },
           "skipSystemSource": {
             "type": "boolean",
@@ -381,6 +382,33 @@
             "default": true
           }
         }
+      },
+      "coreCleanupDays": {
+        "type": "number",
+        "default": 365,
+        "description": "核心记忆专属保留天数（默认365天），不受 cleanupDays 限制。超过此天数未访问的 core 记忆会被降级为 peripheral。设为0表示不启用核心保护。"
+      },
+      "adaptiveCapture": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxPerTurn": {
+            "type": "number",
+            "default": 10
+          },
+          "burstThreshold": {
+            "type": "number",
+            "default": 5
+          },
+          "burstWindowMs": {
+            "type": "number",
+            "default": 60000
+          }
+        },
+        "description": "动态捕获配置：密集对话时自动提高每轮最大捕获数上限。"
       }
     }
   },

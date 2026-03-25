@@ -1,5 +1,5 @@
 /**
- * algo-memory v3.2.0
+ * algo-memory v3.3.0
  * 纯算法长期记忆插件 - 无需 LLM 也能工作
  * 支持多语言: zh/en/ja/ko/es/fr/de
  * 支持 FTS5 全文搜索
@@ -103,6 +103,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     maxResults: scalar('maxResults', DEFAULT_CONFIG.maxResults),
     maxInjectTokens: scalar('maxInjectTokens', DEFAULT_CONFIG.maxInjectTokens),
     cleanupDays: scalar('cleanupDays', DEFAULT_CONFIG.cleanupDays),
+    coreCleanupDays: scalar('coreCleanupDays', DEFAULT_CONFIG.coreCleanupDays),
     language: scalar('language', DEFAULT_CONFIG.language),
     coreKeywords: scalar('coreKeywords', DEFAULT_CONFIG.coreKeywords),
     recencyDecay: scalar('recencyDecay', DEFAULT_CONFIG.recencyDecay),
@@ -110,6 +111,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
     smartDedup: scalar('smartDedup', DEFAULT_CONFIG.smartDedup),
     dedupThreshold: scalar('dedupThreshold', DEFAULT_CONFIG.dedupThreshold),
     capturePerTurn: scalar('capturePerTurn', DEFAULT_CONFIG.capturePerTurn),
+    adaptiveCapture: { ...DEFAULT_CONFIG.adaptiveCapture, ...(userConfig.adaptiveCapture || {}) },
     feedback: { ...DEFAULT_CONFIG.feedback, ...userConfig.feedback },
     mcp: { ...DEFAULT_CONFIG.mcp, ...userConfig.mcp },
     batchWrite: { ...DEFAULT_CONFIG.batchWrite, ...userConfig.batchWrite },
@@ -120,7 +122,7 @@ function mergeConfig(userConfig: Partial<Config>): Config {
 // ============= MemoryPlugin =============
 class MemoryPlugin {
   id = 'algo-memory';
-  version = '3.2.0';
+  version = '3.3.0';
   private db: Database.Database | null = null;
   private dbPath: string = '';
   private cache: LRUCache<string, any>;
@@ -788,10 +790,29 @@ confidence 是 0-1 的置信度。
     if (!this.db) return { deleted: 0, bytesFreed: 0 };
 
     const cutoff = Date.now() - this.config.cleanupDays * 24 * 60 * 60 * 1000;
+    const coreCutoff = this.config.coreCleanupDays > 0
+      ? Date.now() - this.config.coreCleanupDays * 24 * 60 * 60 * 1000
+      : 0;
     const BATCH = 5000;
     let totalDeleted = 0;
     let totalBytes = 0;
     let deleted = 0;
+
+    // v3.3.0: 核心记忆长期不访问保护机制
+    // 如果 coreCleanupDays > 0，将长期未访问的 core 记忆降级为 peripheral
+    if (coreCutoff > 0) {
+      try {
+        const demoted = run(this._db(),
+          `UPDATE memories SET tier = 'peripheral', last_tier_update = ? WHERE tier = 'core' AND last_accessed < ?`,
+          [Date.now(), coreCutoff]
+        );
+        if (demoted > 0) {
+          this.log.info(`[algo-memory] 核心记忆保护：${demoted} 条 core 记忆因 ${this.config.coreCleanupDays} 天未访问被降级为 peripheral`);
+        }
+      } catch (err) {
+        this.log.error('[algo-memory] core 记忆降级失败:', err);
+      }
+    }
 
     do {
       let rows: any[] = [];
