@@ -507,11 +507,24 @@ export function stopBufferCleanup(): void {
 /**
  * Score a message by how many core keywords it contains.
  * Higher score = more likely to be worth storing.
+ * Fallback: if no core keyword matched but content is meaningful (>=10 Chinese chars
+ * or >=15 Latin chars), give a base score of 1 so it passes to the next filter (isNoise).
  */
 function messagePriority(content: string, coreKeywords: string[]): number {
   if (!coreKeywords.length) return 0;
   const lower = content.toLowerCase();
-  return coreKeywords.filter(kw => lower.includes(kw.toLowerCase())).length;
+  const kwScore = coreKeywords.filter(kw => lower.includes(kw.toLowerCase())).length;
+  if (kwScore > 0) return kwScore;
+
+  // No core keyword matched — give a保底 score if content is meaningful enough
+  // to survive the next filter (isNoise). This ensures substantive messages
+  // aren't killed before isNoise even gets a chance to evaluate them.
+  const chineseChars = (content.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latinChars = (content.match(/[a-zA-Z]/g) || []).length;
+  const meaningfulLen = chineseChars * 1 + latinChars * 0.4; // weighted length
+
+  if (meaningfulLen >= 10) return 1; // 保底：让有意义的内容进入 isNoise 判断
+  return 0;
 }
 
 // Raw row types returned by queryAll
